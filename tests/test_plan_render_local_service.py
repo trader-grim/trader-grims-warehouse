@@ -4,13 +4,14 @@ import json
 import os
 import stat
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from tgw import doctor_cli
+from tgw import doctor_cli, local_plan_cli
 
 ROOT = Path(__file__).parents[1]
 
@@ -47,6 +48,63 @@ def test_doctor_exposes_separately_named_plan_render_repair() -> None:
     parser = doctor_cli._parser()
     args = parser.parse_args(["repair", "plan-render-worker"])
     assert args.target == "plan-render-worker"
+
+
+def test_operator_launcher_routes_plan_to_local_tgw_lib() -> None:
+    launcher = (ROOT / "bin/tgw-operator").read_text(encoding="utf-8")
+    local = (ROOT / "bin/tgw-plan-local-operator").read_text(encoding="utf-8")
+
+    assert "plan)" in launcher
+    assert (
+        "exec /opt/TGW/tgw-lib/coding-runtime/current/bin/tgw-plan-local-operator"
+        in launcher
+    )
+    assert "tgw.local_plan_cli" in local
+    assert "/opt/TGW/tgw-lib/config/tgw-plan-render-local.json" in local
+    assert "tgw-prod" not in local
+    assert "production-client" not in local
+
+
+def test_local_plan_cli_render_uses_configured_renderer(monkeypatch, tmp_path, capsys) -> None:
+    config_path = tmp_path / "local.json"
+    config_path.write_text("{}\n", encoding="utf-8")
+    configured = {"standalone_plan_root": "/local/approved"}
+    monkeypatch.setattr(local_plan_cli, "load_operational_config", lambda path: configured)
+    monkeypatch.setattr(
+        local_plan_cli,
+        "render_taskboard",
+        lambda config: {
+            "ok": True,
+            "path": "/local/TGW-Taskboard.md",
+            "open": 1,
+            "done_week": 2,
+            "plan_identity": {"plan_commit": "a" * 40, "solution_hash": "sha256:test"},
+        } if config is configured else pytest.fail("wrong local config"),
+    )
+    monkeypatch.setattr(sys, "argv", ["tgw plan", "--config", str(config_path), "render"])
+
+    assert local_plan_cli.main() == 0
+    assert "Taskboard rendered: /local/TGW-Taskboard.md" in capsys.readouterr().out
+
+
+def test_plan_render_process_runtime_detects_stale_and_current_worker(tmp_path: Path) -> None:
+    selected = tmp_path / "releases" / ("a" * 40)
+    previous = tmp_path / "releases" / ("b" * 40)
+    selected.mkdir(parents=True)
+    previous.mkdir(parents=True)
+    proc = tmp_path / "proc"
+    (proc / "2374584").mkdir(parents=True)
+    (proc / "2374584" / "cwd").symlink_to(previous)
+    state = {"MainPID": "2374584"}
+
+    stale = doctor_cli._plan_render_process_runtime_identity(state, selected, proc_root=proc)
+    (proc / "2374584" / "cwd").unlink()
+    (proc / "2374584" / "cwd").symlink_to(selected)
+    current = doctor_cli._plan_render_process_runtime_identity(state, selected, proc_root=proc)
+
+    assert stale["exact"] is False
+    assert stale["reason"] == "loaded process predates selected immutable runtime"
+    assert current["exact"] is True
 
 
 def test_doctor_reports_stopped_plan_render_service(tmp_path: Path, monkeypatch) -> None:
@@ -126,6 +184,11 @@ def _plan_render_check_fixture(
         doctor_cli,
         "_unit_definition",
         lambda *_args: {"exact": True, "reasons": []},
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_plan_render_process_runtime_identity",
+        lambda *_args, **_kwargs: {"exact": True},
     )
     return paths, release
 
@@ -387,3 +450,62 @@ def test_plan_render_repair_receipts_storage_before_service(
     assert events.index("run:systemctl daemon-reload") < storage_started_index
     assert storage_started_index < storage_receipt_index
     assert storage_receipt_index < min(service_indexes)
+
+
+def test_plan_render_repair_restarts_only_stale_worker_and_then_is_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, release = _plan_render_check_fixture(tmp_path, monkeypatch)
+    (release / "systemd").mkdir()
+    unit_source = release / "systemd" / doctor_cli._PLAN_RENDER_UNIT
+    unit_source.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
+    systemd_root = tmp_path / "systemd"
+    systemd_root.mkdir()
+    destination = systemd_root / doctor_cli._PLAN_RENDER_UNIT
+    destination.write_bytes(unit_source.read_bytes())
+    destination.chmod(0o444)
+    paths = replace(
+        paths,
+        systemd_install_root=systemd_root,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+    commands: list[list[str]] = []
+    runtime_observations = iter([
+        {"exact": False, "reason": "loaded process predates selected immutable runtime"},
+        {"exact": True},
+    ])
+    checks = iter([
+        {"state": "FAIL", "evidence": {"process_runtime": {"exact": False}}},
+        {"state": "PASS", "evidence": {"process_runtime": {"exact": True}}},
+        {"state": "PASS", "evidence": {"process_runtime": {"exact": True}}},
+        {"state": "PASS", "evidence": {"process_runtime": {"exact": True}}},
+    ])
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_verify_release_tree", lambda *_args: {})
+    monkeypatch.setattr(doctor_cli, "check_plan_render_worker", lambda _paths: next(checks))
+    monkeypatch.setattr(doctor_cli, "_repair_plan_render_storage", lambda _paths: False)
+    monkeypatch.setattr(doctor_cli, "_receipt", lambda *_args: "receipt.json")
+    monkeypatch.setattr(
+        doctor_cli,
+        "_plan_render_process_runtime_identity",
+        lambda *_args, **_kwargs: next(runtime_observations),
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_run",
+        lambda command, **_kwargs: commands.append(command)
+        or subprocess.CompletedProcess(command, 0, "", ""),
+    )
+
+    repaired = doctor_cli.repair_plan_render_worker(paths)
+    converged = doctor_cli.repair_plan_render_worker(paths)
+
+    assert repaired["changed"] is True
+    assert repaired["service_action"] == "restart"
+    assert converged["changed"] is False
+    assert converged["service_action"] is None
+    assert commands == [
+        ["systemctl", "enable", doctor_cli._PLAN_RENDER_UNIT],
+        ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT],
+    ]

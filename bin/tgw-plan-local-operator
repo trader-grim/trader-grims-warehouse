@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+runtime=/opt/TGW/tgw-lib/coding-runtime/current
+python=/opt/TGW/.venvs/controller/bin/python3
+config=/opt/TGW/tgw-lib/config/tgw-plan-render-local.json
+
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH="$runtime/src"
+exec "$python" -m tgw.local_plan_cli --config "$config" "$@"

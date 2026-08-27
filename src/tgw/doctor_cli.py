@@ -1560,6 +1560,35 @@ def _unit_definition(paths: DoctorPaths, unit: str, state: Mapping[str, str]) ->
     }
 
 
+def _plan_render_process_runtime_identity(
+    state: Mapping[str, str], release: Path, *, proc_root: Path = Path("/proc")
+) -> dict[str, Any]:
+    """Compare the loaded worker's immutable cwd with the selected release."""
+    try:
+        pid = int(state.get("MainPID", "0"))
+    except ValueError:
+        pid = 0
+    evidence: dict[str, Any] = {
+        "pid": pid,
+        "selected_release": str(release.resolve(strict=True)),
+        "loaded_release": None,
+        "exact": False,
+    }
+    if pid <= 0:
+        evidence["reason"] = "active service has no MainPID"
+        return evidence
+    try:
+        loaded = (proc_root / str(pid) / "cwd").resolve(strict=True)
+    except OSError as exc:
+        evidence["reason"] = f"loaded process runtime is unreadable: {exc}"
+        return evidence
+    evidence["loaded_release"] = str(loaded)
+    evidence["exact"] = loaded == release.resolve(strict=True)
+    if not evidence["exact"]:
+        evidence["reason"] = "loaded process predates selected immutable runtime"
+    return evidence
+
+
 def check_units(paths: DoctorPaths) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair workers"
     try:
@@ -1697,6 +1726,7 @@ def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
         runtime = _runtime_selector_identity(paths, desired, release)
         state = _unit_state(_PLAN_RENDER_UNIT)
         definition = _unit_definition(paths, _PLAN_RENDER_UNIT, state)
+        process_runtime = _plan_render_process_runtime_identity(state, release)
         config = _json(paths.plan_render_config)
         storage = _plan_render_storage_identity(paths)
         source = release / "config/tgw-plan-render-local.json"
@@ -1707,8 +1737,18 @@ def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
             and paths.plan_render_config.is_file()
             and source.read_bytes() == paths.plan_render_config.read_bytes()
         )
-        healthy = state.get("LoadState") == "loaded" and state.get("ActiveState") == "active" and definition["exact"] and exact_config and runtime["exact"] and storage["exact"]
+        healthy = (
+            state.get("LoadState") == "loaded"
+            and state.get("ActiveState") == "active"
+            and definition["exact"]
+            and process_runtime["exact"]
+            and exact_config
+            and runtime["exact"]
+            and storage["exact"]
+        )
         reasons = list(definition["reasons"])
+        if not process_runtime["exact"]:
+            reasons.append(process_runtime.get("reason", "loaded process runtime differs"))
         if not exact_config:
             reasons.append("immutable config path or bytes differ")
         if not runtime["exact"]:
@@ -1724,6 +1764,7 @@ def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
             evidence={
                 "unit": state,
                 "definition": definition,
+                "process_runtime": process_runtime,
                 "config": config,
                 "runtime": runtime,
                 "storage": storage,
@@ -4727,6 +4768,7 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     if not _unit_definition(paths, _PLAN_RENDER_UNIT, state)["exact"]:
         raise DoctorError("installed plan_render unit is not exact")
     storage_before = _plan_render_storage_identity(paths)
+    process_runtime = _plan_render_process_runtime_identity(state, release)
     storage_started_receipt = _receipt(
         paths,
         "plan-render-storage-started",
@@ -4750,7 +4792,7 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
         )
         raise DoctorError(f"plan_render storage repair failed: {exc}; started receipt: {storage_started_receipt}; failure receipt: {storage_failure_receipt}") from exc
     action = None
-    if changed or state.get("ActiveState") != "active":
+    if changed or state.get("ActiveState") != "active" or not process_runtime["exact"]:
         for command in (["systemctl", "enable", _PLAN_RENDER_UNIT], ["systemctl", "restart" if state.get("ActiveState") == "active" else "start", _PLAN_RENDER_UNIT]):
             result = _run(command, timeout=30)
             if result.returncode:
