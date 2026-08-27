@@ -1429,9 +1429,11 @@ def test_coding_quiescence_reset_failure_retains_recovery_state(
     assert state_path.read_bytes() == doctor_cli._canonical(state) + b"\n"
     for path, mode in [(state_path, 0o400), (marker, 0o400), *((path, 0o444) for path in dropins.values())]:
         metadata = path.stat(follow_symlinks=False)
+        assert stat.S_ISREG(metadata.st_mode)
         assert stat.S_IMODE(metadata.st_mode) == mode
         assert metadata.st_uid == os.getuid()
         assert metadata.st_gid == os.getgid()
+        assert metadata.st_nlink == 1
     assert marker.read_bytes() == b"tgw doctor unix-git-access active\n"
     assert all(dropin.read_bytes() == dropin_value for dropin in dropins.values())
     assert doctor_cli._unexpected_quiescence_entries(
@@ -1444,6 +1446,8 @@ def test_coding_quiescence_reset_failure_retains_recovery_state(
         ["systemctl", "stop", *(unit for unit in units if unit != "tgw-coding-local-foreman.timer")],
         ["systemctl", "reset-failed", failed],
     ]
+    assert commands[-1] == ["systemctl", "reset-failed", failed]
+    assert commands.count(["systemctl", "daemon-reload"]) == 1
 
 
 def test_coding_quiescence_fails_closed_when_activating_one_shot_cleanup_cannot_stop(
@@ -3545,7 +3549,9 @@ def test_coding_quiescence_latches_undesired_stop_failure_before_all_starts(
         elif command[1] == "start":
             states.update({unit: "active" for unit in command[2:]})
         if command[1:] == ["stop", undesired]:
-            states[undesired] = "failed"
+            # The unit looks correctly stopped, so only the monotonic command-failure
+            # latch can prevent restoration from starting the worker again.
+            states[undesired] = "inactive"
             return subprocess.CompletedProcess(
                 command, 1, "", "injected undesired stop failure"
             )
@@ -3567,6 +3573,8 @@ def test_coding_quiescence_latches_undesired_stop_failure_before_all_starts(
             states[undesired] = "active"
 
     assert [command for command in commands if command[1] == "start"] == []
+    assert states["tgw-coding-local-foreman.timer"] == "inactive"
+    assert (paths.quiescence_root / doctor_cli._QUIESCENCE_STATE).is_file()
 
 
 def test_coding_quiescence_reset_uses_exact_pre_reset_proof(
@@ -3634,6 +3642,7 @@ def test_coding_quiescence_reset_uses_exact_pre_reset_proof(
 )
 def test_coding_quiescence_rejects_unknown_stale_initially_active_unit(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     unsafe_unit: str,
 ) -> None:
     runtime_root = tmp_path / "systemd"
@@ -3668,18 +3677,17 @@ def test_coding_quiescence_rejects_unknown_stale_initially_active_unit(
         uid=os.getuid(),
         gid=os.getgid(),
     )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("systemctl must not be called"),
+    )
 
     with pytest.raises(
         doctor_cli.DoctorError,
         match="pre-existing coding quiescence state fields are unsafe",
     ):
-        doctor_cli._read_quiescence_state(
-            state_path,
-            units=units,
-            marker=marker,
-            dropins=dropins,
-            uid=os.getuid(),
-            gid=os.getgid(),
-        )
+        with doctor_cli._coding_quiescence(paths):
+            pass
 
     assert state_path.exists()
