@@ -18,7 +18,7 @@ REJECTED_PARENT = "5f33481abf7f77cac54446345c22b230fbe1e06b"
 REJECTED_TREE = "b5c6e400392182ee343c94e94f89e86939b4113b"
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = ROOT / "agent-services/catalogs/pp-workflow-001-v1.json"
-CATALOG_SHA256 = "sha256:77a584f83285dfcb717d0268a2806b0a2a0d350f7fcbf59acaf1eee2cc715a36"
+CATALOG_SHA256 = "sha256:4e9be9d004ed5446d9b6cbea3eca7398e6899e111fedc74b4aa4b1907cd3f337"
 APPROVED_PLAN_ROOT = Path("/opt/TGW/library/approved") / PLAN_COMMIT
 
 

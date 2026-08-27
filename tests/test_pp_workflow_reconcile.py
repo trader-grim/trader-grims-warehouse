@@ -73,6 +73,13 @@ def test_exact_current_provider_catalog_reconciles_and_source_tamper_fails_close
         tmp_path):
     repository = CATALOG.parents[2].resolve()
     catalog = load_catalog()
+    assert workflow_reconcile.CATALOG_SHA256 == (
+        "sha256:4e9be9d004ed5446d9b6cbea3eca7398e6899e111fedc74b4aa4b1907cd3f337"
+    )
+    assert catalog["provider_evidence"]["current-coding-foreman"] == {"sources": [{
+        "path": "src/tgw/development/foreman.py",
+        "sha256": "sha256:e26996600d7355b4eb918c467356feecae57f7f1d74b8900d25ea21dcf308c95",
+    }]}
     declared_sources = [
         source
         for provider in catalog["provider_evidence"].values()
@@ -371,3 +378,40 @@ def test_cli_and_mcp_reconcile_share_configured_path(monkeypatch, tmp_path):
     payload = json.loads(coding_mcp_server.tgw_coding_reconcile())
     assert payload == expected
     assert calls == [tmp_path / "cli.json", tmp_path / "mcp.json"]
+
+
+def test_coding_reconcile_returns_read_only_native_luet_projection(monkeypatch, tmp_path):
+    repository = CATALOG.parents[2].resolve()
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True,
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True,
+    ).strip()
+    binding = {
+        "repository": repository,
+        "source_root": repository,
+        "selected_commit": commit,
+        "selected_tree": tree,
+        "runtime_mode": "source-worktree",
+    }
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {
+        "coding": {"repository_root": str(repository)},
+    })
+    monkeypatch.setattr(coding_cli.todo, "todo_list", lambda **_kwargs: [])
+    monkeypatch.setattr(coding_cli, "_pp_runtime_binding", lambda _config: binding)
+    monkeypatch.setattr(coding_cli, "reconcile_pp_workflow", lambda **kwargs: reconcile(
+        runtime_verifier=lambda **runtime: {"verified": True, **runtime}, **kwargs,
+    ))
+
+    result = coding_cli.reconcile(PP_REF, config_path=tmp_path / "cli.json")
+
+    assert not result["ok"]
+    assert result["resolver_binding"]["agreement"] == "verified"
+    assert result["solution"]["conformance_verified"]
+    assert result["dimensions"] == {
+        "reconciliation_complete": False,
+        "operation_success": True,
+        "materialization_attempted": False,
+    }
+    assert not any(result["effects"].values())
