@@ -553,7 +553,7 @@ def test_context_cold_probe_keeps_stdin_open_until_eof_sensitive_fourth_response
     launcher.write_text(
         "#!" + sys.executable + "\n"
         "import json,os,select,sys,time\n"
-        "if not os.environ.get('TGW_OLD_BATCH'): time.sleep(10.1)\n"
+        "if not os.environ.get('TGW_OLD_BATCH'): time.sleep(16.1)\n"
         "actor=" + repr(actor) + "\n"
         "for line in sys.stdin:\n"
         " r=json.loads(line); i=r.get('id'); m=r.get('method')\n"
@@ -613,9 +613,11 @@ def test_context_cold_probe_keeps_stdin_open_until_eof_sensitive_fourth_response
 
 def test_context_cold_probe_response_beyond_budget_is_terminated(tmp_path: Path) -> None:
     launcher = tmp_path / "tgw-context-mcp"
+    pid_file = tmp_path / "probe.pid"
     launcher.write_text(
         "#!" + sys.executable + "\n"
-        "import time\n"
+        "import os,time\n"
+        f"open({str(pid_file)!r},'w').write(str(os.getpid()))\n"
         f"time.sleep({doctor_cli._CONTEXT_COLD_PROBE_BUDGET_SECONDS + 1})\n",
         encoding="utf-8",
     )
@@ -623,13 +625,16 @@ def test_context_cold_probe_response_beyond_budget_is_terminated(tmp_path: Path)
 
     with pytest.raises(
         doctor_cli.DoctorError,
-        match=r"timed out after 15s and was terminated",
+        match=r"timed out after 30s and was terminated",
     ):
         doctor_cli._probe_context_stdio(
             launcher,
             pwd.getpwuid(os.geteuid()).pw_name,
             {},
         )
+    probe_pid = int(pid_file.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(probe_pid, 0)
 
 
 def test_context_cold_probe_reports_early_exit_and_reaps_child(tmp_path: Path) -> None:
