@@ -3655,6 +3655,10 @@ _QUIESCENCE_STATE = "unix-git-access.state.json"
 _QUIESCENCE_SCHEMA = "tgw-doctor-quiescence/v1"
 
 
+class _RetainQuiescenceError(DoctorError):
+    """An activation failure whose exact guards must remain for recovery."""
+
+
 def _secure_runtime_directory(path: Path, *, uid: int, gid: int) -> bool:
     """Create one trusted runtime directory without following a replaced parent."""
     parent = path.parent
@@ -3814,6 +3818,68 @@ def _assert_quiescence_units_safe(states: Mapping[str, Mapping[str, str]]) -> No
         raise DoctorError("local coding one-shot is active; retry after it exits: " + ", ".join(transient_active))
 
 
+def _prove_guarded_stopped_units(
+    units: Sequence[str],
+    *,
+    marker: Path,
+    dropins: Mapping[str, Path],
+    dropin_value: bytes,
+    uid: int,
+    gid: int,
+    allow_failed: bool,
+) -> dict[str, dict[str, Any]]:
+    """Prove the complete stopped set and exact guards before latch mutation."""
+    marker_value = b"tgw doctor unix-git-access active\n"
+    states = {unit: _unit_state(unit) for unit in units}
+    stopped_states = {"inactive", "failed"} if allow_failed else {"inactive"}
+    unsettled = [
+        unit
+        for unit, state in states.items()
+        if state.get("ActiveState") not in stopped_states
+        or str(dropins[unit]) not in state.get("DropInPaths", "").split()
+        or not _quiescence_file_exact(
+            dropins[unit], dropin_value, mode=0o444, uid=uid, gid=gid
+        )
+    ]
+    if not _quiescence_file_exact(marker, marker_value, mode=0o400, uid=uid, gid=gid):
+        unsettled.append("quiescence-marker")
+    if unsettled:
+        raise DoctorError("local coding units did not reach guarded/stopped state: " + ", ".join(unsettled))
+    return states
+
+
+def _reset_proven_failed_units(states: Mapping[str, Mapping[str, Any]]) -> None:
+    failed = [unit for unit, state in states.items() if state.get("ActiveState") == "failed"]
+    if not failed:
+        return
+    reset = _run(["systemctl", "reset-failed", *failed], timeout=30)
+    if reset.returncode:
+        raise _RetainQuiescenceError(
+            reset.stderr.strip() or "cannot reset failed local coding units"
+        )
+
+
+def _restoration_barrier_wrong(
+    units: Sequence[str],
+    initially_active: Sequence[str],
+    *,
+    timer: str,
+    foreman: str,
+) -> list[str]:
+    """Read and prove timer inactivity plus the complete non-timer layout."""
+    states = {unit: _unit_state(unit) for unit in units}
+    return [
+        unit
+        for unit in units
+        if states[unit].get("ActiveState")
+        != (
+            "inactive"
+            if unit in {timer, foreman}
+            else ("active" if unit in initially_active else "inactive")
+        )
+    ]
+
+
 def _new_quiescence_state(
     units: Sequence[str],
     initially_active: Sequence[str],
@@ -3893,7 +3959,11 @@ def _read_quiescence_state(
         not isinstance(active, list)
         or any(not isinstance(unit, str) for unit in active)
         or len(active) != len(set(active))
-        or any(unit not in _ACTIVE_CODING_UNITS for unit in active)
+        or any(
+            unit not in _ACTIVE_CODING_UNITS
+            and unit != "tgw-coding-local-foreman.service"
+            for unit in active
+        )
         or not isinstance(pid, int)
         or pid <= 0
         or not isinstance(start_ticks, str)
@@ -3950,32 +4020,21 @@ def _activate_quiescence(
     if stopped.returncode:
         raise DoctorError(stopped.stderr.strip() or "cannot stop local coding Foreman timer")
     timer_state = _unit_state(timer)
-    timer_dropin = dropins[timer]
-    if (
-        timer_state.get("ActiveState") != "inactive"
-        or str(timer_dropin) not in timer_state.get("DropInPaths", "").split()
-        or not _quiescence_file_exact(
-            timer_dropin, dropin_value, mode=0o444, uid=uid, gid=gid
-        )
-        or not _quiescence_file_exact(
-            marker, marker_value, mode=0o400, uid=uid, gid=gid
-        )
-    ):
+    if timer_state.get("ActiveState") != "inactive":
         raise DoctorError("local coding Foreman timer did not reach guarded/inactive state")
     remaining = [unit for unit in units if unit != timer]
     stopped = _run(["systemctl", "stop", *remaining], timeout=30)
     if stopped.returncode:
         raise DoctorError(stopped.stderr.strip() or "cannot stop remaining local coding units")
-    unsettled = []
-    for unit, dropin in dropins.items():
-        state = _unit_state(unit)
-        loaded_dropins = state.get("DropInPaths", "").split()
-        if state.get("ActiveState") != "inactive" or str(dropin) not in loaded_dropins or not _quiescence_file_exact(dropin, dropin_value, mode=0o444, uid=uid, gid=gid):
-            unsettled.append(unit)
-    if not _quiescence_file_exact(marker, marker_value, mode=0o400, uid=uid, gid=gid):
-        unsettled.append("quiescence-marker")
-    if unsettled:
-        raise DoctorError("local coding units did not reach guarded/inactive state: " + ", ".join(unsettled))
+    stopped_states = _prove_guarded_stopped_units(
+        units, marker=marker, dropins=dropins, dropin_value=dropin_value,
+        uid=uid, gid=gid, allow_failed=True,
+    )
+    _reset_proven_failed_units(stopped_states)
+    _prove_guarded_stopped_units(
+        units, marker=marker, dropins=dropins, dropin_value=dropin_value,
+        uid=uid, gid=gid, allow_failed=False,
+    )
 
 
 def _release_quiescence(
@@ -4010,6 +4069,10 @@ def _release_quiescence(
         errors.append(reloaded.stderr.strip() or "cannot reload systemd after local coding quiescence")
 
     marker_absent = not os.path.lexists(marker)
+    worker_restoration_failed = False
+    pre_foreman_barrier_failed = False
+    foreman_restoration_failed = False
+    post_foreman_barrier_failed = False
     if marker_absent:
         undesired = [
             unit
@@ -4020,11 +4083,53 @@ def _release_quiescence(
         if undesired:
             stopped = _run(["systemctl", "stop", *undesired], timeout=30)
             if stopped.returncode:
+                worker_restoration_failed = True
                 errors.append(stopped.stderr.strip() or "cannot restore initially inactive local coding units")
-        if initially_active:
-            started = _run(["systemctl", "start", *initially_active], timeout=30)
+        timer = "tgw-coding-local-foreman.timer"
+        foreman = "tgw-coding-local-foreman.service"
+        active_non_timer = [unit for unit in initially_active if unit not in {timer, foreman}]
+        if active_non_timer and not worker_restoration_failed:
+            started = _run(["systemctl", "start", *active_non_timer], timeout=30)
             if started.returncode:
+                worker_restoration_failed = True
                 errors.append(started.stderr.strip() or "cannot restore initially active local coding units")
+        pre_foreman_wrong = _restoration_barrier_wrong(
+            units, initially_active, timer=timer, foreman=foreman
+        )
+        if pre_foreman_wrong:
+            pre_foreman_barrier_failed = True
+            errors.append(
+                "local coding units did not reach the pre-Foreman restoration barrier: "
+                + ", ".join(pre_foreman_wrong)
+            )
+        if (
+            foreman in initially_active
+            and not worker_restoration_failed
+            and not pre_foreman_barrier_failed
+        ):
+            started = _run(["systemctl", "start", foreman], timeout=30)
+            if started.returncode:
+                foreman_restoration_failed = True
+                errors.append(started.stderr.strip() or "cannot restore interrupted local coding Foreman run")
+        post_foreman_wrong = _restoration_barrier_wrong(
+            units, initially_active, timer=timer, foreman=foreman
+        )
+        if post_foreman_wrong:
+            post_foreman_barrier_failed = True
+            errors.append(
+                "local coding units did not reach the post-Foreman restoration barrier: "
+                + ", ".join(post_foreman_wrong)
+            )
+        if (
+            timer in initially_active
+            and not worker_restoration_failed
+            and not pre_foreman_barrier_failed
+            and not foreman_restoration_failed
+            and not post_foreman_barrier_failed
+        ):
+            started = _run(["systemctl", "start", timer], timeout=30)
+            if started.returncode:
+                errors.append(started.stderr.strip() or "cannot restore local coding Foreman timer")
     else:
         errors.append("quiescence marker remains; refusing to start local coding units")
 
@@ -4032,7 +4137,7 @@ def _release_quiescence(
         unit
         for unit in units
         if _unit_state(unit).get("ActiveState")
-        != ("active" if unit in initially_active else "inactive")
+        != ("active" if unit in initially_active and unit in _ACTIVE_CODING_UNITS else "inactive")
     ]
     if wrong:
         errors.append("local coding units did not return to their initial state: " + ", ".join(wrong))
@@ -4121,6 +4226,8 @@ def _recover_stale_quiescence(paths: DoctorPaths, *, units: Sequence[str], uid: 
             gid=gid,
         )
     except Exception as activation_error:
+        if isinstance(activation_error, _RetainQuiescenceError):
+            raise
         try:
             _release_quiescence(
                 paths,
@@ -4182,7 +4289,11 @@ def _coding_quiescence(paths: DoctorPaths):
     recovered = _recover_stale_quiescence(paths, units=units, uid=uid, gid=gid)
     initial_states = {unit: _unit_state(unit) for unit in units}
     _assert_quiescence_units_safe(initial_states)
-    initially_active = [unit for unit, state in initial_states.items() if unit in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active"]
+    initially_active = [
+        unit for unit, state in initial_states.items()
+        if (unit in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active")
+        or (unit == "tgw-coding-local-foreman.service" and state.get("ActiveState") == "activating")
+    ]
     _secure_runtime_directory(paths.quiescence_root, uid=uid, gid=gid)
     state, state_raw = _new_quiescence_state(units, initially_active, state_path, marker, dropins)
     _create_quiescence_file(state_path, state_raw, mode=0o400, uid=uid, gid=gid)
@@ -4192,6 +4303,7 @@ def _coding_quiescence(paths: DoctorPaths):
         "boot_id": state["boot_id"],
         "initially_active": list(initially_active),
     }
+    activation_error: Exception | None = None
     try:
         _activate_quiescence(
             paths,
@@ -4203,19 +4315,30 @@ def _coding_quiescence(paths: DoctorPaths):
             gid=gid,
         )
         yield evidence
+    except Exception as exc:
+        activation_error = exc
+        raise
     finally:
-        evidence["release"] = _release_quiescence(
-            paths,
-            units=units,
-            initially_active=initially_active,
-            state_path=state_path,
-            state_raw=state_raw,
-            marker=marker,
-            dropins=dropins,
-            dropin_value=dropin_value,
-            uid=uid,
-            gid=gid,
-        )
+        if not isinstance(activation_error, _RetainQuiescenceError):
+            try:
+                evidence["release"] = _release_quiescence(
+                    paths,
+                    units=units,
+                    initially_active=initially_active,
+                    state_path=state_path,
+                    state_raw=state_raw,
+                    marker=marker,
+                    dropins=dropins,
+                    dropin_value=dropin_value,
+                    uid=uid,
+                    gid=gid,
+                )
+            except DoctorError as release_error:
+                if activation_error is not None:
+                    raise DoctorError(
+                        f"quiescence activation failed: {activation_error}; release failed: {release_error}"
+                    ) from release_error
+                raise
 
 
 def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
