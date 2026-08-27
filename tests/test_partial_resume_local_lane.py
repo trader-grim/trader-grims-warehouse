@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -179,11 +182,17 @@ def test_runner_accepts_exact_resume_preserves_bytes_and_excludes_evidence(tmp_p
     from tgw.workers import codex_implement
 
     root, head, tree = _repo(tmp_path)
+    archive = tmp_path / "preservation-archive"
+    archive.mkdir()
+    archive.chmod(0o2770)
+    os.chown(archive, -1, __import__("grp").getgrnam("tgw-coders").gr_gid)
+    monkeypatch.setenv("TGW_CODING_PRESERVATION_ARCHIVE_ROOT", str(archive))
     partial = root / "partial.py"
     partial.write_text("preserve = True\n")
     binding = _binding(root, head, tree)
     attempt = make_attempt(binding, root, outcome="partial")
     append_attempt(root, attempt)
+    preservation_manifest(root, {"state": "RESUMABLE_PARTIAL"}, binding)
     auth = tmp_path / "auth.json"
     auth.write_text("{}")
     monkeypatch.setattr(codex_implement, "_codex_auth_path", lambda: auth)
@@ -214,6 +223,581 @@ def test_runner_accepts_exact_resume_preserves_bytes_and_excludes_evidence(tmp_p
     assert result["outcome"] == "satisfied"
     assert partial.read_text() == "preserve = True\n"
     assert subprocess.check_output(["git", "ls-tree", "-r", "--name-only", "HEAD"], cwd=root, text=True).splitlines() == ["base", "finished.py", "partial.py"]
+    assert not (root / ".tgw-coding-preservation").exists()
+    retirement = next(item for item in result["artifacts"] if item["kind"] == "preservation_retirement")
+    assert Path(retirement["archive"]).is_dir()
+    diff = next(item for item in result["artifacts"] if item["kind"] == "git_diff")
+    assert "finished.py" in diff["changed_paths"]  # formerly untracked source is receipt evidence
+    closed_binding = {**binding, "job_id": "job-2", "attempt_count": 2}
+    closed_attempt = make_attempt(
+        closed_binding, root, outcome="satisfied",
+        predecessor=attempt["attempt_hash"], artifacts=result["artifacts"],
+    )
+    append_attempt(root, closed_attempt)
+    classification = classify(root, {key: value for key, value in binding.items() if key not in {"job_id", "attempt_count"}})
+    assert classification["state"] == "CLOSED_CANDIDATE", classification
+    from tgw.development.coding_snapshot import _git_is_clean
+    assert _git_is_clean(root)
+
+
+def test_retirement_receipt_recovers_complete_temporary_without_partial_final(tmp_path: Path) -> None:
+    from tgw.development import partial_resume
+
+    expected = b'{"complete":true}\n'
+    directory = tmp_path / "archive"
+    directory.mkdir()
+    (directory / ".retirement-receipt.json.tmp").write_bytes(expected)
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        partial_resume._publish_retirement_receipt(descriptor, expected)
+    finally:
+        os.close(descriptor)
+    assert (directory / "retirement-receipt.json").read_bytes() == expected
+    assert not (directory / ".retirement-receipt.json.tmp").exists()
+
+
+def test_retirement_receipt_refuses_truncated_crash_temporary(tmp_path: Path) -> None:
+    from tgw.development import partial_resume
+
+    directory = tmp_path / "archive"
+    directory.mkdir()
+    (directory / ".retirement-receipt.json.tmp").write_bytes(b"truncated")
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(partial_resume.PartialResumeError, match="temporary receipt differs"):
+            partial_resume._publish_retirement_receipt(descriptor, b'{"complete":true}\n')
+    finally:
+        os.close(descriptor)
+    assert not (directory / "retirement-receipt.json").exists()
+
+
+def test_retirement_receipt_recovers_post_link_crash_same_inode(tmp_path: Path) -> None:
+    from tgw.development import partial_resume
+
+    expected = b'{"complete":true}\n'
+    directory = tmp_path / "archive"
+    directory.mkdir()
+    temporary = directory / ".retirement-receipt.json.tmp"
+    final = directory / "retirement-receipt.json"
+    temporary.write_bytes(expected)
+    os.link(temporary, final)
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        partial_resume._publish_retirement_receipt(descriptor, expected)
+    finally:
+        os.close(descriptor)
+    assert final.read_bytes() == expected
+    assert final.stat().st_nlink == 1
+    assert not temporary.exists()
+
+
+@pytest.mark.parametrize("hostile", ["foreign-hardlink", "wrong-temporary", "replacement"])
+def test_retirement_receipt_rejects_hostile_completed_names(
+    tmp_path: Path, hostile: str,
+) -> None:
+    from tgw.development import partial_resume
+
+    expected = b'{"complete":true}\n'
+    directory = tmp_path / "archive"
+    directory.mkdir()
+    final = directory / "retirement-receipt.json"
+    temporary = directory / ".retirement-receipt.json.tmp"
+    final.write_bytes(expected)
+    if hostile == "foreign-hardlink":
+        os.link(final, directory / "foreign")
+    elif hostile == "wrong-temporary":
+        temporary.write_bytes(expected)
+    else:
+        temporary.write_bytes(expected)
+        os.link(temporary, directory / "temporary-alias")
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(partial_resume.PartialResumeError):
+            partial_resume._publish_retirement_receipt(descriptor, expected)
+    finally:
+        os.close(descriptor)
+    assert final.read_bytes() == expected
+
+
+def test_retirement_receipt_rejects_concurrent_foreign_publisher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tgw.development import partial_resume
+
+    expected = b'{"complete":true}\n'
+    directory = tmp_path / "archive"
+    directory.mkdir()
+    original_rename = partial_resume._rename_noreplace
+
+    def publish_foreign(*args, **kwargs):
+        (directory / "retirement-receipt.json").write_bytes(b"foreign\n")
+        raise partial_resume.PartialResumeError(
+            "preservation archive destination already exists"
+        )
+
+    monkeypatch.setattr(partial_resume, "_rename_noreplace", publish_foreign)
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(partial_resume.PartialResumeError, match="receipt differs"):
+            partial_resume._publish_retirement_receipt(descriptor, expected)
+    finally:
+        os.close(descriptor)
+    monkeypatch.setattr(partial_resume, "_rename_noreplace", original_rename)
+    assert (directory / "retirement-receipt.json").read_bytes() == b"foreign\n"
+    assert not list(directory.glob(".retirement-receipt.json.tmp.*"))
+
+
+@pytest.mark.parametrize("race", ["unique-temporaries", "shared-temporary"])
+def test_two_real_same_receipt_publishers_converge_to_one_nlink1_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, race: str,
+) -> None:
+    from tgw.development import partial_resume
+
+    expected = b'{"complete":true}\n'
+    directory = tmp_path / "archive"
+    directory.mkdir()
+    descriptors = [
+        os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        for _ in range(2)
+    ]
+    barrier = threading.Barrier(2)
+    source_errors: list[int] = []
+    if race == "unique-temporaries":
+        original_listdir = partial_resume.os.listdir
+        lock = threading.Lock()
+        initial_calls = 0
+
+        def synchronized_initial_scan(path):
+            nonlocal initial_calls
+            result = original_listdir(path)
+            with lock:
+                synchronize = initial_calls < 2
+                initial_calls += 1
+            if synchronize:
+                barrier.wait(timeout=5)
+            return result
+
+        monkeypatch.setattr(partial_resume.os, "listdir", synchronized_initial_scan)
+    else:
+        (directory / ".retirement-receipt.json.tmp").write_bytes(expected)
+        original_checkpoint = partial_resume._retirement_receipt_checkpoint
+        original_rename = partial_resume._rename_noreplace
+        lock = threading.Lock()
+        before_calls = 0
+
+        def synchronize_shared_rename(phase: str) -> None:
+            nonlocal before_calls
+            if phase == "before-publish":
+                with lock:
+                    synchronize = before_calls < 2
+                    before_calls += 1
+                if synchronize:
+                    barrier.wait(timeout=5)
+            original_checkpoint(phase)
+
+        monkeypatch.setattr(
+            partial_resume, "_retirement_receipt_checkpoint", synchronize_shared_rename,
+        )
+
+        def observe_source_enoent(*args):
+            try:
+                return original_rename(*args)
+            except partial_resume.PartialResumeError as exc:
+                if isinstance(exc.__cause__, OSError):
+                    source_errors.append(exc.__cause__.errno)
+                raise
+
+        monkeypatch.setattr(partial_resume, "_rename_noreplace", observe_source_enoent)
+
+    def invoke(descriptor: int):
+        try:
+            return partial_resume._publish_retirement_receipt(descriptor, expected)
+        except Exception as exc:  # results and exceptions are deliberately collected
+            return exc
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(invoke, descriptors))
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+    assert results == [None, None]
+    if race == "shared-temporary":
+        assert source_errors == [__import__("errno").ENOENT]
+    final = directory / "retirement-receipt.json"
+    assert final.read_bytes() == expected
+    assert final.stat().st_nlink == 1
+    assert sorted(path.name for path in directory.iterdir()) == [final.name]
+
+
+def test_retirement_receipt_fsyncs_file_then_directory_publication_and_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tgw.development import partial_resume
+
+    directory = tmp_path / "archive"
+    directory.mkdir()
+    directory_identity = (directory.stat().st_dev, directory.stat().st_ino)
+    events: list[tuple[int, int]] = []
+    original_fsync = partial_resume.os.fsync
+
+    def record(descriptor: int) -> None:
+        state = os.fstat(descriptor)
+        events.append((state.st_dev, state.st_ino))
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(partial_resume.os, "fsync", record)
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        partial_resume._publish_retirement_receipt(descriptor, b'{"complete":true}\n')
+    finally:
+        os.close(descriptor)
+    assert events[0] != directory_identity
+    assert events[1:] == [directory_identity, directory_identity]
+
+
+@pytest.mark.parametrize("state", ["existing", "post-link", "truncated", "new"])
+def test_retirement_receipt_conditionally_closes_every_open_descriptor(
+    tmp_path: Path, state: str,
+) -> None:
+    from tgw.development import partial_resume
+
+    expected = b'{"complete":true}\n'
+    directory = tmp_path / "archive"
+    directory.mkdir()
+    final = directory / "retirement-receipt.json"
+    temporary = directory / ".retirement-receipt.json.tmp"
+    if state in {"existing", "post-link"}:
+        final.write_bytes(expected)
+    if state == "post-link":
+        os.link(final, temporary)
+    if state == "truncated":
+        temporary.write_bytes(b"truncated")
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    before = set(os.listdir("/proc/self/fd"))
+    try:
+        if state == "truncated":
+            with pytest.raises(partial_resume.PartialResumeError):
+                partial_resume._publish_retirement_receipt(descriptor, expected)
+        else:
+            partial_resume._publish_retirement_receipt(descriptor, expected)
+        assert set(os.listdir("/proc/self/fd")) == before
+    finally:
+        os.close(descriptor)
+
+
+def test_archive_rename_is_atomic_no_replace(tmp_path: Path) -> None:
+    from tgw.development import partial_resume
+
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    source_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    destination_fd = os.dup(source_fd)
+    try:
+        with pytest.raises(partial_resume.PartialResumeError, match="already exists"):
+            partial_resume._rename_noreplace(
+                source_fd, source.name, destination_fd, destination.name,
+            )
+    finally:
+        os.close(destination_fd)
+        os.close(source_fd)
+    assert source.is_dir()
+    assert destination.is_dir()
+
+
+@pytest.mark.parametrize("hostile", ["hardlink", "truncate", "replace"])
+def test_archived_evidence_rejects_changed_or_linked_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hostile: str,
+) -> None:
+    from tgw.development import partial_resume
+
+    directory = tmp_path / "archive"
+    directory.mkdir()
+    evidence = directory / "evidence.json"
+    evidence.write_bytes(b"complete evidence")
+    if hostile == "hardlink":
+        os.link(evidence, directory / "alias.json")
+    else:
+        original_fdopen = partial_resume.os.fdopen
+
+        def mutate(descriptor, *args, **kwargs):
+            stream = original_fdopen(descriptor, *args, **kwargs)
+            if hostile == "truncate":
+                evidence.write_bytes(b"")
+            else:
+                evidence.rename(directory / "old.json")
+                evidence.write_bytes(b"replacement")
+            return stream
+
+        monkeypatch.setattr(partial_resume.os, "fdopen", mutate)
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(partial_resume.PartialResumeError):
+            partial_resume._archived_evidence(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def test_archive_binding_failure_closes_already_open_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tgw.development import partial_resume
+
+    opened = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    closed: list[int] = []
+    monkeypatch.setattr(
+        partial_resume, "_protected_archive_root",
+        lambda *_args: (tmp_path, tmp_path.stat()),
+    )
+    calls = 0
+
+    def open_then_fail(*_args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise partial_resume.PartialResumeError("root replaced")
+        return os.dup(opened)
+
+    monkeypatch.setattr(partial_resume, "_open_bound_directory", open_then_fail)
+    real_close = partial_resume.os.close
+
+    def record_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    monkeypatch.setattr(partial_resume.os, "close", record_close)
+    with pytest.raises(partial_resume.PartialResumeError, match="root replaced"):
+        partial_resume.retire_preservation(tmp_path, todo_id=1, candidate_commit="a" * 40,
+                                           archive_root=tmp_path)
+    real_close(opened)
+    assert len(closed) == 1
+
+
+def test_archive_child_replacement_is_detected_through_pinned_descriptor(tmp_path: Path) -> None:
+    from tgw.development import partial_resume
+
+    child = tmp_path / "child"
+    child.mkdir()
+    archive_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    child_fd = os.open(child.name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=archive_fd)
+    child.rename(tmp_path / "detached")
+    child.mkdir()
+    try:
+        with pytest.raises(partial_resume.PartialResumeError, match="binding changed"):
+            partial_resume._verify_archive_child_binding(archive_fd, child.name, child_fd)
+    finally:
+        os.close(child_fd)
+        os.close(archive_fd)
+
+
+def _retirement_fixture(tmp_path: Path) -> tuple[Path, Path, str]:
+    root, head, _tree = _repo(tmp_path)
+    preservation = root / ".tgw-coding-preservation"
+    preservation.mkdir()
+    evidence = preservation / "attempt.json"
+    evidence.write_bytes(b'{"evidence":true}\n')
+    evidence.chmod(0o640)
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    os.chown(archive, -1, __import__("grp").getgrnam("tgw-coders").gr_gid)
+    archive.chmod(0o2750)
+    return root, archive, head
+
+
+def test_retire_preservation_concurrent_destination_creation_is_non_destructive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tgw.development import partial_resume
+
+    root, archive, head = _retirement_fixture(tmp_path)
+    source = root / ".tgw-coding-preservation"
+    original = partial_resume._rename_noreplace
+
+    def race(source_fd: int, source_name: str, destination_fd: int, destination_name: str) -> None:
+        os.mkdir(destination_name, mode=0o2750, dir_fd=destination_fd)
+        original(source_fd, source_name, destination_fd, destination_name)
+
+    monkeypatch.setattr(partial_resume, "_rename_noreplace", race)
+    with pytest.raises(partial_resume.PartialResumeError, match="already exists"):
+        partial_resume.retire_preservation(
+            root, todo_id=1866, candidate_commit=head, archive_root=archive,
+        )
+    assert (source / "attempt.json").read_bytes() == b'{"evidence":true}\n'
+    destinations = list(archive.iterdir())
+    assert len(destinations) == 1 and destinations[0].is_dir()
+
+
+@pytest.mark.parametrize("boundary", ["root", "archive", "source", "destination"])
+def test_retire_preservation_replacement_boundaries_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str,
+) -> None:
+    from tgw.development import partial_resume
+
+    root, archive, head = _retirement_fixture(tmp_path)
+    source = root / ".tgw-coding-preservation"
+    evidence_path = source / "attempt.json"
+    evidence_before = evidence_path.read_bytes()
+    evidence_meta = evidence_path.stat()
+    original_verify = partial_resume._verify_bound_directory
+    original_evidence = partial_resume._archived_evidence
+    original_child = partial_resume._open_archive_child
+    changed = False
+    replacements: dict[str, tuple[Path, Path, os.stat_result, os.stat_result, bytes]] = {}
+    detached_evidence: Path | None = None
+
+    def replace_directory(path: Path) -> None:
+        nonlocal detached_evidence
+        detached = path.with_name(path.name + "-detached")
+        path.rename(detached)
+        replacement_mode = {
+            "root": 0o701,
+            "archive": 0o703,
+            "source": 0o705,
+            "destination": 0o707,
+        }[boundary]
+        sentinel_bytes = f"replacement-{boundary}\n".encode()
+        path.mkdir(mode=replacement_mode)
+        path.chmod(replacement_mode)
+        sentinel = path / f"replacement-{boundary}.sentinel"
+        sentinel.write_bytes(sentinel_bytes)
+        sentinel.chmod(0o600 | len(boundary))
+        replacements[boundary] = (
+            path, sentinel, path.stat(), sentinel.stat(), sentinel_bytes,
+        )
+        if boundary == "root":
+            detached_evidence = detached / source.relative_to(root) / evidence_path.name
+        elif boundary == "archive":
+            detached_evidence = evidence_path
+        elif boundary == "source":
+            detached_evidence = detached / evidence_path.name
+        else:
+            detached_evidence = detached / evidence_path.name
+
+    def verify(path: Path, descriptor: int) -> None:
+        nonlocal changed
+        if not changed and boundary in {"root", "archive"}:
+            selected = root if boundary == "root" else archive
+            if path == selected:
+                changed = True
+                replace_directory(selected)
+        original_verify(path, descriptor)
+
+    def read_evidence(descriptor: int):
+        nonlocal changed
+        result = original_evidence(descriptor)
+        if not changed and boundary == "source":
+            changed = True
+            replace_directory(source)
+        return result
+
+    def child(*args):
+        nonlocal changed
+        result = original_child(*args)
+        if not changed and boundary == "destination":
+            changed = True
+            replace_directory(archive / args[1])
+        return result
+
+    monkeypatch.setattr(partial_resume, "_verify_bound_directory", verify)
+    monkeypatch.setattr(partial_resume, "_archived_evidence", read_evidence)
+    monkeypatch.setattr(partial_resume, "_open_archive_child", child)
+    with pytest.raises(partial_resume.PartialResumeError) as failure:
+        partial_resume.retire_preservation(
+            root, todo_id=1866, candidate_commit=head, archive_root=archive,
+        )
+    assert changed, str(failure.value)
+    replacement, sentinel, replacement_before, sentinel_before, sentinel_bytes = (
+        replacements[boundary]
+    )
+    replacement_after = replacement.stat()
+    sentinel_after = sentinel.stat()
+    assert sentinel.read_bytes() == sentinel_bytes
+    assert (
+        replacement_after.st_dev, replacement_after.st_ino, replacement_after.st_mode,
+        replacement_after.st_uid, replacement_after.st_gid,
+    ) == (
+        replacement_before.st_dev, replacement_before.st_ino, replacement_before.st_mode,
+        replacement_before.st_uid, replacement_before.st_gid,
+    )
+    assert (
+        sentinel_after.st_dev, sentinel_after.st_ino, sentinel_after.st_mode,
+        sentinel_after.st_uid, sentinel_after.st_gid, sentinel_after.st_size,
+        sentinel_after.st_mtime_ns,
+    ) == (
+        sentinel_before.st_dev, sentinel_before.st_ino, sentinel_before.st_mode,
+        sentinel_before.st_uid, sentinel_before.st_gid, sentinel_before.st_size,
+        sentinel_before.st_mtime_ns,
+    )
+    assert detached_evidence is not None
+    evidence_after = detached_evidence.stat()
+    assert detached_evidence.read_bytes() == evidence_before
+    assert (
+        evidence_after.st_mode, evidence_after.st_uid, evidence_after.st_gid,
+        evidence_after.st_size, evidence_after.st_mtime_ns,
+    ) == (
+        evidence_meta.st_mode, evidence_meta.st_uid, evidence_meta.st_gid,
+        evidence_meta.st_size, evidence_meta.st_mtime_ns,
+    )
+
+
+@pytest.mark.parametrize("ancestor_kind", ["root-parent", "archive-parent"])
+def test_retire_preservation_ancestor_replacement_is_non_destructive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ancestor_kind: str,
+) -> None:
+    from tgw.development import partial_resume
+
+    workspace_parent = tmp_path / "workspace-parent"
+    workspace_parent.mkdir()
+    root, _discarded_archive, head = _retirement_fixture(workspace_parent)
+    archive_parent = tmp_path / "archive-parent"
+    archive_parent.mkdir()
+    archive = archive_parent / "archive"
+    archive.mkdir(mode=0o2750)
+    archive.chmod(0o2750)
+    os.chown(archive, -1, __import__("grp").getgrnam("tgw-coders").gr_gid)
+    source = root / ".tgw-coding-preservation"
+    evidence = source / "attempt.json"
+    evidence_before = evidence.read_bytes()
+    evidence_meta = evidence.stat()
+    selected = root.parent if ancestor_kind == "root-parent" else archive.parent
+    original_verify = partial_resume._verify_bound_directory
+    changed = False
+    detached = selected.with_name(selected.name + "-detached")
+
+    def verify(path: Path, descriptor: int) -> None:
+        nonlocal changed
+        trigger = root if ancestor_kind == "root-parent" else archive
+        if not changed and path == trigger:
+            changed = True
+            selected.rename(detached)
+            selected.mkdir(mode=0o711)
+            (selected / "sentinel").write_bytes(b"replacement\n")
+        original_verify(path, descriptor)
+
+    monkeypatch.setattr(partial_resume, "_verify_bound_directory", verify)
+    with pytest.raises(partial_resume.PartialResumeError) as failure:
+        partial_resume.retire_preservation(
+            root, todo_id=1867, candidate_commit=head, archive_root=archive,
+        )
+    assert changed, str(failure.value)
+    replacement_meta = selected.stat()
+    assert (selected / "sentinel").read_bytes() == b"replacement\n"
+    assert stat.S_IMODE(replacement_meta.st_mode) == 0o711
+    detached_evidence = (
+        next(detached.rglob("attempt.json"))
+        if ancestor_kind == "root-parent"
+        else evidence
+    )
+    after = detached_evidence.stat()
+    assert detached_evidence.read_bytes() == evidence_before
+    assert (
+        after.st_mode, after.st_uid, after.st_gid, after.st_size, after.st_mtime_ns,
+    ) == (
+        evidence_meta.st_mode, evidence_meta.st_uid, evidence_meta.st_gid,
+        evidence_meta.st_size, evidence_meta.st_mtime_ns,
+    )
 
 
 def test_local_coding_worker_persists_partial_before_compatibility_and_failure(tmp_path: Path, monkeypatch) -> None:
@@ -678,6 +1262,10 @@ def test_configured_subprocess_runner_and_worker_share_one_lease(tmp_path: Path,
         "print(json.dumps({'outcome':'partial','established_conditions':[],'artifacts':[{'kind':'child'}]}))\n"
     )
     executable = __import__("sys").executable
+    diagnostic_root = tmp_path / "runner-control"
+    diagnostic_root.mkdir()
+    diagnostic_root.chmod(0o2770)
+    os.chown(diagnostic_root, -1, __import__("grp").getgrnam("tgw-coders").gr_gid)
     plan_binding = {
         "plan_commit": "a" * 40,
         "solution_hash": "sha256:" + "b" * 64,
@@ -694,6 +1282,7 @@ def test_configured_subprocess_runner_and_worker_share_one_lease(tmp_path: Path,
                 "commands": {"codex-implement": [executable, str(runner)]},
                 "allowed_runners": [executable],
                 "timeout_s": 30,
+                "runner_state_root": str(diagnostic_root),
             }
         },
     )

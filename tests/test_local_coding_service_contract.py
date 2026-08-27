@@ -13,12 +13,13 @@ def test_local_coding_units_use_unix_accounts_and_shared_group() -> None:
     expectations = {
         "tgw-coding-local-foreman.service": "db",
         "tgw-codex-implement-worker.service": "codex",
-        "tgw-controller-verify-worker.service": "db",
+        "tgw-controller-verify-worker.service": "codex",
     }
     for name, actor in expectations.items():
         unit = _unit(name)
         assert f"User={actor}\n" in unit
-        assert f"Group={actor}\n" in unit
+        expected_group = "tgw-coders" if name == "tgw-controller-verify-worker.service" else actor
+        assert f"Group={expected_group}\n" in unit
         assert "SupplementaryGroups=tgw-coders" in unit
         assert "UMask=0002" in unit
         assert "tgw.development.local_workflow" in unit

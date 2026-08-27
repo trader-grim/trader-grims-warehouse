@@ -7,12 +7,12 @@ ConditionPathExists=/opt/TGW/tgw-lib/coding-runtime/current/src/tgw/development/
 
 [Service]
 Type=simple
-User=db
-Group=db
+User=codex
+Group=tgw-coders
 SupplementaryGroups=tgw-coders
 UMask=0002
 WorkingDirectory=/opt/TGW/tgw-lib/src/trader-grims-warehouse
-Environment=HOME=/home/db
+Environment=HOME=/home/codex
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=GIT_OPTIONAL_LOCKS=0
 Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src

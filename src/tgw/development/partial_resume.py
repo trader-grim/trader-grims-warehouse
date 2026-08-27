@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import base64
+import ctypes
+import errno
 import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import tempfile
@@ -687,3 +690,357 @@ def migrate_todo_1747(worktree: Path, binding: Mapping[str, Any], jobs: list[Map
     for attempt in expected_attempts[len(existing) :]:
         append_attempt(worktree, attempt)
     return path
+def _protected_archive_root(path: Path, worktree: Path) -> tuple[Path, os.stat_result]:
+    """Require an operator-provisioned tgw-coders archive on this filesystem."""
+    try:
+        group = __import__("grp").getgrnam("tgw-coders")
+        raw = path.lstat()
+        resolved = path.resolve(strict=True)
+        worktree_device = worktree.stat(follow_symlinks=False).st_dev
+    except (KeyError, OSError, RuntimeError) as exc:
+        raise PartialResumeError("preservation archive is not provisioned") from exc
+    if (
+        stat.S_ISLNK(raw.st_mode)
+        or not stat.S_ISDIR(raw.st_mode)
+        or resolved != path.absolute()
+        or raw.st_gid != group.gr_gid
+        or raw.st_mode & 0o007
+        or raw.st_mode & 0o2000 == 0
+        or raw.st_dev != worktree_device
+    ):
+        raise PartialResumeError("preservation archive is not a protected same-filesystem tgw-coders directory")
+    try:
+        owner = __import__("pwd").getpwuid(raw.st_uid)
+        owner_ok = raw.st_uid == 0 or owner.pw_gid == group.gr_gid or owner.pw_name in group.gr_mem
+    except KeyError:
+        owner_ok = False
+    if not owner_ok:
+        raise PartialResumeError("preservation archive owner is not trusted")
+    return resolved, raw
+
+
+def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino, left.st_mode, left.st_uid, left.st_gid) == (
+        right.st_dev, right.st_ino, right.st_mode, right.st_uid, right.st_gid)
+
+
+def _open_bound_directory(path: Path, expected: os.stat_result) -> int:
+    """Open an absolute directory component-by-component and bind its identity."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptor = os.open(path.anchor, flags)
+    try:
+        for component in path.relative_to(path.anchor).parts:
+            if component in {"", ".", ".."}:
+                raise PartialResumeError("preservation path has an unsafe component")
+            child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        if not _same_identity(os.fstat(descriptor), expected):
+            raise PartialResumeError("preservation directory changed after validation")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _verify_bound_directory(path: Path, descriptor: int) -> None:
+    """Require the visible absolute path to retain the pinned directory inode."""
+    try:
+        visible = path.stat(follow_symlinks=False)
+        bound = os.fstat(descriptor)
+    except OSError as exc:
+        raise PartialResumeError("preservation directory binding is unavailable") from exc
+    if not stat.S_ISDIR(visible.st_mode) or not _same_identity(visible, bound):
+        raise PartialResumeError("preservation directory binding changed")
+
+
+def _publish_retirement_receipt(directory_fd: int, expected: bytes) -> None:
+    """Convergently publish a complete nlink-1 receipt by no-replace rename."""
+    final = "retirement-receipt.json"
+    legacy = ".retirement-receipt.json.tmp"
+    prefix = legacy + "."
+    try:
+        final_fd = os.open(final, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except FileNotFoundError:
+        final_fd = -1
+    if final_fd >= 0:
+        with os.fdopen(final_fd, "rb") as stream:
+            state = os.fstat(stream.fileno())
+            raw = stream.read()
+        if not stat.S_ISREG(state.st_mode) or raw != expected:
+            raise PartialResumeError("preservation retirement receipt differs")
+        if state.st_nlink == 2:
+            try:
+                legacy_fd = os.open(legacy, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            except FileNotFoundError:
+                raise PartialResumeError("preservation retirement receipt differs")
+            with os.fdopen(legacy_fd, "rb") as stream:
+                legacy_state = os.fstat(stream.fileno())
+                legacy_raw = stream.read()
+            if (
+                (legacy_state.st_dev, legacy_state.st_ino) != (state.st_dev, state.st_ino)
+                or legacy_raw != expected
+            ):
+                raise PartialResumeError("preservation retirement receipt names are ambiguous")
+            os.unlink(legacy, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        elif state.st_nlink != 1:
+            raise PartialResumeError("preservation retirement receipt has a foreign hardlink")
+        if any(name == legacy or name.startswith(prefix) for name in os.listdir(directory_fd)):
+            raise PartialResumeError("preservation retirement receipt names are ambiguous")
+        return
+
+    temporaries = [
+        name for name in os.listdir(directory_fd)
+        if name == legacy or name.startswith(prefix)
+    ]
+    if len(temporaries) > 1:
+        raise PartialResumeError("preservation retirement receipt names are ambiguous")
+    temporary = temporaries[0] if temporaries else prefix + secrets.token_hex(16)
+    created = not temporaries
+    if created:
+        temporary_fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o640,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(temporary_fd, "wb") as stream:
+            stream.write(expected)
+            stream.flush()
+            os.fsync(stream.fileno())
+    else:
+        temporary_fd = os.open(temporary, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        with os.fdopen(temporary_fd, "rb") as stream:
+            state = os.fstat(stream.fileno())
+            if not stat.S_ISREG(state.st_mode) or state.st_nlink != 1 or stream.read() != expected:
+                raise PartialResumeError("preservation retirement temporary receipt differs")
+    temporary_fd = os.open(temporary, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    try:
+        pinned = os.fstat(temporary_fd)
+        _retirement_receipt_checkpoint("before-publish")
+        try:
+            _rename_noreplace(directory_fd, temporary, directory_fd, final)
+            published = True
+        except PartialResumeError as exc:
+            source_missing = (
+                isinstance(exc.__cause__, OSError)
+                and exc.__cause__.errno == errno.ENOENT
+            )
+            if "already exists" not in str(exc) and not source_missing:
+                raise
+            published = False
+        _retirement_receipt_checkpoint("after-publish")
+        if not published:
+            try:
+                visible = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                visible = None
+            if visible is not None:
+                if (visible.st_dev, visible.st_ino) != (pinned.st_dev, pinned.st_ino):
+                    raise PartialResumeError("preservation retirement temporary receipt was replaced")
+                os.unlink(temporary, dir_fd=directory_fd)
+    finally:
+        os.close(temporary_fd)
+    os.fsync(directory_fd)
+    final_fd = os.open(final, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    with os.fdopen(final_fd, "rb") as stream:
+        state = os.fstat(stream.fileno())
+        if not stat.S_ISREG(state.st_mode) or state.st_nlink != 1 or stream.read() != expected:
+            raise PartialResumeError("preservation retirement receipt differs")
+    os.fsync(directory_fd)
+
+
+def _retirement_receipt_checkpoint(_phase: str) -> None:
+    """Deterministic test seam for receipt publication races."""
+
+
+def _open_archive_child(archive_fd: int, name: str, archive_stat: os.stat_result) -> tuple[int, os.stat_result]:
+    """Bind one direct archive child and reject aliases or changed metadata."""
+    if not name or name in {".", ".."} or "/" in name:
+        raise PartialResumeError("preservation archive child name is unsafe")
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=archive_fd)
+        observed = os.fstat(descriptor)
+    except OSError as exc:
+        raise PartialResumeError("preservation archive destination is not a direct directory") from exc
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or observed.st_dev != archive_stat.st_dev
+        or observed.st_uid != archive_stat.st_uid
+        or observed.st_gid != archive_stat.st_gid
+        or stat.S_IMODE(observed.st_mode) != 0o2750
+    ):
+        os.close(descriptor)
+        raise PartialResumeError("preservation archive destination protection differs")
+    return descriptor, observed
+
+
+def _verify_archive_child_binding(archive_fd: int, name: str, descriptor: int) -> None:
+    """Require the archive name to retain the pinned destination inode."""
+    try:
+        visible = os.stat(name, dir_fd=archive_fd, follow_symlinks=False)
+        bound = os.fstat(descriptor)
+    except OSError as exc:
+        raise PartialResumeError("preservation archive destination binding is unavailable") from exc
+    if not stat.S_ISDIR(visible.st_mode) or not _same_identity(visible, bound):
+        raise PartialResumeError("preservation archive destination binding changed")
+
+
+def _rename_noreplace(
+    source_fd: int, source: str, destination_fd: int, destination: str,
+) -> None:
+    """Atomically move one descriptor-relative name without replacement."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise PartialResumeError("atomic no-replace archive retirement is unavailable")
+    if renameat2(
+        source_fd, os.fsencode(source), destination_fd, os.fsencode(destination), 1,
+    ) != 0:  # RENAME_NOREPLACE
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise PartialResumeError("preservation archive destination already exists")
+        raise PartialResumeError("atomic no-replace archive retirement failed") from OSError(
+            error, os.strerror(error), destination,
+        )
+
+
+def _archived_evidence(directory_fd: int) -> tuple[list[dict[str, Any]], str]:
+    """Hash evidence only through stable, non-linked descriptor bindings."""
+    rows: list[dict[str, Any]] = []
+    for name in sorted(os.listdir(directory_fd), key=os.fsencode):
+        if name == "retirement-receipt.json":
+            continue
+        try:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_mode & 0o007:
+                raise PartialResumeError("archived preservation evidence has an unsafe descendant")
+            with os.fdopen(descriptor, "rb") as stream:
+                raw = stream.read()
+                after = os.fstat(stream.fileno())
+            if (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid,
+                    before.st_nlink, before.st_size, before.st_mtime_ns) != (
+                    after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid,
+                    after.st_nlink, after.st_size, after.st_mtime_ns):
+                raise PartialResumeError("archived preservation evidence changed while reading")
+        except OSError as exc:
+            raise PartialResumeError("archived preservation evidence is unreadable") from exc
+        rows.append({"name": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+    return rows, hashlib.sha256(_canonical(rows)).hexdigest()
+
+
+def retire_preservation(
+    worktree: Path, *, todo_id: int, candidate_commit: str,
+    archive_root: Path | None = None,
+) -> dict[str, Any] | None:
+    """Replayably retire active evidence after the exact candidate is closed."""
+    root = _canonical_worktree(worktree)
+    source = root / PRESERVATION
+    configured_raw = os.environ.get("TGW_CODING_PRESERVATION_ARCHIVE_ROOT")
+    configured = archive_root or (Path(configured_raw) if configured_raw else None)
+    if configured is None:
+        if source.exists():
+            raise PartialResumeError("preservation archive is not configured")
+        return None
+    archive, archive_stat = _protected_archive_root(configured, root)
+    prefix = f"todo-{todo_id}-{candidate_commit}-"
+    archive_fd: int | None = None
+    root_fd: int | None = None
+    source_fd: int | None = None
+    destination_fd: int | None = None
+    try:
+        archive_fd = _open_bound_directory(archive, archive_stat)
+        candidates = sorted(name for name in os.listdir(archive_fd) if name.startswith(prefix))
+        root_stat = root.stat(follow_symlinks=False)
+        root_fd = _open_bound_directory(root, root_stat)
+        try:
+            source_stat = os.stat(PRESERVATION, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            source_stat = None
+        if source_stat is not None:
+            if not stat.S_ISDIR(source_stat.st_mode) or source_stat.st_dev != archive_stat.st_dev:
+                raise PartialResumeError("active preservation evidence is unsafe")
+            source_fd = os.open(PRESERVATION, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=root_fd)
+            try:
+                if not _same_identity(os.fstat(source_fd), source_stat):
+                    raise PartialResumeError("active preservation evidence changed")
+                rows, digest = _archived_evidence(source_fd)
+            finally:
+                os.close(source_fd)
+                source_fd = None
+            destination_name = prefix + digest
+            if candidates:
+                raise PartialResumeError("preservation archive destination exists while evidence remains active")
+            source_fd = os.open(PRESERVATION, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=root_fd)
+            if not _same_identity(os.fstat(source_fd), source_stat):
+                raise PartialResumeError("active preservation evidence changed before retirement")
+            if not _same_identity(os.fstat(archive_fd), archive_stat):
+                raise PartialResumeError("preservation archive root changed before retirement")
+            os.fchown(source_fd, archive_stat.st_uid, archive_stat.st_gid)
+            os.fchmod(source_fd, 0o2750)
+            os.fsync(source_fd)
+            _verify_bound_directory(root, root_fd)
+            _verify_bound_directory(archive, archive_fd)
+            _rename_noreplace(root_fd, PRESERVATION, archive_fd, destination_name)
+            destination_fd, moved_stat = _open_archive_child(
+                archive_fd, destination_name, archive_stat,
+            )
+            if not _same_identity(os.fstat(source_fd), moved_stat):
+                raise PartialResumeError("retired preservation destination identity differs")
+            try:
+                os.stat(PRESERVATION, dir_fd=root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise PartialResumeError("active preservation name remains after retirement")
+            _verify_bound_directory(root, root_fd)
+            _verify_bound_directory(archive, archive_fd)
+            os.fsync(root_fd)
+            os.fsync(archive_fd)
+        elif len(candidates) == 1:
+            destination_name = candidates[0]
+        elif not candidates:
+            return None
+        else:
+            raise PartialResumeError("preservation retirement replay is ambiguous")
+        if destination_fd is None:
+            destination_fd, destination_stat = _open_archive_child(
+                archive_fd, destination_name, archive_stat,
+            )
+        else:
+            destination_stat = os.fstat(destination_fd)
+        try:
+            _verify_archive_child_binding(archive_fd, destination_name, destination_fd)
+            rows, digest = _archived_evidence(destination_fd)
+            if destination_name != prefix + digest:
+                raise PartialResumeError("preservation archive destination digest suffix differs")
+            revalidated = os.fstat(destination_fd)
+            if any(getattr(revalidated, field) != getattr(destination_stat, field) for field in (
+                "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+            )):
+                raise PartialResumeError("preservation archive destination changed")
+            destination = archive / destination_name
+            unsigned = {"schema": "tgw-coding-preservation-retirement/v1", "todo_id": todo_id,
+                "candidate_commit": candidate_commit, "worktree": str(root),
+                "archive": str(destination), "evidence": rows}
+            receipt = {**unsigned, "receipt_sha256": "sha256:" + hashlib.sha256(_canonical(unsigned)).hexdigest()}
+            expected = json.dumps(receipt, sort_keys=True).encode() + b"\n"
+            _verify_archive_child_binding(archive_fd, destination_name, destination_fd)
+            _publish_retirement_receipt(destination_fd, expected)
+            _verify_archive_child_binding(archive_fd, destination_name, destination_fd)
+            os.fsync(archive_fd)
+            return receipt
+        finally:
+            os.close(destination_fd)
+            destination_fd = None
+    finally:
+        for descriptor in (destination_fd, source_fd, root_fd, archive_fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass

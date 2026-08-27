@@ -217,8 +217,15 @@ def _preservation_evidence(worktree: Path, relative: str) -> bytes | None:
     if claimed != actual or name != actual.removeprefix("sha256:") + ".json":
         return None
     try:
-        from tgw.development.partial_resume import source_fingerprint
-        if value.get("source") != source_fingerprint(worktree):
+        source = value.get("source")
+        if not isinstance(source, dict):
+            return None
+        source_body = dict(source)
+        claimed_source = source_body.pop("fingerprint", None)
+        actual_source = "sha256:" + hashlib.sha256(json.dumps(
+            source_body, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode()).hexdigest()
+        if claimed_source != actual_source:
             return None
     except (OSError, RuntimeError, ValueError):
         return None

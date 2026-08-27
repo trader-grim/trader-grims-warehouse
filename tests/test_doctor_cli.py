@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import grp
 import hashlib
 import json
 import os
@@ -140,6 +141,13 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     operator_cli = tmp_path / "usr-local-bin-tgw"
     worktrees = tmp_path / "worktrees"
     worktrees.mkdir()
+    support_root = tmp_path / "tgw-coders"
+    archive_root = support_root / "archive"
+    runner_root = support_root / "runner"
+    for directory in (archive_root, runner_root):
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o2770)
+        os.chown(directory, -1, grp.getgrnam("tgw-coders").gr_gid)
     for relative in _git(repository, "ls-files").splitlines():
         source = repository / relative
         path = release / relative
@@ -166,6 +174,8 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
             "coding": {
                 "repository_root": str(repository),
                 "worktree_root": str(worktrees),
+                "preservation_archive_root": str(archive_root),
+                "runner_state_root": str(runner_root),
                 "commands": {"codex-implement": ["/bin/true"]},
                 "allowed_runners": ["/bin/true"],
             },
@@ -911,11 +921,17 @@ def test_unix_git_repair_recurses_into_configured_linked_worktrees(tmp_path: Pat
     paths = doctor_cli.DoctorPaths(
         repository=repository,
         worktrees=worktrees,
+        coding_config=tmp_path / "coding.json",
         receipts=tmp_path / "receipts",
     )
+    _write_json(paths.coding_config, {"schema": "tgw-local-coding-workflow/v1", "coding": {
+        "preservation_archive_root": str(tmp_path / "support/archive"),
+        "runner_state_root": str(tmp_path / "support/runner"),
+    }})
     reports = iter(({"state": "FAIL"}, {"state": "PASS"}))
 
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli.os, "chown", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         doctor_cli.grp,
         "getgrnam",
@@ -946,10 +962,16 @@ def _unix_repair_transaction_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyP
     paths = doctor_cli.DoctorPaths(
         repository=repository,
         worktrees=worktrees,
+        coding_config=tmp_path / "coding.json",
         receipts=tmp_path / "receipts",
     )
+    _write_json(paths.coding_config, {"schema": "tgw-local-coding-workflow/v1", "coding": {
+        "preservation_archive_root": str(tmp_path / "support/archive"),
+        "runner_state_root": str(tmp_path / "support/runner"),
+    }})
     reports = iter(({"state": "FAIL"}, {"state": "PASS"}))
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli.os, "chown", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         doctor_cli.grp,
         "getgrnam",
@@ -3794,3 +3816,321 @@ def test_coding_quiescence_rejects_unknown_stale_initially_active_unit(
         )
 
     assert state_path.exists()
+
+
+def test_coding_support_roots_require_protected_same_filesystem_directories(tmp_path: Path) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    archive = tmp_path / "tgw-coders/archive"
+    runner = tmp_path / "tgw-coders/runner"
+    shutil.rmtree(archive)
+    shutil.rmtree(runner)
+    config = json.loads(paths.coding_config.read_text())
+    config["coding"]["preservation_archive_root"] = str(archive)
+    config["coding"]["runner_state_root"] = str(runner)
+    _write_json(paths.coding_config, config)
+    group_gid = __import__("grp").getgrnam("tgw-coders").gr_gid
+
+    before = doctor_cli._coding_support_roots(paths, group_gid)
+    assert not any(row["exact"] for row in before.values())
+
+    for directory in (archive, runner):
+        directory.mkdir(parents=True, exist_ok=True)
+        os.chown(directory, -1, group_gid)
+        directory.chmod(0o2770)
+    after = doctor_cli._coding_support_roots(paths, group_gid)
+    assert all(row["exact"] for row in after.values())
+
+
+def test_support_root_provisioning_journal_removes_partial_parent_tree(tmp_path: Path) -> None:
+    group_gid = grp.getgrnam("tgw-coders").gr_gid
+    target = tmp_path / "new-parent/archive"
+    journal: list[dict[str, object]] = []
+    doctor_cli._provision_support_root(
+        target,
+        group_gid=group_gid,
+        worktree_device=tmp_path.stat().st_dev,
+        journal=journal,
+    )
+    assert target.is_dir()
+    assert not doctor_cli._close_mutation_journal(journal, rollback=True)
+    assert not target.exists()
+    assert not target.parent.exists()
+
+
+@pytest.mark.parametrize(
+    "phase", ["creation-to-bind", "bind-to-publish", "rename-to-phase", "after-publish"],
+)
+def test_support_root_boundary_failure_rolls_back_bound_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
+) -> None:
+    target = tmp_path / "created"
+    journal: list[dict[str, object]] = []
+
+    def fail(selected: str) -> None:
+        if selected == phase:
+            raise OSError(f"injected {phase}")
+
+    monkeypatch.setattr(doctor_cli, "_support_root_checkpoint", fail)
+    with pytest.raises(OSError, match=f"injected {phase}"):
+        doctor_cli._provision_support_root(
+            target,
+            group_gid=grp.getgrnam("tgw-coders").gr_gid,
+            worktree_device=tmp_path.stat().st_dev,
+            journal=journal,
+        )
+    errors = doctor_cli._close_mutation_journal(journal, rollback=True)
+    if phase == "creation-to-bind":
+        assert errors == [
+            "created support directory identity was never bound; retained for recovery"
+        ]
+        assert len(list(tmp_path.glob(".created.tgw-stage-*"))) == 1
+    else:
+        assert not errors
+        assert not target.exists()
+        assert not list(tmp_path.glob(".created.tgw-stage-*"))
+
+
+def test_support_root_rollback_finds_published_inode_before_phase_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "created"
+    staged_replacement: Path | None = None
+    journal: list[dict[str, object]] = []
+
+    def fail_after_rename(phase: str) -> None:
+        nonlocal staged_replacement
+        if phase == "rename-to-phase":
+            staged_name = str(journal[-1]["staging_name"])
+            staged = tmp_path / staged_name
+            staged.mkdir(mode=0o711)
+            (staged / "sentinel").write_bytes(b"staged replacement\n")
+            staged_replacement = staged
+            raise OSError("injected after atomic rename")
+
+    monkeypatch.setattr(doctor_cli, "_support_root_checkpoint", fail_after_rename)
+    with pytest.raises(OSError, match="injected after atomic rename"):
+        doctor_cli._provision_support_root(
+            target,
+            group_gid=grp.getgrnam("tgw-coders").gr_gid,
+            worktree_device=tmp_path.stat().st_dev,
+            journal=journal,
+        )
+    # The pinned inode is published even though mutable journal phase still says staging.
+    errors = doctor_cli._close_mutation_journal(journal, rollback=True)
+    assert errors == []
+    assert staged_replacement is not None
+    assert (staged_replacement / "sentinel").read_bytes() == b"staged replacement\n"
+    assert not target.exists()
+
+
+def test_support_root_journal_descriptor_duplication_failure_retains_unbound_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "created"
+    journal: list[dict[str, object]] = []
+    original_dup = doctor_cli.os.dup
+    calls = 0
+
+    def fail_second_dup(descriptor: int) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected journal descriptor duplication")
+        return original_dup(descriptor)
+
+    monkeypatch.setattr(doctor_cli.os, "dup", fail_second_dup)
+    with pytest.raises(OSError, match="journal descriptor duplication"):
+        doctor_cli._provision_support_root(
+            target,
+            group_gid=grp.getgrnam("tgw-coders").gr_gid,
+            worktree_device=tmp_path.stat().st_dev,
+            journal=journal,
+        )
+    errors = doctor_cli._close_mutation_journal(journal, rollback=True)
+    assert errors == ["created support directory identity was never bound; retained for recovery"]
+    assert not target.exists()
+    assert len(list(tmp_path.glob(".created.tgw-stage-*"))) == 1
+
+
+def test_support_root_creation_to_bind_replacement_is_retained_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "created"
+    journal: list[dict[str, object]] = []
+    replacement: Path | None = None
+
+    def replace(phase: str) -> None:
+        nonlocal replacement
+        if phase == "creation-to-bind":
+            staging = next(tmp_path.glob(".created.tgw-stage-*"))
+            staging.rename(tmp_path / "created-original")
+            staging.mkdir(mode=0o711)
+            (staging / "sentinel").write_bytes(b"replacement\n")
+            replacement = staging
+
+    monkeypatch.setattr(doctor_cli, "_support_root_checkpoint", replace)
+    with pytest.raises(doctor_cli.DoctorError, match="changed before bind"):
+        doctor_cli._provision_support_root(
+            target,
+            group_gid=grp.getgrnam("tgw-coders").gr_gid,
+            worktree_device=tmp_path.stat().st_dev,
+            journal=journal,
+        )
+    errors = doctor_cli._close_mutation_journal(journal, rollback=True)
+    assert errors == ["created support directory identity was never bound; retained for recovery"]
+    assert replacement is not None
+    assert (replacement / "sentinel").read_bytes() == b"replacement\n"
+    assert stat.S_IMODE(replacement.stat().st_mode) == 0o711
+
+
+def test_support_root_bind_to_publish_concurrent_final_is_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "created"
+    journal: list[dict[str, object]] = []
+
+    def replace(phase: str) -> None:
+        if phase == "bind-to-publish":
+            target.mkdir(mode=0o711)
+            (target / "sentinel").write_bytes(b"concurrent\n")
+
+    monkeypatch.setattr(doctor_cli, "_support_root_checkpoint", replace)
+    with pytest.raises(doctor_cli.DoctorError, match="appeared before"):
+        doctor_cli._provision_support_root(
+            target,
+            group_gid=grp.getgrnam("tgw-coders").gr_gid,
+            worktree_device=tmp_path.stat().st_dev,
+            journal=journal,
+        )
+    before = target.stat()
+    assert not doctor_cli._close_mutation_journal(journal, rollback=True)
+    after = target.stat()
+    assert (target / "sentinel").read_bytes() == b"concurrent\n"
+    assert (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid) == (
+        before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid,
+    )
+    assert not list(tmp_path.glob(".created.tgw-stage-*"))
+
+
+def test_support_root_replacement_before_rollback_is_not_removed(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "created"
+    journal: list[dict[str, object]] = []
+    doctor_cli._provision_support_root(
+        target,
+        group_gid=grp.getgrnam("tgw-coders").gr_gid,
+        worktree_device=tmp_path.stat().st_dev,
+        journal=journal,
+    )
+    target.rename(tmp_path / "bound-original")
+    target.mkdir()
+    (target / "sentinel").write_bytes(b"published replacement\n")
+    staging = tmp_path / str(journal[-1]["staging_name"])
+    staging.mkdir()
+    (staging / "sentinel").write_bytes(b"staged replacement\n")
+    errors = doctor_cli._close_mutation_journal(journal, rollback=True)
+    assert errors == ["created support directory has no unique bound rollback name"]
+    assert (target / "sentinel").read_bytes() == b"published replacement\n"
+    assert (staging / "sentinel").read_bytes() == b"staged replacement\n"
+    assert (tmp_path / "bound-original").is_dir()
+
+
+@pytest.mark.parametrize("phase", ["open", "chown", "chmod", "file-fsync", "directory-fsync"])
+def test_support_root_creation_failure_is_completely_rollbackable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
+) -> None:
+    group_gid = grp.getgrnam("tgw-coders").gr_gid
+    target = tmp_path / "new-parent/archive"
+    journal: list[dict[str, object]] = []
+    originals = {name: getattr(doctor_cli.os, name) for name in ("open", "fchown", "fchmod", "fsync")}
+    calls = {"open": 0, "fsync": 0}
+
+    def injected(name):
+        def call(*args, **kwargs):
+            calls[name] = calls.get(name, 0) + 1
+            if (selected == name and not phase.endswith("fsync")
+                    or (phase == "file-fsync" and name == "fsync" and calls[name] == 1)
+                    or (phase == "directory-fsync" and name == "fsync" and calls[name] == 2)):
+                raise OSError(f"injected {phase}")
+            return originals[name](*args, **kwargs)
+        return call
+
+    selected = {
+        "chown": "fchown", "chmod": "fchmod",
+        "file-fsync": "fsync", "directory-fsync": "fsync",
+    }.get(phase, phase)
+    monkeypatch.setattr(doctor_cli.os, selected, injected(selected))
+    with pytest.raises(OSError, match="injected"):
+        doctor_cli._provision_support_root(
+            target, group_gid=group_gid,
+            worktree_device=tmp_path.stat().st_dev, journal=journal,
+        )
+    assert not doctor_cli._close_mutation_journal(journal, rollback=True)
+    assert not target.exists()
+    assert not target.parent.exists()
+
+
+def test_support_root_preexisting_metadata_rolls_back_after_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group_gid = grp.getgrnam("tgw-coders").gr_gid
+    target = tmp_path / "existing"
+    target.mkdir(mode=0o700)
+    before = target.stat()
+    journal: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        doctor_cli.os, "fsync",
+        lambda _descriptor: (_ for _ in ()).throw(OSError("injected fsync")),
+    )
+    with pytest.raises(OSError, match="injected fsync"):
+        doctor_cli._provision_support_root(
+            target, group_gid=group_gid,
+            worktree_device=tmp_path.stat().st_dev, journal=journal,
+        )
+    monkeypatch.undo()
+    assert not doctor_cli._close_mutation_journal(journal, rollback=True)
+    after = target.stat()
+    assert (after.st_uid, after.st_gid, stat.S_IMODE(after.st_mode)) == (
+        before.st_uid, before.st_gid, stat.S_IMODE(before.st_mode),
+    )
+
+
+def test_support_root_fsyncs_each_created_child_before_its_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group_gid = grp.getgrnam("tgw-coders").gr_gid
+    target = tmp_path / "new-parent/archive"
+    journal: list[dict[str, object]] = []
+    events: list[tuple[int, int]] = []
+    original = doctor_cli.os.fsync
+
+    def record(descriptor: int) -> None:
+        state = os.fstat(descriptor)
+        events.append((state.st_dev, state.st_ino))
+        original(descriptor)
+
+    monkeypatch.setattr(doctor_cli.os, "fsync", record)
+    doctor_cli._provision_support_root(
+        target, group_gid=group_gid,
+        worktree_device=tmp_path.stat().st_dev, journal=journal,
+    )
+    target_identity = (target.stat().st_dev, target.stat().st_ino)
+    parent_identity = (target.parent.stat().st_dev, target.parent.stat().st_ino)
+    assert events[-3:] == [target_identity, parent_identity, target_identity]
+    assert not doctor_cli._close_mutation_journal(journal, rollback=True)
+
+
+@pytest.mark.parametrize("bad", [None, "", "relative/path", "duplicate"])
+def test_coding_support_roots_reject_incomplete_or_aliased_configuration(tmp_path: Path, bad: str | None) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    config = json.loads(paths.coding_config.read_text())
+    if bad == "duplicate":
+        config["coding"]["runner_state_root"] = config["coding"]["preservation_archive_root"]
+    else:
+        config["coding"]["preservation_archive_root"] = bad
+    _write_json(paths.coding_config, config)
+    group_gid = grp.getgrnam("tgw-coders").gr_gid
+    assert not all(row["exact"] for row in doctor_cli._coding_support_roots(paths, group_gid).values())
+    with pytest.raises(doctor_cli.DoctorError, match="both distinct non-empty absolute"):
+        doctor_cli._provision_coding_support_roots(paths, group_gid, [])

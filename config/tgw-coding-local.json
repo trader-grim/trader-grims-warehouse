@@ -8,6 +8,8 @@
   "coding": {
     "repository_root": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
     "worktree_root": "/opt/TGW/var/worktrees",
+    "preservation_archive_root": "/opt/TGW/var/tgw-coders/coding-preservation",
+    "runner_state_root": "/opt/TGW/var/tgw-coders/runner-control",
     "timeout_s": 1800,
     "commands": {
       "codex-implement": [

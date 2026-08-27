@@ -22,6 +22,7 @@ from tgw.development.partial_resume import (
     PRESERVATION,
     candidate_changed_paths,
     classify,
+    retire_preservation,
     source_tree,
 )
 from tgw.development.worktree_lease import exclusive_worktree_lease as _exclusive_worktree_lease
@@ -369,6 +370,7 @@ def _recover_existing_candidate(job: dict[str, Any], cwd: Path, *, todo_id: int)
     recovery = _preserve_late_source(cwd, todo_id=todo_id, candidate=head)
     if _source_status(cwd):
         raise HardFailure("Codex implementation could not recover existing candidate")
+    retirement = retire_preservation(cwd, todo_id=todo_id, candidate_commit=head)
     artifacts: list[dict[str, Any]] = [
         {
             "kind": "closed_candidate",
@@ -387,6 +389,8 @@ def _recover_existing_candidate(job: dict[str, Any], cwd: Path, *, todo_id: int)
                 "detail": "late source preserved outside the active worktree",
             }
         )
+    if retirement:
+        artifacts.append({"kind": "preservation_retirement", "archive": retirement["archive"], "receipt_sha256": retirement["receipt_sha256"]})
     return {
         "outcome": "satisfied",
         "established_conditions": ["implemented"],
@@ -523,24 +527,25 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
             "established_conditions": [],
             "artifacts": [{"kind": "codex_failure", "detail": "final report violates runner contract"}],
         }
-    diff_stat = _git(cwd, "diff", "--stat")
     artifacts = [
         {"kind": "codex_summary", "detail": report["summary"]},
         {"kind": "tests_reported", "tests": report["tests"]},
-        {"kind": "git_diff", "detail": diff_stat},
     ]
     if cleanup_artifact is not None:
         artifacts.append(cleanup_artifact)
     if report["status"] != "implemented" or not changed:
         return {"outcome": "partial", "established_conditions": [], "artifacts": artifacts}
     candidate, tree, recovery = _close_candidate(cwd, todo_id=task["todo_id"], baseline=before_head)
+    retirement = retire_preservation(cwd, todo_id=task["todo_id"], candidate_commit=candidate)
+    changed_paths = candidate_changed_paths(cwd, before_head, candidate)
+    artifacts.append({"kind": "git_diff", "detail": _git(cwd, "diff", "--stat", "--no-renames", f"{before_head}..{candidate}"), "changed_paths": changed_paths})
     artifacts.append(
         {
             "kind": "closed_candidate",
             "commit": candidate,
             "tree": tree,
             "base_commit": before_head,
-            "changed_paths": candidate_changed_paths(cwd, before_head, candidate),
+            "changed_paths": changed_paths,
         }
     )
     if recovery:
@@ -551,6 +556,8 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
                 "detail": "lease-violating late source preserved outside the active worktree",
             }
         )
+    if retirement:
+        artifacts.append({"kind": "preservation_retirement", "archive": retirement["archive"], "receipt_sha256": retirement["receipt_sha256"]})
     return {
         "outcome": "satisfied",
         "established_conditions": ["implemented"],

@@ -359,6 +359,7 @@ class CodingWorker(QueueWorker):
                     **os.environ,
                     "TGW_CODING_JOB": json.dumps(payload),
                     "TGW_CODING_WORKTREE_SRC": str(worktree / "src"),
+                    **({"TGW_CODING_PRESERVATION_ARCHIVE_ROOT": str(coding["preservation_archive_root"])} if coding.get("preservation_archive_root") else {}),
                     **({"TGW_CODING_WORKTREE_LEASE_FD": str(lease_fd)} if lease_fd is not None else {}),
                 },
                 pass_fds=(lease_fd,) if lease_fd is not None else (),

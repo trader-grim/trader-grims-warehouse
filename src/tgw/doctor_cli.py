@@ -632,7 +632,8 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
             "worktree_root": _shared_git_directory(paths.worktrees, group.gr_gid),
         }
         shared_trees = _inspect_shared_git_trees(paths, group.gr_gid)
-        exact = all(row["exact"] for row in actors.values()) and all(row["exact"] for row in directories.values()) and shared_trees["exact"]
+        protected_roots = _coding_support_roots(paths, group.gr_gid)
+        exact = all(row["exact"] for row in actors.values()) and all(row["exact"] for row in directories.values()) and shared_trees["exact"] and all(row["exact"] for row in protected_roots.values())
         return _check(
             "access.unix-group",
             "PASS" if exact else "FAIL",
@@ -645,6 +646,7 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
                 "actors": actors,
                 "directories": directories,
                 "shared_trees": shared_trees,
+                "protected_coding_roots": protected_roots,
             },
             repair=None if exact else "sudo -n tgw doctor repair unix-git-access",
         )
@@ -3556,6 +3558,33 @@ def _close_mutation_journal(journal: Sequence[Mapping[str, Any]], *, rollback: b
                     _rename_exchange(parent, backup, name)
                 os.unlink(backup, dir_fd=parent)
                 os.fsync(parent)
+            elif item["kind"] == "created_directory":
+                parent, descriptor = item["parent"], item["descriptor"]
+                if rollback:
+                    if descriptor is None:
+                        raise DoctorError(
+                            "created support directory identity was never bound; retained for recovery"
+                        )
+                    bound = os.fstat(descriptor)
+                    names = (item.get("staging_name"), item.get("published_name"))
+                    if any(not isinstance(name, str) for name in names):
+                        raise DoctorError("created support directory journal name is invalid")
+                    matches: list[str] = []
+                    for name in dict.fromkeys(names):
+                        try:
+                            visible = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        if stat.S_ISDIR(visible.st_mode) and (
+                            visible.st_dev, visible.st_ino
+                        ) == (bound.st_dev, bound.st_ino):
+                            matches.append(name)
+                    if len(matches) != 1:
+                        raise DoctorError(
+                            "created support directory has no unique bound rollback name"
+                        )
+                    os.rmdir(matches[0], dir_fd=parent)
+                    os.fsync(parent)
             else:
                 raise DoctorError("mutation journal entry kind is invalid")
         except Exception as exc:
@@ -4550,6 +4579,7 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
             for path, descriptor in bound:
                 _verify_bound_directory(path, descriptor)
             revalidate_preservation_directories()
+            support_roots_changed = _provision_coding_support_roots(paths, group_gid, journal)
             after = check_unix_access(paths)
             if after["state"] != "PASS":
                 raise DoctorError("ordinary Unix Git access remains incomplete after repair")
@@ -4576,7 +4606,7 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
             paths,
             "unix-git-access",
             before,
-            {"access": after, "quiescence": quiescence},
+            {"access": after, "quiescence": quiescence, "support_roots_created": support_roots_changed},
         )
     return {
         "ok": True,
@@ -5843,6 +5873,165 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+
+def _coding_support_roots(paths: DoctorPaths, group_gid: int) -> dict[str, dict[str, Any]]:
+    coding = _coding_config(paths).get("coding", {})
+    result: dict[str, dict[str, Any]] = {}
+    worktree_device = paths.worktrees.stat(follow_symlinks=False).st_dev
+    configured = [coding.get(key) for key in ("preservation_archive_root", "runner_state_root")]
+    invalid_configuration = any(not isinstance(raw, str) or not raw.strip() or not Path(raw).is_absolute() for raw in configured)
+    duplicate = not invalid_configuration and len({str(Path(raw)) for raw in configured}) != 2
+    for key, raw in zip(("preservation_archive_root", "runner_state_root"), configured, strict=True):
+        if invalid_configuration or duplicate:
+            result[key] = {"path": str(raw or ""), "exact": False, "reason": "both distinct non-empty absolute support roots are required"}
+            continue
+        path = Path(str(raw))
+        exact = False
+        reason = None
+        try:
+            observed = path.lstat()
+            resolved = path.resolve(strict=True)
+            owner = pwd.getpwuid(observed.st_uid)
+            group = grp.getgrgid(group_gid)
+            owner_ok = observed.st_uid == 0 or owner.pw_gid == group_gid or owner.pw_name in group.gr_mem
+            exact = (path.is_absolute() and resolved == path and not path.is_symlink()
+                     and stat.S_ISDIR(observed.st_mode) and observed.st_dev == worktree_device
+                     and observed.st_gid == group_gid and owner_ok
+                     and stat.S_IMODE(observed.st_mode) == 0o2770
+                     and not resolved.is_relative_to(paths.worktrees.resolve(strict=True)))
+            if not exact:
+                reason = "owner/group/mode/type/symlink/filesystem boundary differs"
+        except (KeyError, OSError, RuntimeError, ValueError) as exc:
+            reason = str(exc)
+        result[key] = {"path": str(path), "exact": exact, "reason": reason}
+    return result
+
+
+def _provision_support_root(
+    path: Path, *, group_gid: int, worktree_device: int,
+    journal: list[dict[str, Any]],
+) -> bool:
+    """Provision one absolute root using only no-follow directory descriptors."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    components = path.relative_to(path.anchor).parts
+    parent = os.open(path.anchor, flags)
+    target_created = False
+    try:
+        for index, component in enumerate(components):
+            if component in {"", ".", ".."}:
+                raise DoctorError(f"coding support root has unsafe component: {path}")
+            final = index == len(components) - 1
+            try:
+                child = os.open(component, flags, dir_fd=parent)
+            except FileNotFoundError:
+                # Build under an unguessable private name.  The requested final
+                # component is never opened or mutated until no-replace publish
+                # has made our already pinned inode visible there.
+                rollback_parent = os.dup(parent)
+                staging = f".{component}.tgw-stage-{secrets.token_hex(16)}"
+                try:
+                    os.mkdir(staging, 0o700, dir_fd=parent)
+                except Exception:
+                    os.close(rollback_parent)
+                    raise
+                creation = {
+                    "kind": "created_directory", "parent": rollback_parent,
+                    "descriptor": None, "staging_name": staging,
+                    "published_name": component, "phase": "staging",
+                }
+                journal.append(creation)
+                created = os.stat(staging, dir_fd=parent, follow_symlinks=False)
+                _support_root_checkpoint("creation-to-bind")
+                try:
+                    child = os.open(staging, flags, dir_fd=parent)
+                except Exception:
+                    raise
+                try:
+                    bound = os.fstat(child)
+                    if not stat.S_ISDIR(created.st_mode) or (
+                        created.st_dev, created.st_ino
+                    ) != (bound.st_dev, bound.st_ino):
+                        raise DoctorError("staged support directory changed before bind")
+                    creation["descriptor"] = os.dup(child)
+                    os.fchown(child, -1, group_gid)
+                    os.fchmod(child, 0o2770)
+                    os.fsync(child)
+                    _support_root_checkpoint("bind-to-publish")
+                    _rename_noreplace_at(parent, staging, parent, component)
+                    _support_root_checkpoint("rename-to-phase")
+                    creation["phase"] = "published"
+                    _support_root_checkpoint("after-publish")
+                    os.fsync(parent)
+                except Exception:
+                    os.close(child)
+                    raise
+                target_created |= final
+            os.close(parent)
+            parent = child
+        observed = os.fstat(parent)
+        if not stat.S_ISDIR(observed.st_mode) or observed.st_dev != worktree_device:
+            raise DoctorError(f"coding support root crosses the worktree filesystem: {path}")
+        _verify_bound_directory(path, parent)
+        if not target_created:
+            journal.append({"kind": "metadata", "descriptor": os.dup(parent), "before": observed})
+        os.fchown(parent, -1, group_gid)
+        os.fchmod(parent, 0o2770)
+        os.fsync(parent)
+        _verify_bound_directory(path, parent)
+        return target_created
+    finally:
+        os.close(parent)
+
+
+def _support_root_checkpoint(_phase: str) -> None:
+    """Deterministic test seam at otherwise non-fallible transaction boundaries."""
+
+
+def _rename_noreplace_at(source_fd: int, source: str, destination_fd: int, destination: str) -> None:
+    """Atomically publish one descriptor-relative name without replacement."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise DoctorError("renameat2 is unavailable; atomic directory publication is unsafe")
+    if renameat2(source_fd, os.fsencode(source), destination_fd, os.fsencode(destination), 1) != 0:
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise DoctorError("support directory appeared before no-replace publication")
+        raise DoctorError("atomic support directory publication failed") from OSError(
+            error, os.strerror(error), destination,
+        )
+
+
+def _provision_coding_support_roots(
+    paths: DoctorPaths, group_gid: int, journal: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    coding = _coding_config(paths).get("coding", {})
+    changed: list[str] = []
+    configured = [coding.get(key) for key in ("preservation_archive_root", "runner_state_root")]
+    if (any(not isinstance(raw, str) or not raw.strip() or not Path(raw).is_absolute() for raw in configured)
+            or len({str(Path(raw)) for raw in configured}) != 2):
+        raise DoctorError("both distinct non-empty absolute coding support roots are required")
+    if journal is None:
+        raise DoctorError("coding support-root provisioning requires a rollback journal")
+    worktrees = paths.worktrees.resolve(strict=True)
+    worktree_device = paths.worktrees.stat(follow_symlinks=False).st_dev
+    for key, raw in zip(("preservation_archive_root", "runner_state_root"), configured, strict=True):
+        path = Path(str(raw))
+        if not path.is_absolute() or path == Path(path.anchor) or path.is_relative_to(worktrees):
+            raise DoctorError(f"coding {key} is not an absolute outside-worktree path")
+        try:
+            created = _provision_support_root(
+                path, group_gid=group_gid, worktree_device=worktree_device, journal=journal,
+            )
+        except OSError as exc:
+            raise DoctorError(f"coding {key} cannot be provisioned safely: {exc}") from exc
+        if created:
+            changed.append(str(path))
+    checked = _coding_support_roots(paths, group_gid)
+    if not all(row["exact"] for row in checked.values()):
+        raise DoctorError("protected coding support roots remain incomplete after repair")
+    return changed
 
 
 if __name__ == "__main__":
