@@ -4069,10 +4069,13 @@ def _release_quiescence(
         errors.append(reloaded.stderr.strip() or "cannot reload systemd after local coding quiescence")
 
     marker_absent = not os.path.lexists(marker)
+    timer = "tgw-coding-local-foreman.timer"
+    foreman = "tgw-coding-local-foreman.service"
     worker_restoration_failed = False
     pre_foreman_barrier_failed = False
     foreman_restoration_failed = False
     post_foreman_barrier_failed = False
+    timer_restored = False
     if marker_absent:
         undesired = [
             unit
@@ -4085,8 +4088,6 @@ def _release_quiescence(
             if stopped.returncode:
                 worker_restoration_failed = True
                 errors.append(stopped.stderr.strip() or "cannot restore initially inactive local coding units")
-        timer = "tgw-coding-local-foreman.timer"
-        foreman = "tgw-coding-local-foreman.service"
         active_non_timer = [unit for unit in initially_active if unit not in {timer, foreman}]
         if active_non_timer and not worker_restoration_failed:
             started = _run(["systemctl", "start", *active_non_timer], timeout=30)
@@ -4130,15 +4131,20 @@ def _release_quiescence(
             started = _run(["systemctl", "start", timer], timeout=30)
             if started.returncode:
                 errors.append(started.stderr.strip() or "cannot restore local coding Foreman timer")
+            else:
+                timer_restored = True
     else:
         errors.append("quiescence marker remains; refusing to start local coding units")
 
-    wrong = [
-        unit
-        for unit in units
-        if _unit_state(unit).get("ActiveState")
-        != ("active" if unit in initially_active and unit in _ACTIVE_CODING_UNITS else "inactive")
-    ]
+    final_states = {unit: _unit_state(unit).get("ActiveState") for unit in units}
+    wrong = []
+    for unit in units:
+        expected = "active" if unit in initially_active and unit in _ACTIVE_CODING_UNITS else "inactive"
+        accepted = {expected}
+        if unit == foreman and timer_restored:
+            accepted.add("activating")
+        if final_states[unit] not in accepted:
+            wrong.append(unit)
     if wrong:
         errors.append("local coding units did not return to their initial state: " + ", ".join(wrong))
 

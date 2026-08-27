@@ -1151,13 +1151,19 @@ def test_coding_quiescence_guards_and_verifies_every_local_unit(
             active.clear()
         elif command[1] == "start":
             active.update(command[2:])
+            if command[2:] == ["tgw-coding-local-foreman.timer"]:
+                active.add("tgw-coding-local-foreman.service")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     def unit_state(unit):
         dropin = runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN
         return {
             "LoadState": "loaded",
-            "ActiveState": "active" if unit in active else "inactive",
+            "ActiveState": (
+                "activating"
+                if unit == "tgw-coding-local-foreman.service" and unit in active
+                else ("active" if unit in active else "inactive")
+            ),
             "DropInPaths": str(dropin) if dropin.exists() else "",
         }
 
@@ -1197,10 +1203,101 @@ def test_coding_quiescence_guards_and_verifies_every_local_unit(
     ]
     assert active == {
         "tgw-codex-implement-worker.service",
+        "tgw-coding-local-foreman.service",
         "tgw-coding-local-foreman.timer",
     }
     assert not quiescence_root.exists()
     assert not any(runtime_root.iterdir())
+
+
+def test_coding_quiescence_marker_unlink_failure_retains_recovery_and_refuses_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands = []
+    runtime_root = tmp_path / "systemd"
+    runtime_root.mkdir(mode=0o755)
+    quiescence_root = tmp_path / "tgw-doctor"
+    paths = doctor_cli.DoctorPaths(
+        systemd_runtime_root=runtime_root,
+        quiescence_root=quiescence_root,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+    unlink = doctor_cli._unlink_quiescence_file
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def fail_marker_unlink(path, *args, **kwargs):
+        if path == quiescence_root / doctor_cli._QUIESCENCE_MARKER:
+            raise OSError("injected marker unlink failure")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_unlink_quiescence_file", fail_marker_unlink)
+
+    with pytest.raises(doctor_cli.DoctorError, match="injected marker unlink failure") as exc_info:
+        with doctor_cli._coding_quiescence(paths):
+            pass
+
+    assert "quiescence marker remains; refusing to start local coding units" in str(exc_info.value)
+    assert "quiescence guards remain" in str(exc_info.value)
+    assert not any(command[1] == "start" for command in commands)
+    assert (quiescence_root / doctor_cli._QUIESCENCE_STATE).is_file()
+    assert (quiescence_root / doctor_cli._QUIESCENCE_MARKER).is_file()
+
+
+def test_coding_quiescence_rejects_timer_triggered_failed_foreman_and_retains_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    foreman = "tgw-coding-local-foreman.service"
+    timer = "tgw-coding-local-foreman.timer"
+    states = {unit: "inactive" for unit in doctor_cli._CODING_UNITS}
+    states[timer] = "active"
+    commands = []
+    runtime_root = tmp_path / "systemd"
+    runtime_root.mkdir(mode=0o755)
+    quiescence_root = tmp_path / "tgw-doctor"
+    paths = doctor_cli.DoctorPaths(
+        systemd_runtime_root=runtime_root,
+        quiescence_root=quiescence_root,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        if command[1] == "stop":
+            for unit in command[2:]:
+                states[unit] = "inactive"
+        elif command[1:] == ["start", timer]:
+            states[timer] = "active"
+            states[foreman] = "failed"
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def unit_state(unit):
+        dropin = runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN
+        return {
+            "LoadState": "loaded",
+            "ActiveState": states[unit],
+            "DropInPaths": str(dropin) if dropin.exists() else "",
+        }
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+
+    with pytest.raises(doctor_cli.DoctorError, match="did not return to their initial state"):
+        with doctor_cli._coding_quiescence(paths):
+            pass
+
+    starts = [command for command in commands if command[1] == "start"]
+    assert starts == [["systemctl", "start", timer]]
+    assert commands[-1] == ["systemctl", "start", timer]
+    assert states[foreman] == "failed"
+    assert (quiescence_root / doctor_cli._QUIESCENCE_STATE).is_file()
 
 
 def test_coding_quiescence_stops_timer_before_timer_triggered_activating_one_shot(
