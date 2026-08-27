@@ -22,13 +22,17 @@ import os
 import pwd
 import re
 import secrets
+import selectors
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -43,6 +47,11 @@ _LOOSE_OBJECT_DIRECTORY = re.compile(r"[0-9a-f]{2}\Z")
 _LOOSE_OBJECT_NAME = re.compile(r"[0-9a-f]{38}\Z")
 _STATES = {"PASS", "WARN", "FAIL", "UNKNOWN", "RESTART_REQUIRED"}
 _CONTEXT_COLD_PROBE_BUDGET_SECONDS = 15.0
+_CONTEXT_COLD_PROBE_STREAM_LIMIT = 1_048_576
+_CONTEXT_COLD_PROBE_TERMINATE_GRACE_SECONDS = 0.25
+_CONTEXT_COLD_PROBE_LOCK = threading.RLock()
+_PR_SET_CHILD_SUBREAPER = 36
+_PR_GET_CHILD_SUBREAPER = 37
 _FORBIDDEN_CODING_DEPENDENCIES = (
     "tgw-prod",
     "ssh",
@@ -912,6 +921,41 @@ def check_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
         return _failed("context.launcher", exc, repair=repair)
 
 
+def _linux_child_subreaper() -> int:
+    value = ctypes.c_int()
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_GET_CHILD_SUBREAPER, ctypes.byref(value), 0, 0, 0) != 0:
+        raise DoctorError("installed Context MCP cold probe cannot read descendant reaping state")
+    return value.value
+
+
+def _set_linux_child_subreaper(value: int) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_CHILD_SUBREAPER, value, 0, 0, 0) != 0:
+        raise DoctorError("installed Context MCP cold probe cannot set descendant reaping state")
+
+
+def _restore_linux_child_subreaper(value: int) -> None:
+    failure: Exception | None = None
+    restored = False
+    for _attempt in range(3):
+        try:
+            _set_linux_child_subreaper(value)
+            if _linux_child_subreaper() == value:
+                restored = True
+                break
+            failure = DoctorError(
+                "installed Context MCP cold probe cannot verify restored descendant reaping state"
+            )
+        except Exception as exc:
+            failure = exc
+    if restored and failure is None:
+        return
+    raise DoctorError(
+        "installed Context MCP cold probe cannot restore descendant reaping state"
+    ) from failure
+
+
 def _probe_context_stdio(
     launcher: Path,
     actor: str,
@@ -920,18 +964,79 @@ def _probe_context_stdio(
     *,
     staged_snapshot: Path | None = None,
 ) -> dict[str, Any]:
-    """Cold-probe the installed launcher through the real MCP stdio protocol."""
-    current = pwd.getpwuid(os.geteuid()).pw_name
-    command = [str(launcher)]
-    pass_fds: tuple[int, ...] = ()
+    """Serialize ownership of Linux's process-global child-subreaper state."""
+    with _CONTEXT_COLD_PROBE_LOCK:
+        return _probe_context_stdio_locked(
+            launcher,
+            actor,
+            expected,
+            timeout,
+            staged_snapshot=staged_snapshot,
+        )
+
+
+def _probe_context_stdio_locked(
+    launcher: Path,
+    actor: str,
+    expected: Mapping[str, Any],
+    timeout: float = _CONTEXT_COLD_PROBE_BUDGET_SECONDS,
+    *,
+    staged_snapshot: Path | None = None,
+) -> dict[str, Any]:
+    """Own a staged descriptor from the instant it is opened."""
     snapshot_descriptor = -1
-    child_setup = None
     if staged_snapshot is not None:
         if os.geteuid() != 0:
             raise DoctorError("Context staged cold preflight requires root")
         snapshot_descriptor = os.open(
             staged_snapshot, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
         )
+    result: dict[str, Any] | None = None
+    failure: Exception | None = None
+    try:
+        result = _probe_context_stdio_process(
+            launcher,
+            actor,
+            expected,
+            timeout,
+            staged_snapshot=staged_snapshot,
+            snapshot_descriptor=snapshot_descriptor,
+        )
+    except Exception as exc:
+        failure = exc
+    close_failure: Exception | None = None
+    try:
+        if snapshot_descriptor >= 0:
+            os.close(snapshot_descriptor)
+    except Exception as exc:
+        close_failure = exc
+    if close_failure is not None:
+        failures = [item for item in (failure, close_failure) if item is not None]
+        raise DoctorError(
+            "installed Context MCP cold probe outer cleanup failed: "
+            + "; ".join(str(item) for item in failures)
+        ) from failures[0]
+    if failure is not None:
+        raise failure
+    assert result is not None
+    return result
+
+
+def _probe_context_stdio_process(
+    launcher: Path,
+    actor: str,
+    expected: Mapping[str, Any],
+    timeout: float,
+    *,
+    staged_snapshot: Path | None,
+    snapshot_descriptor: int,
+) -> dict[str, Any]:
+    """Cold-probe the installed launcher through the real MCP stdio protocol."""
+    current = pwd.getpwuid(os.geteuid()).pw_name
+    command = [str(launcher)]
+    pass_fds: tuple[int, ...] = ()
+    child_setup = None
+    if staged_snapshot is not None:
         snapshot_state = os.fstat(snapshot_descriptor)
         if (
             not stat.S_ISREG(snapshot_state.st_mode)
@@ -939,7 +1044,6 @@ def _probe_context_stdio(
             or snapshot_state.st_gid != 0
             or snapshot_state.st_mode & 0o077
         ):
-            os.close(snapshot_descriptor)
             raise DoctorError("Context staged cold preflight snapshot is not root-bound")
         pass_fds = (snapshot_descriptor,)
         target = pwd.getpwnam(actor)
@@ -958,8 +1062,161 @@ def _probe_context_stdio(
         {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "tgw_context_status", "arguments": {}}},
         {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "tgw_context_current_task", "arguments": {}}},
     ]
-    payload = "".join(json.dumps(item, separators=(",", ":")) + "\n" for item in requests)
+    payload = "".join(
+        json.dumps(item, separators=(",", ":")) + "\n" for item in requests
+    ).encode()
+    process: subprocess.Popen[bytes] | None = None
+    subreaper_previous: int | None = None
+    stdout = bytearray()
+    stderr = bytearray()
+    pending = bytearray()
+    responses: dict[int, dict[str, Any]] = {}
+    leader_returncode: int | None = None
+    deadline = time.monotonic() + timeout
+    work_deadline = deadline - min(0.5, max(0.1, timeout * 0.25))
+
+    def consume_stdout(*, eof: bool = False) -> None:
+        while b"\n" in pending:
+            raw_line, _, remainder = pending.partition(b"\n")
+            pending[:] = remainder
+            try:
+                value = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise DoctorError(
+                    "installed Context MCP cold probe returned invalid JSON"
+                ) from exc
+            if not isinstance(value, dict) or value.get("jsonrpc") != "2.0":
+                raise DoctorError(
+                    "installed Context MCP cold probe returned a non-JSON-RPC 2.0 message"
+                )
+            if "id" not in value:
+                if (
+                    not isinstance(value.get("method"), str)
+                    or "result" in value
+                    or "error" in value
+                    or (
+                        "params" in value
+                        and not isinstance(value["params"], (Mapping, list))
+                    )
+                ):
+                    raise DoctorError(
+                        "installed Context MCP cold probe returned an unexpected JSON-RPC message"
+                    )
+                continue
+            request_id = value.get("id")
+            if (
+                type(request_id) is not int
+                or request_id not in {1, 2, 3, 4}
+                or request_id in responses
+            ):
+                raise DoctorError(
+                    "installed Context MCP cold probe returned an inexact or duplicate response id"
+                )
+            responses[request_id] = value
+        if eof and pending:
+            raise DoctorError(
+                "installed Context MCP cold probe returned incomplete trailing output"
+            )
+
+    def stop_process_group() -> int | None:
+        if process is None:
+            return None
+        failures: list[Exception] = []
+        if process.stdin is not None and not process.stdin.closed:
+            try:
+                process.stdin.close()
+            except Exception as exc:
+                failures.append(exc)
+        # The probe owns a session, so group signalling cannot affect Doctor.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except Exception as exc:
+            failures.append(exc)
+        grace_deadline = min(
+            deadline,
+            time.monotonic() + _CONTEXT_COLD_PROBE_TERMINATE_GRACE_SECONDS,
+        )
+        while time.monotonic() < grace_deadline:
+            time.sleep(min(0.01, grace_deadline - time.monotonic()))
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception as exc:
+            failures.append(exc)
+        # SIGKILL is the final group operation.  Keeping the leader unreaped
+        # until now reserves its pid/pgid against reuse.
+        observed = None
+        while observed is None and time.monotonic() < deadline:
+            try:
+                observed = os.waitid(
+                    os.P_PID,
+                    process.pid,
+                    os.WEXITED | os.WNOWAIT | os.WNOHANG,
+                )
+            except ChildProcessError as exc:
+                failures.append(exc)
+                break
+            if observed is None:
+                time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        returncode = None
+        if observed is None:
+            failures.append(
+                DoctorError(
+                    "installed Context MCP cold probe could not observe the leader exit"
+                )
+            )
+        else:
+            try:
+                _pid, status = os.waitpid(process.pid, 0)
+                returncode = os.waitstatus_to_exitcode(status)
+            except Exception as exc:
+                failures.append(exc)
+        group_empty = False
+        while True:
+            try:
+                reaped, _status = os.waitpid(-process.pid, os.WNOHANG)
+            except ChildProcessError:
+                group_empty = True
+                break
+            except Exception as exc:
+                failures.append(exc)
+                break
+            if reaped == 0:
+                if time.monotonic() >= deadline:
+                    failures.append(
+                        DoctorError(
+                            "installed Context MCP cold probe process group did not empty"
+                        )
+                    )
+                    break
+                time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        if not group_empty and not any(
+            "process group did not empty" in str(item) for item in failures
+        ):
+            failures.append(
+                DoctorError(
+                    "installed Context MCP cold probe cannot prove the process group empty"
+                )
+            )
+        if failures:
+            raise DoctorError("; ".join(str(item) for item in failures)) from failures[0]
+        return returncode
+
     try:
+        subreaper_previous = _linux_child_subreaper()
+        try:
+            _set_linux_child_subreaper(1)
+            if _linux_child_subreaper() != 1:
+                raise DoctorError(
+                    "installed Context MCP cold probe cannot verify descendant reaping"
+                )
+        except Exception:
+            _restore_linux_child_subreaper(subreaper_previous)
+            subreaper_previous = None
+            raise
         environment = {
             "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
             "LANG": "C.UTF-8",
@@ -968,34 +1225,85 @@ def _probe_context_stdio(
         }
         if staged_snapshot is not None:
             environment["TGW_CONTEXT_PREFLIGHT_SNAPSHOT_FD"] = str(snapshot_descriptor)
-        completed = subprocess.run(
-            command, input=payload, text=True, capture_output=True,
-            timeout=timeout, check=False,
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=environment,
             pass_fds=pass_fds,
             preexec_fn=child_setup,
+            start_new_session=True,
+            bufsize=0,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise DoctorError(f"installed Context MCP cold probe timed out after {timeout:g}s and was terminated") from exc
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        process.stdin.write(payload)
+        process.stdin.flush()
+        stdin_open = True
+        open_streams = {"stdout", "stderr"}
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            while open_streams:
+                remaining = work_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DoctorError(
+                        f"installed Context MCP cold probe timed out after {timeout:g}s and was terminated"
+                    )
+                events = selector.select(min(remaining, 0.05))
+                for key, _mask in events:
+                    chunk = os.read(key.fileobj.fileno(), 65_536)
+                    target = stdout if key.data == "stdout" else stderr
+                    if len(target) + len(chunk) > _CONTEXT_COLD_PROBE_STREAM_LIMIT:
+                        raise DoctorError(
+                            f"installed Context MCP cold probe {key.data} exceeded its bounded output"
+                        )
+                    target.extend(chunk)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        open_streams.remove(key.data)
+                        if key.data == "stdout":
+                            consume_stdout(eof=True)
+                        continue
+                    if key.data == "stdout":
+                        pending.extend(chunk)
+                        consume_stdout()
+                if stdin_open and set(responses) == {1, 2, 3, 4}:
+                    process.stdin.close()
+                    stdin_open = False
     finally:
-        if snapshot_descriptor >= 0:
-            os.close(snapshot_descriptor)
-    if completed.returncode:
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        raise DoctorError(f"installed Context MCP cold probe exited {completed.returncode}: {detail or 'no diagnostic output'}")
-    responses: dict[int, dict[str, Any]] = {}
-    try:
-        for line in completed.stdout.splitlines():
-            value = json.loads(line)
-            if not isinstance(value, dict) or value.get("jsonrpc") != "2.0":
-                raise DoctorError("installed Context MCP cold probe returned a non-JSON-RPC 2.0 message")
-            if "id" in value:
-                request_id = value.get("id")
-                if type(request_id) is not int or request_id not in {1, 2, 3, 4} or request_id in responses:
-                    raise DoctorError("installed Context MCP cold probe returned an inexact or duplicate response id")
-                responses[request_id] = value
-    except json.JSONDecodeError as exc:
-        raise DoctorError("installed Context MCP cold probe returned invalid JSON") from exc
+        cleanup_failures: list[Exception] = []
+        try:
+            leader_returncode = stop_process_group()
+        except Exception as exc:
+            cleanup_failures.append(exc)
+        if subreaper_previous is not None:
+            try:
+                _restore_linux_child_subreaper(subreaper_previous)
+            except Exception as exc:
+                cleanup_failures.append(exc)
+        if cleanup_failures:
+            raise DoctorError(
+                "installed Context MCP cold probe cleanup failed: "
+                + "; ".join(str(item) for item in cleanup_failures)
+            ) from cleanup_failures[0]
+    if leader_returncode:
+        detail = stderr.decode(errors="replace").strip()
+        raise DoctorError(
+            f"installed Context MCP cold probe exited {leader_returncode}: "
+            f"{detail or 'no diagnostic output'}"
+        )
+    if set(responses) != {1, 2, 3, 4}:
+        detail = (
+            stderr.decode(errors="replace").strip()
+            or stdout.decode(errors="replace").strip()
+        )
+        raise DoctorError(
+            "installed Context MCP cold probe exited before all responses: "
+            f"{detail or 'no diagnostic output'}"
+        )
     for request_id, label in ((1, "initialize"), (2, "tools/list"), (3, "tgw_context_status"), (4, "tgw_context_current_task")):
         response = responses.get(request_id)
         if not response or "error" in response or "result" not in response:

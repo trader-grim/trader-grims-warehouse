@@ -7,10 +7,13 @@ import json
 import os
 import pwd
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -482,7 +485,7 @@ def test_context_process_match_ignores_parent_shell_command_text() -> None:
     assert not doctor_cli._is_context_process(["bash", "-c", "/opt/TGW/tgw-lib/bin/tgw-context-mcp"])
 
 
-def test_context_cold_probe_response_after_ten_seconds_within_budget_passes(
+def test_context_cold_probe_keeps_stdin_open_until_eof_sensitive_fourth_response(
     tmp_path: Path,
 ) -> None:
     actor = pwd.getpwuid(os.geteuid()).pw_name
@@ -518,8 +521,8 @@ def test_context_cold_probe_response_after_ten_seconds_within_budget_passes(
     launcher = tmp_path / "tgw-context-mcp"
     launcher.write_text(
         "#!" + sys.executable + "\n"
-        "import json,sys,time\n"
-        "time.sleep(10.1)\n"
+        "import json,os,select,sys,time\n"
+        "if not os.environ.get('TGW_OLD_BATCH'): time.sleep(10.1)\n"
         "actor=" + repr(actor) + "\n"
         "for line in sys.stdin:\n"
         " r=json.loads(line); i=r.get('id'); m=r.get('method')\n"
@@ -528,6 +531,9 @@ def test_context_cold_probe_response_after_ten_seconds_within_budget_passes(
         + repr(sorted(schemas.items())) + "]}\n"
         " elif m=='tools/call':\n"
         "  name=r['params']['name']\n"
+        "  if name=='tgw_context_current_task':\n"
+        "   readable,_,_=select.select([sys.stdin],[],[],0.1)\n"
+        "   if readable and sys.stdin.read()=='': continue\n"
         "  if name=='tgw_context_current_task': value={'actor':actor,"
         "'receiver':actor,'plan':{'approved_commit':'a'*40},"
         "'implementation':{'development_source':{'commit':'b'*40}},"
@@ -543,6 +549,24 @@ def test_context_cold_probe_response_after_ten_seconds_within_budget_passes(
         encoding="utf-8",
     )
     launcher.chmod(0o555)
+
+    old_requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "tgw_context_status", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "tgw_context_current_task", "arguments": {}}},
+    ]
+    old_batch = subprocess.run(
+        [str(launcher)],
+        input="".join(json.dumps(item) + "\n" for item in old_requests),
+        text=True,
+        capture_output=True,
+        check=False,
+        env={"TGW_OLD_BATCH": "1"},
+        timeout=2,
+    )
+    assert {json.loads(line)["id"] for line in old_batch.stdout.splitlines()} == {1, 2, 3}
 
     result = doctor_cli._probe_context_stdio(launcher, actor, expected)
 
@@ -575,6 +599,306 @@ def test_context_cold_probe_response_beyond_budget_is_terminated(tmp_path: Path)
             pwd.getpwuid(os.geteuid()).pw_name,
             {},
         )
+
+
+def test_context_cold_probe_reports_early_exit_and_reaps_child(tmp_path: Path) -> None:
+    launcher = tmp_path / "tgw-context-mcp"
+    launcher.write_text(
+        "#!" + sys.executable + "\n"
+        "import sys\n"
+        "sys.stderr.write('fixture stopped early\\n')\n"
+        "raise SystemExit(7)\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o555)
+
+    with pytest.raises(
+        doctor_cli.DoctorError,
+        match=r"cold probe exited 7: fixture stopped early",
+    ):
+        doctor_cli._probe_context_stdio(
+            launcher,
+            pwd.getpwuid(os.geteuid()).pw_name,
+            {},
+            timeout=2,
+        )
+
+
+@pytest.mark.parametrize(
+    ("trailing", "error"),
+    [
+        (b'{"jsonrpc":"2.0"', "incomplete trailing output"),
+        (b"not-json\n", "returned invalid JSON"),
+    ],
+)
+def test_context_cold_probe_rejects_trailing_output_after_all_responses(
+    tmp_path: Path, trailing: bytes, error: str
+) -> None:
+    launcher = tmp_path / "tgw-context-mcp"
+    launcher.write_text(
+        "#!" + sys.executable + "\n"
+        "import json,sys,time\n"
+        f"trailing={trailing!r}\n"
+        "for line in sys.stdin:\n"
+        " request=json.loads(line); request_id=request.get('id')\n"
+        " if request_id is not None:\n"
+        "  print(json.dumps({'jsonrpc':'2.0','id':request_id,'result':{}}),flush=True)\n"
+        " if request_id == 4: break\n"
+        "sys.stdin.read()\n"
+        "time.sleep(0.45)\n"
+        "sys.stdout.buffer.write(trailing); sys.stdout.buffer.flush()\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o555)
+
+    started = time.monotonic()
+    with pytest.raises(doctor_cli.DoctorError, match=error):
+        doctor_cli._probe_context_stdio(
+            launcher,
+            pwd.getpwuid(os.geteuid()).pw_name,
+            {},
+            timeout=2,
+        )
+    assert time.monotonic() - started >= 0.4
+
+
+def test_context_cold_probe_cleanup_orders_signals_before_leader_reap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = tmp_path / "launcher"
+    launcher.write_text(
+        "#!" + sys.executable + "\nimport sys,time\nfor _ in sys.stdin: pass\ntime.sleep(10)\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o555)
+    events: list[tuple[str, int]] = []
+    real_killpg = doctor_cli.os.killpg
+    real_waitpid = doctor_cli.os.waitpid
+
+    def killpg(pgid: int, sig: int) -> None:
+        events.append(("killpg", sig))
+        real_killpg(pgid, sig)
+
+    def waitpid(pid: int, options: int):
+        events.append(("waitpid", pid))
+        return real_waitpid(pid, options)
+
+    monkeypatch.setattr(doctor_cli.os, "killpg", killpg)
+    monkeypatch.setattr(doctor_cli.os, "waitpid", waitpid)
+    monkeypatch.setattr(
+        doctor_cli, "_CONTEXT_COLD_PROBE_TERMINATE_GRACE_SECONDS", 0.01
+    )
+    with pytest.raises(doctor_cli.DoctorError):
+        doctor_cli._probe_context_stdio(
+            launcher, pwd.getpwuid(os.geteuid()).pw_name, {}, timeout=1
+        )
+    term = events.index(("killpg", signal.SIGTERM))
+    kill = events.index(("killpg", signal.SIGKILL))
+    leader_wait = next(index for index, event in enumerate(events) if event[0] == "waitpid" and event[1] > 0)
+    assert term < kill < leader_wait
+    assert not any(event[0] == "killpg" for event in events[leader_wait + 1 :])
+
+
+def test_context_cold_probe_cleanup_faults_continue_and_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = tmp_path / "launcher"
+    launcher.write_text(
+        "#!" + sys.executable + "\nimport sys,time\nfor _ in sys.stdin: pass\ntime.sleep(10)\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o555)
+    events: list[str] = []
+    real_popen = doctor_cli.subprocess.Popen
+    real_killpg = doctor_cli.os.killpg
+    real_waitpid = doctor_cli.os.waitpid
+    real_restore = doctor_cli._restore_linux_child_subreaper
+
+    class FaultingStdin:
+        def __init__(self, stream) -> None:
+            self.stream = stream
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def close(self) -> None:
+            events.append("stdin-close")
+            self.stream.close()
+            raise OSError("injected stdin close failure")
+
+    def popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        process.stdin = FaultingStdin(process.stdin)
+        return process
+
+    def killpg(pgid: int, sig: int) -> None:
+        events.append(signal.Signals(sig).name)
+        real_killpg(pgid, sig)
+        raise OSError(f"injected {signal.Signals(sig).name} failure")
+
+    def waitpid(pid: int, options: int):
+        events.append("leader-reap" if pid > 0 else "group-reap")
+        return real_waitpid(pid, options)
+
+    def restore(value: int) -> None:
+        events.append("restore")
+        real_restore(value)
+
+    monkeypatch.setattr(doctor_cli.subprocess, "Popen", popen)
+    monkeypatch.setattr(doctor_cli.os, "killpg", killpg)
+    monkeypatch.setattr(doctor_cli.os, "waitpid", waitpid)
+    monkeypatch.setattr(doctor_cli, "_restore_linux_child_subreaper", restore)
+    monkeypatch.setattr(
+        doctor_cli, "_CONTEXT_COLD_PROBE_TERMINATE_GRACE_SECONDS", 0.01
+    )
+    with pytest.raises(doctor_cli.DoctorError, match="stdin close failure.*SIGTERM.*SIGKILL"):
+        doctor_cli._probe_context_stdio(
+            launcher, pwd.getpwuid(os.geteuid()).pw_name, {}, timeout=1
+        )
+    assert events.index("SIGTERM") < events.index("SIGKILL") < events.index("leader-reap")
+    assert "group-reap" in events
+    assert events[-1] == "restore"
+
+
+def test_context_staged_probe_fstat_failure_closes_snapshot_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.write_text("{}", encoding="utf-8")
+    descriptor = os.open(snapshot, os.O_RDONLY)
+    real_fstat = doctor_cli.os.fstat
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli.os, "open", lambda *args, **kwargs: descriptor)
+    monkeypatch.setattr(
+        doctor_cli.os,
+        "fstat",
+        lambda fd: (_ for _ in ()).throw(OSError("injected fstat failure")),
+    )
+    with pytest.raises(OSError, match="injected fstat failure"):
+        doctor_cli._probe_context_stdio_locked(
+            Path("/launcher"), "actor", {}, staged_snapshot=snapshot
+        )
+    with pytest.raises(OSError):
+        real_fstat(descriptor)
+
+
+def test_context_cold_probe_kills_real_forked_descendant(tmp_path: Path) -> None:
+    descendant_pid = tmp_path / "descendant.pid"
+    launcher = tmp_path / "tgw-context-mcp"
+    launcher.write_text(
+        "#!" + sys.executable + "\n"
+        "import json,os,signal,sys,time\n"
+        f"pid_path={str(descendant_pid)!r}\n"
+        "child=os.fork()\n"
+        "if child == 0:\n"
+        " os.close(0)\n"
+        " signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        " open(pid_path,'w').write(str(os.getpid()))\n"
+        " while True: time.sleep(1)\n"
+        "for line in sys.stdin:\n"
+        " request=json.loads(line); request_id=request.get('id')\n"
+        " if request_id is not None:\n"
+        "  print(json.dumps({'jsonrpc':'2.0','id':request_id,'result':{}}),flush=True)\n"
+        " if request_id == 4: break\n"
+        "sys.stdin.read()\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o555)
+
+    with pytest.raises(doctor_cli.DoctorError, match="timed out after 2s"):
+        doctor_cli._probe_context_stdio(
+            launcher,
+            pwd.getpwuid(os.geteuid()).pw_name,
+            {},
+            timeout=2,
+        )
+    pid = int(descendant_pid.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_context_cold_probe_serializes_concurrent_subreaper_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    observations: list[str] = []
+
+    def locked(*args, **kwargs):
+        observations.append("enter")
+        entered.set()
+        assert release.wait(2)
+        observations.append("leave")
+        return {"actor": args[1]}
+
+    monkeypatch.setattr(doctor_cli, "_probe_context_stdio_locked", locked)
+    actor = pwd.getpwuid(os.geteuid()).pw_name
+    first = threading.Thread(
+        target=doctor_cli._probe_context_stdio,
+        args=(Path("/first"), actor, {}),
+    )
+    second = threading.Thread(
+        target=doctor_cli._probe_context_stdio,
+        args=(Path("/second"), actor, {}),
+    )
+    first.start()
+    assert entered.wait(2)
+    second.start()
+    assert observations == ["enter"]
+    release.set()
+    first.join(2)
+    second.join(2)
+    assert observations == ["enter", "leave", "enter", "leave"]
+
+
+def test_context_cold_probe_restore_failure_is_reported_after_state_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = 1
+    calls = 0
+
+    def set_state(value: int) -> None:
+        nonlocal state, calls
+        calls += 1
+        state = value
+        if calls == 1:
+            raise OSError("reported restore failure")
+
+    monkeypatch.setattr(doctor_cli, "_set_linux_child_subreaper", set_state)
+    monkeypatch.setattr(doctor_cli, "_linux_child_subreaper", lambda: state)
+    with pytest.raises(doctor_cli.DoctorError, match="cannot restore"):
+        doctor_cli._restore_linux_child_subreaper(0)
+    assert state == 0
+    assert calls == 2
+
+
+def test_context_staged_probe_invalid_actor_closes_snapshot_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    descriptor = os.open(snapshot, os.O_RDONLY)
+    real_open = doctor_cli.os.open
+    real_fstat = doctor_cli.os.fstat
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli.os, "open", lambda *args, **kwargs: descriptor)
+    monkeypatch.setattr(
+        doctor_cli.os,
+        "fstat",
+        lambda fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0),
+    )
+    monkeypatch.setattr(
+        doctor_cli.pwd,
+        "getpwnam",
+        lambda actor: (_ for _ in ()).throw(KeyError(actor)),
+    )
+    with pytest.raises(KeyError):
+        doctor_cli._probe_context_stdio_locked(
+            Path("/launcher"), "invalid-actor", {}, staged_snapshot=snapshot
+        )
+    with pytest.raises(OSError):
+        real_fstat(descriptor)
+    monkeypatch.setattr(doctor_cli.os, "open", real_open)
 
 
 def test_context_generation_descriptor_rejects_hardlinks(tmp_path: Path) -> None:
@@ -615,7 +939,7 @@ def test_context_generation_descriptor_rejects_path_replacement(
 
 @pytest.mark.parametrize("failure", ["status_false", "mcp_error", "binding_mismatch"])
 def test_context_cold_probe_rejects_false_error_and_mismatched_status(
-    monkeypatch: pytest.MonkeyPatch, failure: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     actor = pwd.getpwuid(os.geteuid()).pw_name
     expected = {"plan_commit": "a" * 40, "source_commit": "b" * 40, "source_tree": "c" * 40, "snapshot_sha256": "sha256:" + "d" * 64}
@@ -631,24 +955,77 @@ def test_context_cold_probe_rejects_false_error_and_mismatched_status(
         },
         "context": dict(expected),
     }
-    observed: dict[str, Any] = {}
-
-    def run(command, **kwargs):
-        observed["env"] = kwargs["env"]
-        responses = [
-            {"jsonrpc": "2.0", "id": 1, "result": {}},
-            {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "tgw_context_status"}, {"name": "tgw_context_current_task"}]}},
-            {"jsonrpc": "2.0", "id": 3, "result": {"isError": failure == "mcp_error", "content": [{"type": "text", "text": json.dumps(status)}]}},
-            {"jsonrpc": "2.0", "id": 4, "result": {"isError": False, "content": [{"type": "text", "text": json.dumps(task)}]}},
-        ]
-        return subprocess.CompletedProcess(command, 0, "\n".join(json.dumps(row) for row in responses), "")
+    schema_fields = {
+        "tgw_context_status": (),
+        "tgw_context_current_task": (),
+        "tgw_context_bundle": ("task", "limit"),
+        "tgw_context_code_graph": ("operation", "query", "limit"),
+        "tgw_context_plan_graph": ("task", "receiver", "operation", "limit"),
+        "tgw_context_plan_source": (
+            "path", "start_line", "max_lines", "authority",
+        ),
+        "tgw_context_onboarding": ("actor",),
+        "tgw_context_runbooks": (
+            "query", "path", "start_line", "max_lines", "limit", "authority",
+        ),
+    }
+    tools = []
+    for name, fields in schema_fields.items():
+        schema = {
+            "type": "object",
+            "properties": {
+                field: {
+                    "type": "integer"
+                    if field in {"limit", "start_line", "max_lines"}
+                    else "string"
+                }
+                for field in fields
+            },
+        }
+        if name in {
+            "tgw_context_plan_graph",
+            "tgw_context_plan_source",
+            "tgw_context_onboarding",
+        }:
+            schema["required"] = [fields[0]]
+        tools.append(
+            {"name": name, "description": "read only", "inputSchema": schema}
+        )
+    responses = [
+        {"jsonrpc": "2.0", "id": 1, "result": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "serverInfo": {"name": "fixture", "version": "1"},
+        }},
+        {"jsonrpc": "2.0", "id": 2, "result": {"tools": tools}},
+        {"jsonrpc": "2.0", "id": 3, "result": {"isError": failure == "mcp_error", "content": [{"type": "text", "text": json.dumps(status)}]}},
+        {"jsonrpc": "2.0", "id": 4, "result": {"isError": False, "content": [{"type": "text", "text": json.dumps(task)}]}},
+    ]
+    environment_record = tmp_path / "environment.json"
+    launcher = tmp_path / "launcher"
+    launcher.write_text(
+        "#!" + sys.executable + "\n"
+        "import json,os,sys\n"
+        f"open({str(environment_record)!r},'w').write(json.dumps(dict(os.environ)))\n"
+        f"responses={responses!r}\n"
+        "for line in sys.stdin:\n"
+        " request=json.loads(line); request_id=request.get('id')\n"
+        " if request_id is not None: print(json.dumps(responses[request_id-1]),flush=True)\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o555)
 
     monkeypatch.setenv("TGW_SECRET_MUST_NOT_LEAK", "secret")
-    monkeypatch.setattr(doctor_cli.subprocess, "run", run)
-    with pytest.raises(doctor_cli.DoctorError):
-        doctor_cli._probe_context_stdio(Path("/trusted/launcher"), actor, expected)
-    assert "TGW_SECRET_MUST_NOT_LEAK" not in observed["env"]
-    assert set(observed["env"]) == {"PATH", "LANG", "LC_ALL", "PYTHONDONTWRITEBYTECODE"}
+    expected_error = {
+        "status_false": "status returned error content",
+        "mcp_error": "status returned an MCP error",
+        "binding_mismatch": "status bindings differ",
+    }[failure]
+    with pytest.raises(doctor_cli.DoctorError, match=expected_error):
+        doctor_cli._probe_context_stdio(launcher, actor, expected)
+    observed = json.loads(environment_record.read_text(encoding="utf-8"))
+    assert "TGW_SECRET_MUST_NOT_LEAK" not in observed
+    assert set(observed) == {"PATH", "LANG", "LC_ALL", "PYTHONDONTWRITEBYTECODE"}
 
 
 def test_root_post_repair_checks_use_the_invoking_operator(
