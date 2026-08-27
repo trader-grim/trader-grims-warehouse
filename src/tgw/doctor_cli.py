@@ -52,6 +52,7 @@ _CONTEXT_COLD_PROBE_TERMINATE_GRACE_SECONDS = 0.25
 _CONTEXT_COLD_PROBE_LOCK = threading.RLock()
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
+_CODING_RUNTIME_GROUP = "tgw-coders"
 _FORBIDDEN_CODING_DEPENDENCIES = (
     "tgw-prod",
     "ssh",
@@ -956,6 +957,13 @@ def _restore_linux_child_subreaper(value: int) -> None:
     ) from failure
 
 
+def _drop_staged_probe_privileges(target: pwd.struct_passwd, coding_gid: int) -> None:
+    """Enter the harness identity with only runtime-parent traversal authority."""
+    os.setgroups([coding_gid])
+    os.setgid(target.pw_gid)
+    os.setuid(target.pw_uid)
+
+
 def _probe_context_stdio(
     launcher: Path,
     actor: str,
@@ -1047,11 +1055,24 @@ def _probe_context_stdio_process(
             raise DoctorError("Context staged cold preflight snapshot is not root-bound")
         pass_fds = (snapshot_descriptor,)
         target = pwd.getpwnam(actor)
+        if target.pw_name != actor:
+            raise DoctorError("Context staged cold preflight actor identity differs")
+        coding_group = grp.getgrnam(_CODING_RUNTIME_GROUP)
+        if grp.getgrgid(coding_group.gr_gid).gr_name != _CODING_RUNTIME_GROUP:
+            raise DoctorError("Context staged cold preflight coding group identity differs")
+        try:
+            actor_groups = os.getgrouplist(actor, target.pw_gid)
+        except OSError as exc:
+            raise DoctorError(
+                "Context staged cold preflight cannot resolve actor groups"
+            ) from exc
+        if coding_group.gr_gid not in actor_groups:
+            raise DoctorError(
+                "Context staged cold preflight actor is not a tgw-coders member"
+            )
 
         def child_setup() -> None:
-            os.setgroups([])
-            os.setgid(target.pw_gid)
-            os.setuid(target.pw_uid)
+            _drop_staged_probe_privileges(target, coding_group.gr_gid)
 
     elif actor != current:
         command = ["sudo", "-n", "-u", actor, str(launcher)]
@@ -3967,7 +3988,6 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
             raise DoctorError("staged context publisher output differs from exact inputs")
         # Cold-start the exact candidate launcher/runtime against the exact
         # staged inode before either cursor or live snapshot can be replaced.
-        os.chown(staged_snapshot, paths.context_install_uid, paths.context_install_gid)
         os.chmod(staged_snapshot, 0o400)
         staged_probe = _probe_context_stdio(
             selected_launcher,

@@ -910,6 +910,126 @@ def test_context_staged_probe_invalid_actor_closes_snapshot_fd(
     monkeypatch.setattr(doctor_cli.os, "open", real_open)
 
 
+def test_context_staged_probe_rejects_nonmember_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    snapshot.chmod(0o400)
+    target = SimpleNamespace(pw_name="actor", pw_uid=1234, pw_gid=1234)
+    coding_group = SimpleNamespace(gr_name="tgw-coders", gr_gid=983)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        doctor_cli.os,
+        "fstat",
+        lambda _fd: SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o400, st_uid=0, st_gid=0
+        ),
+    )
+    monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _actor: target)
+    monkeypatch.setattr(doctor_cli.grp, "getgrnam", lambda _name: coding_group)
+    monkeypatch.setattr(doctor_cli.grp, "getgrgid", lambda _gid: coding_group)
+    monkeypatch.setattr(doctor_cli.os, "getgrouplist", lambda *_args: [1234])
+    monkeypatch.setattr(
+        doctor_cli.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("non-member child was spawned"),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="not a tgw-coders member"):
+        doctor_cli._probe_context_stdio(
+            Path("/launcher"), "actor", {}, staged_snapshot=snapshot
+        )
+
+
+def test_context_staged_probe_rejects_mismatched_group_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    snapshot.chmod(0o400)
+    target = SimpleNamespace(pw_name="actor", pw_uid=1234, pw_gid=1234)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        doctor_cli.os,
+        "fstat",
+        lambda _fd: SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o400, st_uid=0, st_gid=0
+        ),
+    )
+    monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _actor: target)
+    monkeypatch.setattr(
+        doctor_cli.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_name="tgw-coders", gr_gid=983),
+    )
+    monkeypatch.setattr(
+        doctor_cli.grp,
+        "getgrgid",
+        lambda _gid: SimpleNamespace(gr_name="replacement", gr_gid=983),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="group identity differs"):
+        doctor_cli._probe_context_stdio(
+            Path("/launcher"), "actor", {}, staged_snapshot=snapshot
+        )
+
+
+def test_context_staged_probe_child_identity_keeps_only_coding_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+    target = SimpleNamespace(pw_uid=1004, pw_gid=1004)
+    monkeypatch.setattr(
+        doctor_cli.os, "setgroups", lambda groups: calls.append(("groups", groups))
+    )
+    monkeypatch.setattr(
+        doctor_cli.os, "setgid", lambda gid: calls.append(("gid", gid))
+    )
+    monkeypatch.setattr(
+        doctor_cli.os, "setuid", lambda uid: calls.append(("uid", uid))
+    )
+
+    doctor_cli._drop_staged_probe_privileges(target, 983)
+
+    assert calls == [("groups", [983]), ("gid", 1004), ("uid", 1004)]
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="real privilege drop requires root")
+def test_context_staged_probe_identity_traverses_real_selected_launcher_path() -> None:
+    actor = "codex"
+    target = pwd.getpwnam(actor)
+    coding_gid = grp.getgrnam("tgw-coders").gr_gid
+    selected_launcher = (
+        Path("/opt/TGW/tgw-lib/coding-runtime/current").resolve(strict=True)
+        / "scripts/tgw_context_debian_stdio.py"
+    )
+    assert selected_launcher.is_file()
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json,os,sys; "
+                "p=sys.argv[1]; open(p,'rb').read(2); "
+                "print(json.dumps([os.geteuid(),os.getegid(),os.getgroups()]))"
+            ),
+            str(selected_launcher),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        preexec_fn=lambda: doctor_cli._drop_staged_probe_privileges(
+            target, coding_gid
+        ),
+    )
+    assert completed.returncode == 0, completed.stderr
+    uid, primary_gid, supplementary = json.loads(completed.stdout)
+    assert uid == target.pw_uid
+    assert primary_gid == target.pw_gid
+    assert supplementary == [coding_gid]
+
+
 def test_context_generation_descriptor_rejects_hardlinks(tmp_path: Path) -> None:
     generation = tmp_path / "generation"
     generation.mkdir()
