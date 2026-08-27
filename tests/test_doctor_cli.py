@@ -769,7 +769,7 @@ def test_context_cold_probe_cleanup_faults_continue_and_restore(
     assert events[-1] == "restore"
 
 
-def test_context_staged_probe_fstat_failure_closes_snapshot_fd(
+def test_context_staged_probe_fstat_failure_leaves_caller_owned_snapshot_fd_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     snapshot = tmp_path / "snapshot"
@@ -785,10 +785,10 @@ def test_context_staged_probe_fstat_failure_closes_snapshot_fd(
     )
     with pytest.raises(OSError, match="injected fstat failure"):
         doctor_cli._probe_context_stdio_locked(
-            Path("/launcher"), "actor", {}, staged_snapshot=snapshot
+            Path("/launcher"), "actor", {}, staged_snapshot_descriptor=descriptor
         )
-    with pytest.raises(OSError):
-        real_fstat(descriptor)
+    real_fstat(descriptor)
+    os.close(descriptor)
 
 
 def test_context_cold_probe_kills_real_forked_descendant(tmp_path: Path) -> None:
@@ -881,7 +881,7 @@ def test_context_cold_probe_restore_failure_is_reported_after_state_restored(
     assert calls == 2
 
 
-def test_context_staged_probe_invalid_actor_closes_snapshot_fd(
+def test_context_staged_probe_invalid_actor_leaves_caller_owned_snapshot_fd_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     snapshot = tmp_path / "snapshot.json"
@@ -894,7 +894,7 @@ def test_context_staged_probe_invalid_actor_closes_snapshot_fd(
     monkeypatch.setattr(
         doctor_cli.os,
         "fstat",
-        lambda fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0),
+        lambda fd: SimpleNamespace(st_mode=stat.S_IFREG | 0o400, st_uid=0, st_gid=0),
     )
     monkeypatch.setattr(
         doctor_cli.pwd,
@@ -903,10 +903,10 @@ def test_context_staged_probe_invalid_actor_closes_snapshot_fd(
     )
     with pytest.raises(KeyError):
         doctor_cli._probe_context_stdio_locked(
-            Path("/launcher"), "invalid-actor", {}, staged_snapshot=snapshot
+            Path("/launcher"), "invalid-actor", {}, staged_snapshot_descriptor=descriptor
         )
-    with pytest.raises(OSError):
-        real_fstat(descriptor)
+    real_fstat(descriptor)
+    os.close(descriptor)
     monkeypatch.setattr(doctor_cli.os, "open", real_open)
 
 
@@ -936,10 +936,14 @@ def test_context_staged_probe_rejects_nonmember_before_spawn(
         lambda *_args, **_kwargs: pytest.fail("non-member child was spawned"),
     )
 
-    with pytest.raises(doctor_cli.DoctorError, match="not a tgw-coders member"):
-        doctor_cli._probe_context_stdio(
-            Path("/launcher"), "actor", {}, staged_snapshot=snapshot
-        )
+    descriptor = os.open(snapshot, os.O_RDONLY)
+    try:
+        with pytest.raises(doctor_cli.DoctorError, match="not a tgw-coders member"):
+            doctor_cli._probe_context_stdio(
+                Path("/launcher"), "actor", {}, staged_snapshot_descriptor=descriptor
+            )
+    finally:
+        os.close(descriptor)
 
 
 def test_context_staged_probe_rejects_mismatched_group_identity(
@@ -969,10 +973,14 @@ def test_context_staged_probe_rejects_mismatched_group_identity(
         lambda _gid: SimpleNamespace(gr_name="replacement", gr_gid=983),
     )
 
-    with pytest.raises(doctor_cli.DoctorError, match="group identity differs"):
-        doctor_cli._probe_context_stdio(
-            Path("/launcher"), "actor", {}, staged_snapshot=snapshot
-        )
+    descriptor = os.open(snapshot, os.O_RDONLY)
+    try:
+        with pytest.raises(doctor_cli.DoctorError, match="group identity differs"):
+            doctor_cli._probe_context_stdio(
+                Path("/launcher"), "actor", {}, staged_snapshot_descriptor=descriptor
+            )
+    finally:
+        os.close(descriptor)
 
 
 def test_context_staged_probe_child_identity_keeps_only_coding_group(
@@ -3055,12 +3063,27 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp
     monkeypatch.setattr(doctor_cli, "_run", run)
     monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
     probes = []
+
+    def probe(launcher, actor, expected, **kwargs):
+        descriptor = kwargs["staged_snapshot_descriptor"]
+        metadata = os.fstat(descriptor)
+        assert metadata.st_uid == paths.context_install_uid
+        assert metadata.st_gid == paths.context_install_gid
+        assert stat.S_IMODE(metadata.st_mode) == 0o400
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        retained_raw = b""
+        while chunk := os.read(descriptor, 11):
+            retained_raw += chunk
+        assert json.loads(retained_raw) == {
+            key: value for key, value in expected.items() if key != "task"
+        }
+        probes.append((launcher, actor, expected, kwargs))
+        return {"generation": "CURRENT"}
+
     monkeypatch.setattr(
         doctor_cli,
         "_probe_context_stdio",
-        lambda launcher, actor, expected, **kwargs: probes.append(
-            (launcher, actor, expected, kwargs)
-        ) or {"generation": "CURRENT"},
+        probe,
     )
 
     result = doctor_cli.repair_context(paths)
@@ -3085,9 +3108,244 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp
     assert probes[0][0] == (
         paths.runtime_root / "releases" / head / "scripts/tgw_context_debian_stdio.py"
     )
-    assert probes[0][3]["staged_snapshot"].name.startswith(
-        paths.context_snapshot.name + ".doctor-stage."
+    assert "staged_snapshot_descriptor" in probes[0][3]
+
+
+@pytest.mark.parametrize("hostile_kind", ["symlink", "hardlink"])
+def test_context_repair_rejects_linked_publisher_output_before_open_without_mutating_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hostile_kind: str
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"do not alter\n")
+    victim.chmod(0o644)
+    victim_before = victim.stat()
+    original_run = doctor_cli._run
+
+    def run(command, **kwargs):
+        if Path(command[0]).name == "tgw_context_publish.py":
+            output = Path(command[command.index("--output") + 1])
+            if hostile_kind == "symlink":
+                output.symlink_to(victim)
+            else:
+                os.link(victim, output)
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: pytest.fail("linked output reached cold probe"),
     )
+
+    with pytest.raises((OSError, doctor_cli.DoctorError)):
+        doctor_cli.repair_context(paths)
+
+    victim_after = victim.stat()
+    assert victim.read_bytes() == b"do not alter\n"
+    assert (victim_after.st_uid, victim_after.st_gid, stat.S_IMODE(victim_after.st_mode)) == (
+        victim_before.st_uid,
+        victim_before.st_gid,
+        stat.S_IMODE(victim_before.st_mode),
+    )
+
+
+@pytest.mark.parametrize("probe_fails", [False, True])
+def test_context_repair_retained_descriptor_defeats_path_replacement_after_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, probe_fails: bool
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    original_run = doctor_cli._run
+    published: list[bytes] = []
+    staged_path: Path | None = None
+
+    def run(command, **kwargs):
+        nonlocal staged_path
+        if Path(command[0]).name == "tgw_context_publish.py":
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            staged_path = Path(command[command.index("--output") + 1])
+            raw = publish_bytes(
+                json.loads(task_path.read_text()), json.loads(cursor_path.read_text())
+            )
+            published.append(raw)
+            staged_path.write_bytes(raw)
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    real_fchown = doctor_cli.os.fchown
+    replacement_state: list[os.stat_result] = []
+
+    def fchown(descriptor: int, uid: int, gid: int) -> None:
+        assert staged_path is not None
+        displaced = staged_path.with_suffix(".retained")
+        staged_path.rename(displaced)
+        staged_path.write_bytes(b"hostile replacement\n")
+        staged_path.chmod(0o666)
+        replacement_state.append(staged_path.stat())
+        real_fchown(descriptor, uid, gid)
+
+    observed_fd: list[int] = []
+    close_count = 0
+    retained_closed = False
+    real_close = doctor_cli.os.close
+
+    def close(descriptor: int) -> None:
+        nonlocal close_count, retained_closed
+        if observed_fd and descriptor == observed_fd[0] and not retained_closed:
+            close_count += 1
+            retained_closed = True
+        real_close(descriptor)
+
+    def probe(_launcher, _actor, _expected, **kwargs):
+        descriptor = kwargs["staged_snapshot_descriptor"]
+        observed_fd.append(descriptor)
+        retained = os.fstat(descriptor)
+        assert retained.st_uid == paths.context_install_uid
+        assert retained.st_gid == paths.context_install_gid
+        assert stat.S_IMODE(retained.st_mode) == 0o400
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks = []
+        while chunk := os.read(descriptor, 7):
+            chunks.append(chunk)
+        assert b"".join(chunks) == published[0]
+        assert staged_path is not None
+        assert staged_path.read_bytes() == b"hostile replacement\n"
+        assert stat.S_IMODE(staged_path.stat().st_mode) == 0o666
+        if probe_fails:
+            raise doctor_cli.DoctorError("injected retained probe failure")
+        return {"generation": "CURRENT"}
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli.os, "fchown", fchown)
+    monkeypatch.setattr(doctor_cli.os, "close", close)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+    monkeypatch.setattr(doctor_cli, "_probe_context_stdio", probe)
+
+    if probe_fails:
+        with pytest.raises(doctor_cli.DoctorError, match="retained probe failure"):
+            doctor_cli.repair_context(paths)
+    else:
+        result = doctor_cli.repair_context(paths)
+        assert result["ok"] is True
+
+    assert len(observed_fd) == 1
+    assert close_count == 1
+    with pytest.raises(OSError):
+        os.fstat(observed_fd[0])
+    assert len(replacement_state) == 1
+
+
+@pytest.mark.parametrize("probe_fails", [False, True])
+def test_context_repair_close_failure_preserves_primary_and_reports_cleanup_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, probe_fails: bool
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    live_paths = (
+        paths.context_task,
+        paths.context_cursor,
+        paths.context_snapshot,
+        paths.context_generation_pointer,
+        paths.context_launcher,
+        paths.context_publisher,
+    )
+    live_before = {path: doctor_cli._surface_snapshot(path) for path in live_paths}
+    original_run = doctor_cli._run
+    publisher_calls = 0
+    probe_calls = 0
+    close_calls = 0
+    close_failure_injected = False
+    retained_descriptor: int | None = None
+    primary = doctor_cli.DoctorError("distinct injected cold-probe failure")
+
+    def run(command, **kwargs):
+        nonlocal publisher_calls
+        if Path(command[0]).name == "tgw_context_publish.py":
+            publisher_calls += 1
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            output_path.write_bytes(
+                publish_bytes(
+                    json.loads(task_path.read_text()),
+                    json.loads(cursor_path.read_text()),
+                )
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    def probe(_launcher, _actor, _expected, **kwargs):
+        nonlocal probe_calls, retained_descriptor
+        probe_calls += 1
+        retained_descriptor = kwargs["staged_snapshot_descriptor"]
+        if probe_fails:
+            raise primary
+        return {"generation": "CURRENT"}
+
+    real_close = doctor_cli.os.close
+
+    def close(descriptor: int) -> None:
+        nonlocal close_calls, close_failure_injected
+        if retained_descriptor is not None and descriptor == retained_descriptor:
+            if close_failure_injected:
+                try:
+                    os.fstat(descriptor)
+                except OSError:
+                    # Only an actual retry of the released descriptor counts;
+                    # later durable-receipt work may legitimately reuse its
+                    # numeric value for a newly opened file.
+                    close_calls += 1
+                return real_close(descriptor)
+            close_calls += 1
+            close_failure_injected = True
+            # Model Linux close reporting an error after it has released the
+            # descriptor.  The implementation must not retry this number.
+            real_close(descriptor)
+            raise OSError("distinct injected close failure")
+        real_close(descriptor)
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli.os, "close", close)
+    monkeypatch.setattr(
+        doctor_cli, "_require_trusted_root_program", lambda *_args: None
+    )
+    monkeypatch.setattr(doctor_cli, "_probe_context_stdio", probe)
+
+    with pytest.raises(doctor_cli.DoctorError) as caught:
+        doctor_cli.repair("context", paths)
+
+    assert publisher_calls == 1
+    assert probe_calls == 1
+    assert close_calls == 1
+    assert retained_descriptor is not None
+    with pytest.raises(OSError):
+        os.fstat(retained_descriptor)
+    assert all(
+        doctor_cli._surface_snapshot(path) == surface
+        for path, surface in live_before.items()
+    )
+    assert "distinct injected close failure" in str(caught.value)
+    if probe_fails:
+        assert caught.value.__cause__ is primary
+        assert "distinct injected cold-probe failure" in str(caught.value)
+        assert getattr(primary, "cleanup_failures") == (
+            "staged Context snapshot descriptor cleanup failed: "
+            "distinct injected close failure",
+        )
+    else:
+        assert "cold-probe failure" not in str(caught.value)
+    failure_receipts = list(paths.receipts.glob("*context-failed.json"))
+    assert len(failure_receipts) == 1
+    durable_error = json.loads(failure_receipts[0].read_text())["after"]["error"]
+    assert "distinct injected close failure" in durable_error
+    assert (
+        "distinct injected cold-probe failure" in durable_error
+    ) is probe_fails
 
 
 def test_context_repair_is_semantically_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3251,7 +3509,7 @@ def test_context_repair_bootstraps_past_stale_installed_publisher_and_failed_pre
 
     def fail_selected_preflight(launcher, _actor, _expected, **kwargs):
         assert launcher == selected_launcher
-        assert kwargs["staged_snapshot"] != paths.context_snapshot
+        assert isinstance(kwargs["staged_snapshot_descriptor"], int)
         raise doctor_cli.DoctorError("selected runtime preflight failed")
 
     monkeypatch.setattr(doctor_cli, "_probe_context_stdio", fail_selected_preflight)

@@ -132,6 +132,23 @@ class DoctorError(RuntimeError):
     """The requested diagnosis or repair cannot be performed safely."""
 
 
+def _preserve_primary_with_cleanup_failure(
+    primary: Exception,
+    cleanup: Exception,
+    *,
+    resource: str,
+) -> Exception:
+    """Annotate the original failure so durable reporters retain both causes."""
+    detail = f"{resource} cleanup failed: {cleanup}"
+    primary.args = (
+        f"{primary}; {detail}",
+        *primary.args[1:],
+    )
+    primary.add_note(detail)
+    setattr(primary, "cleanup_failures", (detail,))
+    return primary
+
+
 @dataclass(frozen=True)
 class DoctorPaths:
     repository: Path = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
@@ -970,7 +987,9 @@ def _probe_context_stdio(
     expected: Mapping[str, Any],
     timeout: float = _CONTEXT_COLD_PROBE_BUDGET_SECONDS,
     *,
-    staged_snapshot: Path | None = None,
+    staged_snapshot_descriptor: int | None = None,
+    staged_snapshot_uid: int = 0,
+    staged_snapshot_gid: int = 0,
 ) -> dict[str, Any]:
     """Serialize ownership of Linux's process-global child-subreaper state."""
     with _CONTEXT_COLD_PROBE_LOCK:
@@ -979,7 +998,9 @@ def _probe_context_stdio(
             actor,
             expected,
             timeout,
-            staged_snapshot=staged_snapshot,
+            staged_snapshot_descriptor=staged_snapshot_descriptor,
+            staged_snapshot_uid=staged_snapshot_uid,
+            staged_snapshot_gid=staged_snapshot_gid,
         )
 
 
@@ -989,45 +1010,23 @@ def _probe_context_stdio_locked(
     expected: Mapping[str, Any],
     timeout: float = _CONTEXT_COLD_PROBE_BUDGET_SECONDS,
     *,
-    staged_snapshot: Path | None = None,
+    staged_snapshot_descriptor: int | None = None,
+    staged_snapshot_uid: int = 0,
+    staged_snapshot_gid: int = 0,
 ) -> dict[str, Any]:
-    """Own a staged descriptor from the instant it is opened."""
-    snapshot_descriptor = -1
-    if staged_snapshot is not None:
+    """Probe a staged snapshot through the caller's already-retained descriptor."""
+    if staged_snapshot_descriptor is not None:
         if os.geteuid() != 0:
             raise DoctorError("Context staged cold preflight requires root")
-        snapshot_descriptor = os.open(
-            staged_snapshot, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
-        )
-    result: dict[str, Any] | None = None
-    failure: Exception | None = None
-    try:
-        result = _probe_context_stdio_process(
-            launcher,
-            actor,
-            expected,
-            timeout,
-            staged_snapshot=staged_snapshot,
-            snapshot_descriptor=snapshot_descriptor,
-        )
-    except Exception as exc:
-        failure = exc
-    close_failure: Exception | None = None
-    try:
-        if snapshot_descriptor >= 0:
-            os.close(snapshot_descriptor)
-    except Exception as exc:
-        close_failure = exc
-    if close_failure is not None:
-        failures = [item for item in (failure, close_failure) if item is not None]
-        raise DoctorError(
-            "installed Context MCP cold probe outer cleanup failed: "
-            + "; ".join(str(item) for item in failures)
-        ) from failures[0]
-    if failure is not None:
-        raise failure
-    assert result is not None
-    return result
+    return _probe_context_stdio_process(
+        launcher,
+        actor,
+        expected,
+        timeout,
+        staged_snapshot_descriptor=staged_snapshot_descriptor,
+        staged_snapshot_uid=staged_snapshot_uid,
+        staged_snapshot_gid=staged_snapshot_gid,
+    )
 
 
 def _probe_context_stdio_process(
@@ -1036,24 +1035,26 @@ def _probe_context_stdio_process(
     expected: Mapping[str, Any],
     timeout: float,
     *,
-    staged_snapshot: Path | None,
-    snapshot_descriptor: int,
+    staged_snapshot_descriptor: int | None,
+    staged_snapshot_uid: int,
+    staged_snapshot_gid: int,
 ) -> dict[str, Any]:
     """Cold-probe the installed launcher through the real MCP stdio protocol."""
     current = pwd.getpwuid(os.geteuid()).pw_name
     command = [str(launcher)]
     pass_fds: tuple[int, ...] = ()
     child_setup = None
-    if staged_snapshot is not None:
-        snapshot_state = os.fstat(snapshot_descriptor)
+    if staged_snapshot_descriptor is not None:
+        snapshot_state = os.fstat(staged_snapshot_descriptor)
         if (
             not stat.S_ISREG(snapshot_state.st_mode)
-            or snapshot_state.st_uid != 0
-            or snapshot_state.st_gid != 0
-            or snapshot_state.st_mode & 0o077
+            or snapshot_state.st_uid != staged_snapshot_uid
+            or snapshot_state.st_gid != staged_snapshot_gid
+            or stat.S_IMODE(snapshot_state.st_mode) != 0o400
         ):
-            raise DoctorError("Context staged cold preflight snapshot is not root-bound")
-        pass_fds = (snapshot_descriptor,)
+            raise DoctorError("Context staged cold preflight snapshot is not install-bound")
+        os.lseek(staged_snapshot_descriptor, 0, os.SEEK_SET)
+        pass_fds = (staged_snapshot_descriptor,)
         target = pwd.getpwnam(actor)
         if target.pw_name != actor:
             raise DoctorError("Context staged cold preflight actor identity differs")
@@ -1244,8 +1245,10 @@ def _probe_context_stdio_process(
             "LC_ALL": "C.UTF-8",
             "PYTHONDONTWRITEBYTECODE": "1",
         }
-        if staged_snapshot is not None:
-            environment["TGW_CONTEXT_PREFLIGHT_SNAPSHOT_FD"] = str(snapshot_descriptor)
+        if staged_snapshot_descriptor is not None:
+            environment["TGW_CONTEXT_PREFLIGHT_SNAPSHOT_FD"] = str(
+                staged_snapshot_descriptor
+            )
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -3977,24 +3980,80 @@ def repair_context(paths: DoctorPaths) -> dict[str, Any]:
         )
         if result.returncode:
             raise DoctorError(result.stderr.strip() or "context publisher failed")
-        after_raw = staged_snapshot.read_bytes()
-        after = _json(staged_snapshot)
-        expanded_after = _validate_snapshot(
-            after,
-            after_raw,
-            parser_path=selected["modules"]["current_context_snapshot"],
+        staged_descriptor = os.open(
+            staged_snapshot, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
         )
-        if expanded_after.get("task") != task or expanded_after.get("cursor") != cursor:
-            raise DoctorError("staged context publisher output differs from exact inputs")
-        # Cold-start the exact candidate launcher/runtime against the exact
-        # staged inode before either cursor or live snapshot can be replaced.
-        os.chmod(staged_snapshot, 0o400)
-        staged_probe = _probe_context_stdio(
-            selected_launcher,
-            _operator_actor(),
-            expanded_after,
-            staged_snapshot=staged_snapshot,
-        )
+        primary_failure: Exception | None = None
+        try:
+            staged_state = os.fstat(staged_descriptor)
+            if not stat.S_ISREG(staged_state.st_mode) or staged_state.st_nlink != 1:
+                raise DoctorError(
+                    "staged context publisher output is not a single-link regular file"
+                )
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(staged_descriptor, 65_536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            after_raw = b"".join(chunks)
+            try:
+                after = json.loads(after_raw)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise DoctorError("staged context publisher output is invalid JSON") from exc
+            expanded_after = _validate_snapshot(
+                after,
+                after_raw,
+                parser_path=selected["modules"]["current_context_snapshot"],
+            )
+            if expanded_after.get("task") != task or expanded_after.get("cursor") != cursor:
+                raise DoctorError("staged context publisher output differs from exact inputs")
+            os.fchown(
+                staged_descriptor,
+                paths.context_install_uid,
+                paths.context_install_gid,
+            )
+            os.fchmod(staged_descriptor, 0o400)
+            retained_state = os.fstat(staged_descriptor)
+            if (
+                not stat.S_ISREG(retained_state.st_mode)
+                or retained_state.st_uid != paths.context_install_uid
+                or retained_state.st_gid != paths.context_install_gid
+                or stat.S_IMODE(retained_state.st_mode) != 0o400
+            ):
+                raise DoctorError("staged context publisher output metadata did not retain")
+            # Cold-start against this same retained open-file description.  The
+            # probe rewinds it immediately before inheritance; no pathname is
+            # consulted again for bytes or metadata.
+            staged_probe = _probe_context_stdio(
+                selected_launcher,
+                _operator_actor(),
+                expanded_after,
+                staged_snapshot_descriptor=staged_descriptor,
+                staged_snapshot_uid=paths.context_install_uid,
+                staged_snapshot_gid=paths.context_install_gid,
+            )
+        except Exception as exc:
+            primary_failure = exc
+        descriptor_to_close = staged_descriptor
+        staged_descriptor = -1
+        try:
+            # A failed close is never retried: POSIX leaves descriptor state
+            # unspecified, and Linux has already released it for non-EBADF
+            # close errors.  Invalidating our ownership first prevents reuse.
+            os.close(descriptor_to_close)
+        except Exception as close_exc:
+            if primary_failure is not None:
+                raise _preserve_primary_with_cleanup_failure(
+                    primary_failure,
+                    close_exc,
+                    resource="staged Context snapshot descriptor",
+                ).with_traceback(primary_failure.__traceback__)
+            raise DoctorError(
+                f"staged Context snapshot descriptor cleanup failed: {close_exc}"
+            ) from close_exc
+        if primary_failure is not None:
+            raise primary_failure.with_traceback(primary_failure.__traceback__)
         changed = before["cursor"] != cursor or before["snapshot"] != after
         current_head, current_tree, current_status = _source_identity(paths)
         if current_status or (current_head, current_tree) != (head, tree):
