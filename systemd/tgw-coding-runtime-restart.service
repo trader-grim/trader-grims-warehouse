@@ -3,7 +3,13 @@ Description=Restart TGW unprivileged coding workers after runtime selection
 
 [Service]
 Type=oneshot
-ExecStart=/bin/systemctl try-restart tgw-codex-implement-worker.service tgw-claude-review-worker.service tgw-controller-verify-worker.service tgw-coding-lifecycle-supervisor.service tgw-coding-root-effect.service
+RuntimeDirectory=tgw-coding-runtime-restart
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+ExecStartPre=/usr/bin/rm -f /run/tgw-coding-runtime-restart/complete
+ExecStart=/bin/systemctl restart tgw-codex-implement-worker.service tgw-claude-review-worker.service tgw-controller-verify-worker.service tgw-coding-lifecycle-supervisor.service tgw-plan-render-local.service
+ExecStart=/usr/bin/install -o root -g root -m 0444 /dev/null /run/tgw-coding-runtime-restart/complete
+ExecStart=/bin/systemctl restart tgw-coding-root-effect.service
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true

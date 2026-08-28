@@ -135,13 +135,16 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         "systemd/tgw-coding-runtime-restart.path": "[Path]\nPathChanged=/tmp/restart-request\n",
         "systemd/tgw-coding-runtime-restart.service": (
             "[Service]\nType=oneshot\n"
-            "ExecStart=/bin/systemctl try-restart "
+            "ExecStart=/bin/systemctl restart "
             "tgw-codex-implement-worker.service "
             "tgw-claude-review-worker.service "
             "tgw-controller-verify-worker.service "
             "tgw-coding-lifecycle-supervisor.service "
-            "tgw-coding-root-effect.service\n"
+            "tgw-plan-render-local.service\n"
+            "ExecStart=/bin/systemctl restart tgw-coding-root-effect.service\n"
         ),
+        "systemd/tgw-context-snapshot-promote.path": "[Path]\nPathChanged=/tmp/context-pending\n",
+        "systemd/tgw-context-snapshot-promote.service": "[Service]\nType=oneshot\nExecStart=/bin/true\n",
         "systemd/tgw-coding-local-foreman.timer": "[Timer]\nOnBootSec=1s\n",
         "systemd/tgw-coding-local-foreman.service": "[Service]\nType=oneshot\nExecStart=/bin/true\n",
         "scripts/tgw_context_debian_stdio.py": (f"#!/bin/sh\n# runtime snapshot: {snapshot_fixture_path}\nexit 0\n"),
@@ -180,7 +183,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     for directory in (archive_root, runner_root, lifecycle_root, root_effect_root):
         directory.mkdir(parents=True, exist_ok=True)
         root_effect = directory == root_effect_root
-        directory.chmod(0o3770 if root_effect else 0o2770)
+        directory.chmod(0o2750 if root_effect else 0o2770)
         os.chown(directory, -1, grp.getgrnam("tgw-coders").gr_gid)
     for relative in _git(repository, "ls-files").splitlines():
         source = repository / relative
@@ -308,6 +311,137 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     launcher.chmod(0o555)
     publisher.chmod(0o555)
     return paths, head, tree
+
+
+def test_coding_bootstrap_is_explicit_and_context_independent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "source"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.name", "bootstrap")
+    _git(repository, "config", "user.email", "bootstrap@example.invalid")
+    candidate_config = {
+        "schema": "tgw-local-coding-workflow/v1",
+        "postgres_dsn": "dbname=tgw_lib_dev_state_machine",
+        "coding": {
+            "repository_root": str(repository),
+            "worktree_root": str(tmp_path / "worktrees"),
+            "runtime_root": str(tmp_path / "runtime"),
+            "preservation_archive_root": str(tmp_path / "archive"),
+            "runner_state_root": str(tmp_path / "runner"),
+            "lifecycle_root": str(tmp_path / "lifecycles"),
+            "root_effect_root": str(tmp_path / "effects"),
+            "commands": {},
+            "allowed_runners": [],
+        },
+    }
+    config_source = repository / "config/tgw-coding-local.json"
+    config_source.parent.mkdir(parents=True)
+    config_source.write_text(json.dumps(candidate_config))
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-m", "candidate")
+    commit = _git(repository, "rev-parse", "HEAD")
+    tree = _git(repository, "rev-parse", "HEAD^{tree}")
+    root = tmp_path / "tgw-lib"
+    context_input = root / "context-input"
+    context_input.mkdir(parents=True)
+    task = context_input / "current-task.json"
+    cursor = context_input / "plan-cycle-cursor.json"
+    task.write_text("{}")
+    cursor.write_text("{}")
+    paths = doctor_cli.DoctorPaths(
+        repository=repository,
+        worktrees=tmp_path / "worktrees",
+        coding_config=root / "config/tgw-coding-local.json",
+        runtime_root=tmp_path / "runtime",
+        local_bin=tmp_path / "bin",
+        operator_cli=tmp_path / "tgw",
+        context_task=task,
+        context_cursor=cursor,
+        systemd_install_root=tmp_path / "systemd",
+        receipts=tmp_path / "receipts",
+    )
+    paths.worktrees.mkdir()
+    paths.systemd_install_root.mkdir()
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(
+        doctor_cli, "_desired_runtime", lambda *_args: pytest.fail("Context consulted")
+    )
+    monkeypatch.setattr(
+        doctor_cli, "_source_identity", lambda _paths: (commit, tree, "")
+    )
+    monkeypatch.setattr(
+        doctor_cli.grp,
+        "getgrnam",
+        lambda _name: type("Group", (), {"gr_gid": os.getegid()})(),
+    )
+    monkeypatch.setattr(
+        doctor_cli.pwd,
+        "getpwnam",
+        lambda _name: type(
+            "Account", (), {"pw_uid": os.geteuid(), "pw_name": "db"}
+        )(),
+    )
+    monkeypatch.setattr(
+        doctor_cli, "_provision_coding_support_roots", lambda *_args: []
+    )
+    monkeypatch.setattr(
+        doctor_cli, "_close_mutation_journal", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_repair_managed_directory",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_atomic_bytes",
+        lambda path, value, **_kwargs: (
+            path.parent.mkdir(parents=True, exist_ok=True), path.write_bytes(value)
+        ),
+    )
+
+    def materialize(command, **_kwargs):
+        assert command[:6] == [
+            "/usr/sbin/runuser", "-u", "db", "-g", "tgw-coders", "--",
+        ]
+        assert "--bootstrap-commit" in command
+        release = paths.runtime_root / "releases" / commit
+        release.mkdir(parents=True)
+        paths.runtime_root.mkdir(exist_ok=True)
+        (paths.runtime_root / "current").symlink_to(Path("releases") / commit)
+        return subprocess.CompletedProcess(command, 0, json.dumps({"ok": True}), "")
+
+    monkeypatch.setattr(doctor_cli, "_run", materialize)
+    monkeypatch.setattr(
+        doctor_cli, "_verify_release_tree", lambda *_args, **_kwargs: {"verified": True}
+    )
+    monkeypatch.setattr(doctor_cli, "_launcher_links", lambda _paths: {})
+    monkeypatch.setattr(
+        doctor_cli,
+        "repair_plan_render_worker",
+        lambda *_args, **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        doctor_cli, "repair_workers", lambda *_args, **_kwargs: {"ok": True}
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "check_units",
+        lambda *_args, **_kwargs: {"state": "PASS"},
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "check_plan_render_worker",
+        lambda *_args, **_kwargs: {"state": "PASS"},
+    )
+    monkeypatch.setattr(doctor_cli, "_receipt", lambda *_args, **_kwargs: "receipt")
+    result = doctor_cli.repair_coding_bootstrap(commit, paths)
+    assert result["ok"] is True
+    assert result["context_required"] is False
+    assert result["review_authority"] is False
+    assert paths.coding_config.read_bytes() == config_source.read_bytes()
 
 
 def test_context_managed_parents_allow_a_non_install_group(tmp_path: Path) -> None:

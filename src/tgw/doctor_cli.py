@@ -83,12 +83,14 @@ _ACTIVE_CODING_UNITS = (
     "tgw-coding-lifecycle-supervisor.service",
     "tgw-coding-root-effect.service",
     "tgw-coding-runtime-restart.path",
+    "tgw-context-snapshot-promote.path",
     "tgw-coding-local-foreman.timer",
 )
 _CODING_UNITS = (
     *_ACTIVE_CODING_UNITS,
     "tgw-coding-local-foreman.service",
     "tgw-coding-runtime-restart.service",
+    "tgw-context-snapshot-promote.service",
 )
 _PLAN_RENDER_UNIT = "tgw-plan-render-local.service"
 _PLAN_RENDER_DIRECTORY_MODE = 0o2770
@@ -159,15 +161,6 @@ _UNIT_ARGV = {
         "tgw.development.coding_root_effect",
         "--config",
         "/opt/TGW/tgw-lib/config/tgw-coding-local.json",
-    ),
-    "tgw-coding-runtime-restart.service": (
-        "/bin/systemctl",
-        "try-restart",
-        "tgw-codex-implement-worker.service",
-        "tgw-claude-review-worker.service",
-        "tgw-controller-verify-worker.service",
-        "tgw-coding-lifecycle-supervisor.service",
-        "tgw-coding-root-effect.service",
     ),
     "tgw-coding-local-foreman.service": (*_LOCAL_WORKFLOW_ARGV, "foreman"),
 }
@@ -2764,13 +2757,28 @@ def _plan_render_storage_identity(paths: DoctorPaths) -> dict[str, Any]:
     }
 
 
-def check_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
+def check_plan_render_worker(
+    paths: DoctorPaths, *, desired_commit: str | None = None
+) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair plan-render-worker"
     try:
-        desired, release, _task = _desired_runtime(paths)
+        explicit_commit = desired_commit is not None
+        if desired_commit is None:
+            desired, release, _task = _desired_runtime(paths)
+        else:
+            if _COMMIT.fullmatch(desired_commit) is None:
+                raise DoctorError("plan_render commit override is invalid")
+            desired = desired_commit
+            release = paths.runtime_root / "releases" / desired
         runtime = _runtime_selector_identity(paths, desired, release)
         state = _unit_state(_PLAN_RENDER_UNIT)
-        definition = _unit_definition(paths, _PLAN_RENDER_UNIT, state)
+        definition = (
+            _unit_definition(
+                paths, _PLAN_RENDER_UNIT, state, desired_commit=desired
+            )
+            if explicit_commit
+            else _unit_definition(paths, _PLAN_RENDER_UNIT, state)
+        )
         process_runtime = _plan_render_process_runtime_identity(state, release)
         config = _json(paths.plan_render_config)
         storage = _plan_render_storage_identity(paths)
@@ -6358,14 +6366,34 @@ def _repair_plan_render_storage(paths: DoctorPaths) -> bool:
     return changed
 
 
-def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
+def repair_plan_render_worker(
+    paths: DoctorPaths, *, desired_commit: str | None = None
+) -> dict[str, Any]:
     _require_root()
-    desired, release, _task = _desired_runtime(paths)
+    explicit_commit = desired_commit is not None
+    if desired_commit is None:
+        desired, release, _task = _desired_runtime(paths)
+    else:
+        if _COMMIT.fullmatch(desired_commit) is None:
+            raise DoctorError("plan_render repair commit is invalid")
+        desired = desired_commit
+        release = paths.runtime_root / "releases" / desired
+        head, tree, status = _source_identity(paths)
+        if status or head != desired or tree != _git(
+            paths.repository, "rev-parse", f"{desired}^{{tree}}"
+        ):
+            raise DoctorError(
+                "plan_render repair requires the exact clean canonical candidate"
+            )
     _verify_release_tree(paths, desired, release)
     runtime = _runtime_selector_identity(paths, desired, release)
     if not runtime["exact"]:
         raise DoctorError("immutable runtime selector differs; repair runtime before plan_render")
-    before = check_plan_render_worker(paths)
+    before = (
+        check_plan_render_worker(paths, desired_commit=desired)
+        if explicit_commit
+        else check_plan_render_worker(paths)
+    )
     config_source = release / "config/tgw-plan-render-local.json"
     unit_source = release / "systemd" / _PLAN_RENDER_UNIT
     if config_source.is_symlink() or not config_source.is_file() or unit_source.is_symlink() or not unit_source.is_file():
@@ -6386,7 +6414,14 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
             raise DoctorError(result.stderr.strip() or "systemd daemon reload failed")
         changed = True
     state = _unit_state(_PLAN_RENDER_UNIT)
-    if not _unit_definition(paths, _PLAN_RENDER_UNIT, state)["exact"]:
+    definition = (
+        _unit_definition(
+            paths, _PLAN_RENDER_UNIT, state, desired_commit=desired
+        )
+        if explicit_commit
+        else _unit_definition(paths, _PLAN_RENDER_UNIT, state)
+    )
+    if not definition["exact"]:
         raise DoctorError("installed plan_render unit is not exact")
     storage_before = _plan_render_storage_identity(paths)
     process_runtime = _plan_render_process_runtime_identity(state, release)
@@ -6419,7 +6454,11 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
             if result.returncode:
                 raise DoctorError(result.stderr.strip() or "plan_render service repair failed")
         action = command[1]
-    after = check_plan_render_worker(paths)
+    after = (
+        check_plan_render_worker(paths, desired_commit=desired)
+        if explicit_commit
+        else check_plan_render_worker(paths)
+    )
     if after["state"] != "PASS":
         raise DoctorError("plan_render unit remains unhealthy after repair")
     return {
@@ -7408,6 +7447,208 @@ def _format(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def repair_coding_bootstrap(
+    commit: str, paths: DoctorPaths = DoctorPaths()
+) -> dict[str, Any]:
+    """Install one exact local coding runtime without consulting Context.
+
+    This is an explicit operator repair for the otherwise circular first
+    transition. Root installs fixed configuration and systemd definitions;
+    all repository reading, release creation, and selection run as the
+    ordinary ``db:tgw-coders`` materializer.
+    """
+
+    _require_root()
+    if _COMMIT.fullmatch(commit) is None:
+        raise DoctorError("coding bootstrap commit is invalid")
+    head, tree, status = _source_identity(paths)
+    if status or head != commit:
+        raise DoctorError(
+            "coding bootstrap requires the exact clean canonical source commit"
+        )
+    source_config = paths.repository / "config/tgw-coding-local.json"
+    if source_config.is_symlink() or not source_config.is_file():
+        raise DoctorError("candidate coding configuration is absent")
+    raw_config = source_config.read_bytes()
+    config_entry = _git(
+        paths.repository,
+        "ls-tree",
+        commit,
+        "--",
+        "config/tgw-coding-local.json",
+    ).split()
+    if (
+        len(config_entry) != 4
+        or config_entry[:2] != ["100644", "blob"]
+        or _git_blob_oid(raw_config) != config_entry[2]
+    ):
+        raise DoctorError("candidate coding configuration differs from exact Git bytes")
+    try:
+        parsed_config = json.loads(raw_config)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DoctorError("candidate coding configuration is invalid") from exc
+    if (
+        not isinstance(parsed_config, Mapping)
+        or parsed_config.get("schema") != "tgw-local-coding-workflow/v1"
+    ):
+        raise DoctorError("candidate coding configuration schema is invalid")
+    coding = parsed_config.get("coding")
+    exact_paths = {
+        "repository_root": paths.repository,
+        "worktree_root": paths.worktrees,
+        "runtime_root": paths.runtime_root,
+    }
+    if not isinstance(coding, Mapping) or any(
+        coding.get(key) != str(expected)
+        for key, expected in exact_paths.items()
+    ):
+        raise DoctorError("candidate coding configuration paths differ from this host")
+    lowered = raw_config.decode("utf-8").lower()
+    forbidden = [item for item in _FORBIDDEN_CODING_DEPENDENCIES if item in lowered]
+    if forbidden:
+        raise DoctorError(
+            "candidate coding configuration contains forbidden dependencies: "
+            + ", ".join(forbidden)
+        )
+    group = grp.getgrnam(_CODING_RUNTIME_GROUP)
+    db = pwd.getpwnam("db")
+    if db.pw_uid == 0 or db.pw_name != "db":
+        raise DoctorError("ordinary db materializer account is unavailable")
+    final_head, final_tree, final_status = _source_identity(paths)
+    if final_status or (final_head, final_tree) != (commit, tree):
+        raise DoctorError("canonical source changed during coding bootstrap preflight")
+    paths.coding_config.parent.mkdir(parents=True, exist_ok=True)
+    if paths.coding_config.is_symlink() or (
+        paths.coding_config.exists() and not paths.coding_config.is_file()
+    ):
+        raise DoctorError("coding configuration destination is unsafe")
+    _atomic_bytes(
+        paths.coding_config,
+        raw_config,
+        mode=0o640,
+        uid=0,
+        gid=group.gr_gid,
+    )
+    journal: list[dict[str, Any]] = []
+    try:
+        support_roots = _provision_coding_support_roots(
+            paths, group.gr_gid, journal
+        )
+    except Exception:
+        rollback_errors = _close_mutation_journal(journal, rollback=True)
+        if rollback_errors:
+            raise DoctorError(
+                "coding bootstrap support-root rollback incomplete: "
+                + "; ".join(rollback_errors)
+            )
+        raise
+    commit_errors = _close_mutation_journal(journal, rollback=False)
+    if commit_errors:
+        raise DoctorError(
+            "coding bootstrap support-root transaction incomplete: "
+            + "; ".join(commit_errors)
+        )
+    command = [
+        "/usr/sbin/runuser",
+        "-u",
+        "db",
+        "-g",
+        _CODING_RUNTIME_GROUP,
+        "--",
+        "/usr/bin/env",
+        "HOME=/home/db",
+        "PYTHONDONTWRITEBYTECODE=1",
+        f"PYTHONPATH={paths.repository / 'src'}",
+        "/opt/TGW/.venvs/controller/bin/python3",
+        "-m",
+        "tgw.development.coding_root_effect",
+        "--config",
+        str(paths.coding_config),
+        "--bootstrap-commit",
+        commit,
+        "--bootstrap-tree",
+        tree,
+    ]
+    materialized = _run(command, timeout=300)
+    if materialized.returncode:
+        raise DoctorError(
+            materialized.stderr.strip()
+            or "ordinary db materializer failed during coding bootstrap"
+        )
+    try:
+        materialization = json.loads(materialized.stdout)
+    except json.JSONDecodeError as exc:
+        raise DoctorError("coding bootstrap materializer returned invalid evidence") from exc
+    release = paths.runtime_root / "releases" / commit
+    _verify_release_tree(paths, commit, release)
+    current = paths.runtime_root / "current"
+    if not current.is_symlink() or current.resolve(strict=True) != release.resolve():
+        raise DoctorError("coding bootstrap did not select the exact release")
+    context_input = paths.context_task.parent
+    _repair_managed_directory(
+        context_input,
+        uid=db.pw_uid,
+        gid=group.gr_gid,
+        mode=0o2750,
+    )
+    context_inputs: list[str] = []
+    for context_path in (paths.context_task, paths.context_cursor):
+        observed = context_path.stat(follow_symlinks=False)
+        if (
+            context_path.is_symlink()
+            or not stat.S_ISREG(observed.st_mode)
+            or observed.st_nlink != 1
+        ):
+            raise DoctorError(f"Context input is unsafe: {context_path}")
+        if (
+            observed.st_uid != db.pw_uid
+            or observed.st_gid != group.gr_gid
+            or stat.S_IMODE(observed.st_mode) != 0o440
+        ):
+            os.chown(context_path, db.pw_uid, group.gr_gid)
+            os.chmod(context_path, 0o440)
+            context_inputs.append(str(context_path))
+    launcher_changes: list[str] = []
+    for destination, target in _launcher_links(paths).items():
+        source = release / "bin" / target.name
+        if not source.is_file():
+            raise DoctorError(f"candidate release lacks launcher: {source.name}")
+        if destination.exists() and not destination.is_symlink():
+            raise DoctorError(
+                f"coding launcher requires manual preservation before replacement: {destination}"
+            )
+        if not destination.is_symlink() or os.readlink(destination) != str(target):
+            _replace_link(destination, target)
+            launcher_changes.append(str(destination))
+    plan_render = repair_plan_render_worker(paths, desired_commit=commit)
+    workers = repair_workers(paths, desired_commit=commit)
+    if paths.coding_config.read_bytes() != raw_config:
+        raise DoctorError("installed coding configuration changed during bootstrap")
+    units = check_units(paths, desired_commit=commit)
+    rendered = check_plan_render_worker(paths, desired_commit=commit)
+    if units["state"] != "PASS" or rendered["state"] != "PASS":
+        raise DoctorError("coding bootstrap services did not reach exact live state")
+    result = {
+        "schema": "tgw-local-coding-bootstrap/v1",
+        "ok": True,
+        "context_required": False,
+        "review_authority": False,
+        "materializer": {"actor": "db", "group": _CODING_RUNTIME_GROUP},
+        "commit": commit,
+        "tree": tree,
+        "configuration_sha256": _file_hash(paths.coding_config),
+        "support_roots_changed": support_roots,
+        "launcher_changes": launcher_changes,
+        "context_inputs_migrated": context_inputs,
+        "materialization": materialization,
+        "plan_render": plan_render,
+        "workers": workers,
+        "unit_check": units,
+        "plan_render_check": rendered,
+    }
+    return {**result, "receipt": _receipt(paths, "coding-bootstrap", {}, result)}
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tgw doctor")
     parser.add_argument("--json", action="store_true", dest="json_output")
@@ -7418,6 +7659,11 @@ def _parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("todo_id", type=int)
     reconcile_parser = sub.add_parser("coding-reconcile", help="reconcile one older-runner closed implementation receipt")
     reconcile_parser.add_argument("todo_id", type=int)
+    bootstrap_parser = sub.add_parser(
+        "coding-bootstrap",
+        help="install one exact local coding runtime without Context",
+    )
+    bootstrap_parser.add_argument("--commit", required=True)
     repair_parser = sub.add_parser("repair", help="restore an exact declared local state")
     repair_parser.add_argument("target", choices=[*_REPAIRS])
     repair_parser.add_argument("--json", action="store_true", dest="repair_json_output")
@@ -7442,6 +7688,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if result.get("ok", True) else 1
         if args.operation == "coding-reconcile":
             result = reconcile_implementation_receipt(args.todo_id)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+        if args.operation == "coding-bootstrap":
+            result = repair_coding_bootstrap(args.commit)
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
         result = diagnose()
@@ -7498,7 +7748,7 @@ def _coding_support_roots(paths: DoctorPaths, group_gid: int) -> dict[str, dict[
                 or owner.pw_gid == group_gid
                 or owner.pw_name in group.gr_mem
             )
-            expected_mode = 0o3770 if key == "root_effect_root" else 0o2770
+            expected_mode = 0o2750 if key == "root_effect_root" else 0o2770
             exact = (path.is_absolute() and resolved == path and not path.is_symlink()
                      and stat.S_ISDIR(observed.st_mode) and observed.st_dev == worktree_device
                      and observed.st_gid == group_gid and owner_ok
@@ -7639,7 +7889,7 @@ def _provision_coding_support_roots(
             created = _provision_support_root(
                 path, group_gid=group_gid, worktree_device=worktree_device, journal=journal,
                 target_uid=db_uid if key == "root_effect_root" else None,
-                target_mode=0o3770 if key == "root_effect_root" else 0o2770,
+                target_mode=0o2750 if key == "root_effect_root" else 0o2770,
             )
         except OSError as exc:
             raise DoctorError(f"coding {key} cannot be provisioned safely: {exc}") from exc

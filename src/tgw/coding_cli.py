@@ -48,7 +48,7 @@ from tgw.development.plan_binding import parse_plan_binding, validate_plan_bindi
 from tgw.development.plan_todo_bridge import bind_leaf
 from tgw.development.plan_todo_source import PlanTodoSourceError
 from tgw.development.plan_todo_source import resolve as resolve_plan_todo
-from tgw.development.profiles import CODING_READY_FOR_ADMISSION
+from tgw.development.profiles import CODING_DIAGNOSTIC_REVIEW
 from tgw.development.treatments import (
     CLAUDE_REVIEW,
     CODEX_IMPLEMENT,
@@ -1117,21 +1117,18 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
             or not command
             or command[0] not in allowed
         ):
-            return _stage(
-                record,
-                "review",
-                "remediation",
-                reason=(
-                    "independent review queue exists but no allowed typed review "
-                    "runner is installed; zero review claim"
-                ),
-            )
+            return _stage(record, "review", "satisfied", receipt={
+                "schema": "tgw-local-coding-diagnostic-review-schedule/v1",
+                "status": "UNAVAILABLE",
+                "authority": False,
+                "reason": "diagnostic reviewer is not installed",
+            })
 
         def dispatch() -> TickResult:
             return tick(
                 ForemanConfig(
                     coding_config=dict(config["coding"]),
-                    goal_profile=CODING_READY_FOR_ADMISSION,
+                    goal_profile=CODING_DIAGNOSTIC_REVIEW,
                     treatments=(CLAUDE_REVIEW,),
                     receipt_backed_conditions=frozenset(
                         {"tested", "linted", "controller_verified"}
@@ -1146,13 +1143,19 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
                 todo_ids={int(record["target"])},
             )
 
-        return _queue_evidence(
-            record,
-            stage="review",
-            queue_name="claude-review",
-            receipt_name="review-receipt.json",
-            dispatch=dispatch,
-        )
+        try:
+            scheduled = dataclasses.asdict(dispatch())
+            status = "SCHEDULED" if scheduled.get("errors") == 0 else "UNAVAILABLE"
+        except Exception as exc:
+            scheduled = {"error": str(exc)}
+            status = "UNAVAILABLE"
+        return _stage(record, "review", "satisfied", receipt={
+            "schema": "tgw-local-coding-diagnostic-review-schedule/v1",
+            "status": status,
+            "authority": False,
+            "queue": "claude-review",
+            "result": scheduled,
+        })
 
     def integration(record: dict[str, Any]) -> dict[str, Any]:
         candidate_receipt = record["effects"]["candidate"]["receipt"]
@@ -1223,7 +1226,7 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
                     "schema": "tgw-local-coding-integration/v1",
                     "root_id": record["root_id"],
                     "binding_hash": record["binding"]["binding_hash"],
-                    "review_receipt_hash": record["effects"]["review"]["receipt_hash"],
+                    "diagnostic_review_schedule_hash": record["effects"]["review"]["receipt_hash"],
                     "controller_receipt_hash": record["effects"]["controller"]["receipt_hash"],
                     "base_commit": record["binding"]["source_commit"],
                     "candidate_commit": candidate_commit,
@@ -1257,8 +1260,7 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
                 "materialization",
                 "waiting",
                 reason=(
-                    "awaiting the exact fixed-schema root materialization response; "
-                    "ordinary tgw-coders cannot perform root-owned effects"
+                    "awaiting the ordinary db:tgw-coders materialization response"
                 ),
             )
         candidate = record["effects"]["candidate"]["receipt"]
@@ -1270,7 +1272,7 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
             "response_hash": response["response_hash"],
             "candidate_commit": candidate["commit"],
             "candidate_tree": candidate["tree"],
-            "review_receipt_hash": record["effects"]["review"]["receipt_hash"],
+            "diagnostic_review_schedule_hash": record["effects"]["review"]["receipt_hash"],
             "integration_receipt_hash": record["effects"]["integration"]["receipt_hash"],
             "materialization_receipt_hash": response[
                 "materialization_receipt_hash"
@@ -1359,7 +1361,7 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
             "result_hash": request["result_hash"],
             "candidate_commit": request["candidate_commit"],
             "candidate_tree": request["candidate_tree"],
-            "review_receipt_hash": request["review_receipt_hash"],
+            "diagnostic_review_schedule_hash": record["effects"]["review"]["receipt_hash"],
             "integration_receipt_hash": request["integration_receipt_hash"],
             "materialization_receipt_hash": request[
                 "materialization_receipt_hash"

@@ -14,6 +14,7 @@ import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -26,13 +27,15 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from tgw.development.coding_lifecycle import LifecycleError, LifecycleStore
-from tgw.development.coding_review import validate_review_artifact
-from tgw.protected_git import protected_git_command, protected_git_environment
+from tgw.protected_git import (
+    protected_git_command,
+    protected_git_environment,
+    write_exact_tree_archive,
+)
 from tgw.release_installer import (
     _select as select_fixed_local,  # the fixed CAS primitive; never admission
 )
 from tgw.release_installer import current_generation, materialize, verify
-from tgw.review_contract import ReviewRunnerError
 
 REQUEST_SCHEMA = "tgw-local-coding-root-effect-request/v1"
 RESPONSE_SCHEMA = "tgw-local-coding-root-effect-response/v1"
@@ -63,6 +66,10 @@ class RootEffectError(RuntimeError):
     """A root request or its persisted effect state is unsafe."""
 
 
+class RestartPending(RuntimeError):
+    """The fixed root-owned restart unit has not acknowledged cutover yet."""
+
+
 @dataclass(frozen=True)
 class RootEffectPaths:
     request_root: Path
@@ -73,6 +80,16 @@ class RootEffectPaths:
     context_task: Path = Path(
         "/opt/TGW/tgw-lib/context-input/current-task.json"
     )
+    context_cursor: Path = Path(
+        "/opt/TGW/tgw-lib/context-input/plan-cycle-cursor.json"
+    )
+    context_pending: Path = Path(
+        "/opt/TGW/tgw-lib/context-input/current-context.pending.json"
+    )
+    context_snapshot: Path = Path(
+        "/opt/TGW/tgw-lib/config/tgw-context-current.json"
+    )
+    restart_ack: Path = Path("/run/tgw-coding-runtime-restart/complete")
     group_gid: int | None = None
     root_uid: int = os.geteuid()
 
@@ -129,23 +146,10 @@ def _stage_hash(record: Mapping[str, Any], stage: str) -> str:
 
 
 def build_request(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Derive the sole privileged request from already completed stages."""
+    """Derive the unprivileged materialization request from completed work."""
 
     binding = record.get("binding", {})
     candidate = record.get("effects", {}).get("candidate", {}).get("receipt", {})
-    review = record.get("effects", {}).get("review", {}).get("receipt", {})
-    review_result = review.get("result") if isinstance(review, Mapping) else None
-    if not isinstance(review_result, Mapping):
-        raise RootEffectError("lifecycle independent-review result is absent")
-    try:
-        validate_review_artifact(
-            review_result,
-            payload=review_result,
-            worktree=Path(binding["worktree"]),
-            expected_job_id=str(review["job_id"]),
-        )
-    except (KeyError, ReviewRunnerError) as exc:
-        raise RootEffectError(f"lifecycle independent-review result is invalid: {exc}") from exc
     unsigned = {
         "schema": REQUEST_SCHEMA,
         "root_id": record.get("root_id"),
@@ -161,7 +165,6 @@ def build_request(record: Mapping[str, Any]) -> dict[str, Any]:
         "candidate_tree": candidate.get("tree"),
         "candidate_receipt_hash": _stage_hash(record, "candidate"),
         "controller_receipt_hash": _stage_hash(record, "controller"),
-        "review_receipt_hash": _stage_hash(record, "review"),
         "integration_receipt_hash": _stage_hash(record, "integration"),
     }
     _assert_no_forbidden(unsigned)
@@ -194,7 +197,6 @@ def validate_request(
         "candidate_tree",
         "candidate_receipt_hash",
         "controller_receipt_hash",
-        "review_receipt_hash",
         "integration_receipt_hash",
         "request_hash",
     }
@@ -219,7 +221,6 @@ def validate_request(
                 "card_idempotency_key",
                 "candidate_receipt_hash",
                 "controller_receipt_hash",
-                "review_receipt_hash",
                 "integration_receipt_hash",
             )
         )
@@ -249,7 +250,7 @@ def _safe_root(root: Path, *, group_gid: int, root_uid: int = 0) -> None:
         or not stat.S_ISDIR(state.st_mode)
         or state.st_uid != root_uid
         or state.st_gid != group_gid
-        or stat.S_IMODE(state.st_mode) != 0o3770
+        or stat.S_IMODE(state.st_mode) != 0o2750
     ):
         raise RootEffectError("root effect directory is not protected")
 
@@ -356,7 +357,6 @@ def build_projection_request(record: Mapping[str, Any]) -> dict[str, Any]:
         "binding_hash": binding.get("binding_hash"),
         "candidate_commit": candidate.get("commit"),
         "candidate_tree": candidate.get("tree"),
-        "review_receipt_hash": _stage_hash(record, "review"),
         "integration_receipt_hash": _stage_hash(record, "integration"),
         "materialization_receipt_hash": _stage_hash(record, "materialization"),
         "live_verification_receipt_hash": _stage_hash(record, "live_verification"),
@@ -376,7 +376,6 @@ def build_projection_request(record: Mapping[str, Any]) -> dict[str, Any]:
         "candidate_commit": candidate.get("commit"),
         "candidate_tree": candidate.get("tree"),
         "candidate_receipt_hash": _stage_hash(record, "candidate"),
-        "review_receipt_hash": _stage_hash(record, "review"),
         "integration_receipt_hash": _stage_hash(record, "integration"),
         "materialization_receipt_hash": _stage_hash(record, "materialization"),
         "live_verification_receipt_hash": _stage_hash(record, "live_verification"),
@@ -498,9 +497,8 @@ def _root_document_or_absent(
         except FileNotFoundError:
             return None
         if owner != paths.root_uid:
-            # A coding-group member may squat on a predictable response name,
-            # but only the fixed root consumer may mint trusted evidence.  The
-            # root-owned sticky parent lets the consumer atomically replace it.
+            # Ignore a legacy foreign-owned artifact. Only the directory-owning
+            # db materializer can replace or mint files in this parent.
             return None
         raise
 
@@ -661,6 +659,86 @@ def _runtime_canary(paths: RootEffectPaths, root_id: str) -> dict[str, Any]:
     return {**unsigned, "canary_hash": _hash(unsigned)}
 
 
+def _restart_request(paths: RootEffectPaths, request: Mapping[str, Any]) -> Path:
+    """Publish one idempotent trigger consumed only by the fixed path unit."""
+
+    path = paths.request_root / ".restart-request"
+    value = {
+        "schema": "tgw-local-coding-static-restart-request/v1",
+        "candidate_commit": request["candidate_commit"],
+    }
+    try:
+        existing = _load_exact(
+            path,
+            expected_uid=paths.root_uid,
+            expected_gid=_group_gid(paths),
+            expected_mode=0o640,
+        )
+    except RootEffectError:
+        if path.exists() or path.is_symlink():
+            raise
+        existing = None
+    if existing != value:
+        _atomic(
+            path,
+            value,
+            replace=True,
+            group_gid=_group_gid(paths),
+            mode=0o640,
+            owner_uid=paths.root_uid,
+            directory_uid=paths.root_uid,
+        )
+    return path
+
+
+def _restart_acknowledged(paths: RootEffectPaths, trigger: Path) -> dict[str, Any]:
+    """Prove the static service completed after this exact trigger was written."""
+
+    acknowledgement = paths.restart_ack
+    try:
+        trigger_state = trigger.stat(follow_symlinks=False)
+        ack_state = acknowledgement.stat(follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise RestartPending("awaiting fixed coding-runtime restart acknowledgement") from exc
+    if (
+        acknowledgement.is_symlink()
+        or not stat.S_ISREG(ack_state.st_mode)
+        or ack_state.st_uid != 0
+        or ack_state.st_gid != 0
+        or stat.S_IMODE(ack_state.st_mode) != 0o444
+        or ack_state.st_mtime_ns < trigger_state.st_mtime_ns
+    ):
+        raise RestartPending("fixed coding-runtime restart acknowledgement is stale")
+    required = (
+        "tgw-codex-implement-worker.service",
+        "tgw-claude-review-worker.service",
+        "tgw-controller-verify-worker.service",
+        "tgw-coding-lifecycle-supervisor.service",
+        "tgw-plan-render-local.service",
+    )
+    observed: dict[str, str] = {}
+    for unit in required:
+        completed = subprocess.run(
+            ["/bin/systemctl", "is-active", unit],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        state = completed.stdout.strip()
+        observed[unit] = state
+        if completed.returncode or state != "active":
+            raise RestartPending(f"fixed restart has not made {unit} active")
+    unsigned = {
+        "schema": "tgw-local-coding-static-restart-acknowledgement/v1",
+        "candidate_commit": current_generation(paths.runtime_root),
+        "acknowledgement": str(acknowledgement),
+        "acknowledgement_mtime_ns": ack_state.st_mtime_ns,
+        "services": observed,
+    }
+    return {**unsigned, "acknowledgement_hash": _hash(unsigned)}
+
+
 def _default_effects(
     paths: RootEffectPaths, request: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -685,24 +763,15 @@ def _default_effects(
         os.close(descriptor)
         temporary = Path(raw_temporary)
         try:
-            completed = subprocess.run(
-                protected_git_command(
+            try:
+                write_exact_tree_archive(
                     paths.repository,
-                    "archive",
-                    "--format=tar",
-                    f"--output={temporary}",
-                    str(request["candidate_commit"]),
-                ),
-                cwd=paths.repository,
-                check=False,
-                text=True,
-                capture_output=True,
-                env=dict(protected_git_environment()),
-            )
-            if completed.returncode:
-                raise RootEffectError(
-                    completed.stderr[-300:] or "Git archive failed"
+                    commit=str(request["candidate_commit"]),
+                    tree=str(request["candidate_tree"]),
+                    destination=temporary,
                 )
+            except ValueError as exc:
+                raise RootEffectError(str(exc)) from exc
             os.chown(temporary, paths.root_uid, _group_gid(paths))
             os.chmod(temporary, 0o440)
             os.replace(temporary, archive)
@@ -745,7 +814,7 @@ def _default_effects(
             or selection.get("evidence_identity")
             != {
                 "request_hash": request["request_hash"],
-                "review_receipt_hash": request["review_receipt_hash"],
+                "integration_receipt_hash": request["integration_receipt_hash"],
             }
         ):
             raise RootEffectError("selected lifecycle runtime receipt differs")
@@ -765,17 +834,12 @@ def _default_effects(
             ),
             evidence_identity={
                 "request_hash": request["request_hash"],
-                "review_receipt_hash": request["review_receipt_hash"],
+                "integration_receipt_hash": request["integration_receipt_hash"],
             },
         )
     _write_state(paths, request, "selected")
-
-    workers = {
-        "schema": "tgw-local-coding-static-restart-request/v1",
-        "mechanism": "tgw-coding-runtime-restart.path",
-        "candidate_commit": request["candidate_commit"],
-        "privileged_candidate_code": False,
-    }
+    trigger = _restart_request(paths, request)
+    workers = _restart_acknowledged(paths, trigger)
     canary = _runtime_canary(paths, str(request["root_id"]))
     _write_state(paths, request, "verified")
     return {
@@ -784,6 +848,94 @@ def _default_effects(
         "workers": workers,
         "live_verification": canary,
     }
+
+
+def bootstrap_candidate(
+    paths: RootEffectPaths, *, commit: str, tree: str
+) -> dict[str, Any]:
+    """Materialize/select one exact clean commit without Context or lifecycle state.
+
+    This is the acyclic first-install primitive. It is intentionally available
+    only to the ordinary ``db:tgw-coders`` account and accepts no command,
+    provider, review, admission, Plan, or remote-effect input.
+    """
+
+    if _COMMIT.fullmatch(commit) is None or _COMMIT.fullmatch(tree) is None:
+        raise RootEffectError("bootstrap commit/tree identity is invalid")
+    if (
+        _git(paths, "status", "--porcelain=v1")
+        or _git(paths, "rev-parse", "HEAD") != commit
+        or _git(paths, "rev-parse", "HEAD^{tree}") != tree
+    ):
+        raise RootEffectError("bootstrap requires the exact clean canonical source")
+    _safe_root(
+        paths.request_root,
+        group_gid=_group_gid(paths),
+        root_uid=paths.root_uid,
+    )
+    archive = paths.request_root / f"{commit}.tar"
+    if not _trusted_root_file(paths, archive, mode=0o440):
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{commit}.", suffix=".tar.tmp", dir=paths.request_root
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            write_exact_tree_archive(
+                paths.repository,
+                commit=commit,
+                tree=tree,
+                destination=temporary,
+            )
+            os.chown(temporary, paths.root_uid, _group_gid(paths))
+            os.chmod(temporary, 0o440)
+            os.replace(temporary, archive)
+        finally:
+            temporary.unlink(missing_ok=True)
+    archive_hash = _file_hash(archive).removeprefix("sha256:")
+    manifest = materialize(
+        paths.runtime_root,
+        archive,
+        generation=commit,
+        commit=commit,
+        tree=tree,
+        archive_sha256=archive_hash,
+    )
+    verification = verify(paths.runtime_root, commit)
+    previous = current_generation(paths.runtime_root)
+    if previous == commit:
+        selection = {
+            "state": "already-selected",
+            "selected_generation": commit,
+        }
+    else:
+        selection = select_fixed_local(
+            paths.runtime_root,
+            commit,
+            expected_current=previous,
+            operation_id=f"bootstrap-{commit[:32]}",
+            evidence_validator=lambda selected: (
+                None
+                if selected.get("commit") == commit
+                and selected.get("git_tree") == tree
+                else (_ for _ in ()).throw(
+                    RootEffectError("bootstrap release differs")
+                )
+            ),
+            evidence_identity={"commit": commit, "tree": tree},
+        )
+    unsigned = {
+        "schema": "tgw-local-coding-bootstrap-materialization/v1",
+        "actor": pwd.getpwuid(os.geteuid()).pw_name,
+        "commit": commit,
+        "tree": tree,
+        "previous_generation": previous,
+        "manifest_sha256": _hash(manifest),
+        "archive_sha256": "sha256:" + archive_hash,
+        "verification": verification,
+        "selection": selection,
+    }
+    return {**unsigned, "receipt_hash": _hash(unsigned)}
 
 
 def process_request(
@@ -842,18 +994,6 @@ def process_request(
         owner_uid=paths.root_uid,
         directory_uid=paths.root_uid,
     )
-    _atomic(
-        paths.request_root / ".restart-request",
-        {
-            "schema": "tgw-local-coding-static-restart-request/v1",
-            "candidate_commit": request["candidate_commit"],
-        },
-        replace=True,
-        group_gid=_group_gid(paths),
-        mode=0o640,
-        owner_uid=paths.root_uid,
-        directory_uid=paths.root_uid,
-    )
     return response
 
 
@@ -876,7 +1016,6 @@ def validate_projection_request(
         "candidate_commit",
         "candidate_tree",
         "candidate_receipt_hash",
-        "review_receipt_hash",
         "integration_receipt_hash",
         "materialization_receipt_hash",
         "live_verification_receipt_hash",
@@ -996,37 +1135,93 @@ def _project_terminal_task(
 def _publish_context(
     paths: RootEffectPaths, request: Mapping[str, Any]
 ) -> Mapping[str, Any]:
-    """Invoke the existing local Doctor publisher and bind its returned receipt."""
+    """Publish orientation as db, then verify the fixed root promotion."""
 
     from tgw import doctor_cli
 
     task_file_sha256 = _project_terminal_task(paths, request)
-    result = doctor_cli.repair_context(
-        doctor_cli.DoctorPaths(
-            repository=paths.repository,
-            coding_config=paths.coding_config,
-            runtime_root=paths.runtime_root,
-        )
+    cursor_surface = doctor_cli._surface_snapshot(paths.context_cursor)
+    cursor = doctor_cli._json_from_surface(paths.context_cursor, cursor_surface)
+    if cursor.get("plan_commit") != request["plan_commit"]:
+        raise RootEffectError("Context cursor differs from the lifecycle Plan")
+    cursor["source_commit"] = request["candidate_commit"]
+    cursor["source_tree"] = request["candidate_tree"]
+    cursor["updated_at"] = datetime.now(timezone.utc).isoformat()
+    doctor_cli._cas_regular_file(
+        paths.context_cursor,
+        cursor_surface,
+        doctor_cli._json_bytes(cursor),
+        mode=cursor_surface["mode"],
+        uid=cursor_surface["uid"],
+        gid=cursor_surface["gid"],
     )
-    receipt_path_value = result.get("receipt")
-    if not isinstance(receipt_path_value, str):
-        raise RootEffectError("Context publisher returned no exact receipt path")
-    receipt_path = Path(receipt_path_value)
-    receipt = _load_exact(receipt_path)
-    snapshot = receipt.get("after", {}).get("snapshot", {})
+    publisher = paths.runtime_root / "current/scripts/tgw_context_publish.py"
+    completed = subprocess.run(
+        [
+            str(publisher),
+            "--task",
+            str(paths.context_task),
+            "--cursor",
+            str(paths.context_cursor),
+            "--output",
+            str(paths.context_pending),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={
+            "HOME": "/home/db",
+            "LANG": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+    )
+    if completed.returncode:
+        raise RootEffectError(
+            completed.stderr[-500:] or "ordinary Context publisher failed"
+        )
+    pending_hash = _file_hash(paths.context_pending)
+    if not paths.context_snapshot.is_file() or _file_hash(
+        paths.context_snapshot
+    ) != pending_hash:
+        raise RestartPending("awaiting fixed Context snapshot promotion")
+    snapshot = _load_exact(paths.context_snapshot)
     if (
-        receipt.get("schema") != "tgw-local-doctor-repair-receipt/v1"
-        or receipt.get("operation") != "context"
-        or receipt.get("error") is not None
-        or snapshot.get("plan_commit") != request["plan_commit"]
+        snapshot.get("plan_commit") != request["plan_commit"]
         or snapshot.get("source_commit") != request["candidate_commit"]
         or snapshot.get("source_tree") != request["candidate_tree"]
     ):
-        raise RootEffectError("Context publisher receipt differs from terminal result")
+        raise RootEffectError("promoted Context snapshot differs from terminal result")
+    receipt_unsigned = {
+        "schema": "tgw-local-coding-context-publication/v1",
+        "root_id": request["root_id"],
+        "projection_hash": request["projection_hash"],
+        "task_file_sha256": task_file_sha256,
+        "cursor_file_sha256": _file_hash(paths.context_cursor),
+        "snapshot_file_sha256": pending_hash,
+    }
+    receipt = {
+        **receipt_unsigned,
+        "receipt_sha256": _hash(receipt_unsigned),
+    }
+    receipt_path = paths.request_root / (
+        str(request["root_id"]).removeprefix("coding:")
+        + ".context-receipt.json"
+    )
+    _atomic(
+        receipt_path,
+        receipt,
+        replace=True,
+        group_gid=_group_gid(paths),
+        mode=0o640,
+        owner_uid=paths.root_uid,
+        directory_uid=paths.root_uid,
+    )
     return {
         "path": str(receipt_path),
         "file_sha256": _file_hash(receipt_path),
-        "receipt_sha256": receipt.get("receipt_sha256"),
+        "receipt_sha256": receipt["receipt_sha256"],
         "task_file_sha256": task_file_sha256,
     }
 
@@ -1219,7 +1414,10 @@ def consume_once(paths: RootEffectPaths) -> int:
             continue
         if read_response(paths, request) is not None:
             continue
-        process_request(paths, request, store=store)
+        try:
+            process_request(paths, request, store=store)
+        except RestartPending:
+            continue
         processed += 1
     for path in sorted(paths.request_root.glob("*.projection-request.json")):
         refusal = _refusal_path(paths, path)
@@ -1254,10 +1452,28 @@ def main() -> int:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--poll-interval", type=float, default=5.0)
+    parser.add_argument("--bootstrap-commit")
+    parser.add_argument("--bootstrap-tree")
     args = parser.parse_args()
-    if os.geteuid() != 0:
-        raise SystemExit("coding root effect consumer requires root")
+    actor = pwd.getpwuid(os.geteuid()).pw_name
+    coding_gid = grp.getgrnam("tgw-coders").gr_gid
+    if actor != "db" or coding_gid not in ({os.getegid()} | set(os.getgroups())):
+        raise SystemExit("coding materializer requires db in tgw-coders")
     paths = RootEffectPaths.from_config(args.config)
+    if args.bootstrap_commit is not None or args.bootstrap_tree is not None:
+        if not args.bootstrap_commit or not args.bootstrap_tree:
+            raise SystemExit("bootstrap requires both commit and tree")
+        print(
+            json.dumps(
+                bootstrap_candidate(
+                    paths,
+                    commit=args.bootstrap_commit,
+                    tree=args.bootstrap_tree,
+                ),
+                sort_keys=True,
+            )
+        )
+        return 0
     while True:
         consume_once(paths)
         if args.once:

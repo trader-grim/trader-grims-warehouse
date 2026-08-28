@@ -21,6 +21,10 @@ CODING_READY_FOR_REVIEW = GoalProfile(
     identity="coding.ready_for_review", version="1",
     required=("implemented", "tested", "linted"),
 )
+CODING_DIAGNOSTIC_REVIEW = GoalProfile(
+    identity="coding.diagnostic_review", version="1",
+    required=("implemented", "tested", "linted", "reviewed", "controller_verified"),
+)
 CODING_READY_FOR_ADMISSION = GoalProfile(
     identity="coding.ready_for_admission", version="1",
     required=("implemented", "tested", "linted", "reviewed", "controller_verified"),

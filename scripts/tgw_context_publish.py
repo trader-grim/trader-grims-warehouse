@@ -13,9 +13,11 @@ import sys
 sys.dont_write_bytecode = True
 
 import argparse
+import grp
 import importlib.util
 import json
 import os
+import pwd
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -75,8 +77,15 @@ def main() -> int:
     parser.add_argument("--cursor", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if os.geteuid() != 0:
-        raise SystemExit("current-context publication must run as root")
+    coding_gid = grp.getgrnam("tgw-coders").gr_gid
+    if (
+        os.geteuid() != 0
+        and (
+            os.geteuid() != pwd.getpwnam("db").pw_uid
+            or coding_gid not in ({os.getegid()} | set(os.getgroups()))
+        )
+    ):
+        raise SystemExit("current-context publication requires db:tgw-coders")
     maximum, publish_bytes = _snapshot_api()
     task = _object(args.task, maximum)
     cursor = _object(args.cursor, maximum)
@@ -89,7 +98,7 @@ def main() -> int:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(raw)
             stream.flush()
-            os.fchown(stream.fileno(), 0, 0)
+            os.fchown(stream.fileno(), os.geteuid(), coding_gid)
             os.fchmod(stream.fileno(), 0o444)
             os.fsync(stream.fileno())
         os.replace(temporary, args.output)

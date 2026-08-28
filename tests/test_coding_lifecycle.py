@@ -3,6 +3,7 @@ import json
 import os
 import stat
 import subprocess
+import tarfile
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
@@ -38,6 +39,7 @@ from tgw.development.coding_root_effect import (
 )
 from tgw.development.local_workflow import LocalCodingWorkflowError, load_config
 from tgw.development.plan_binding import execution_root_hash
+from tgw.protected_git import write_exact_tree_archive
 from tgw.review_contract import ReviewRunnerError
 
 
@@ -251,14 +253,15 @@ def record_at_integration(
 
 def root_paths(tmp_path: Path, store: LifecycleStore, worktree: Path) -> RootEffectPaths:
     effects = tmp_path / "root-effects"
-    effects.mkdir(mode=0o3770)
-    effects.chmod(0o3770)
+    effects.mkdir(mode=0o2750)
+    effects.chmod(0o2750)
     return RootEffectPaths(
         request_root=effects,
         lifecycle_root=store.root,
         repository=worktree,
         runtime_root=tmp_path / "runtime",
         coding_config=tmp_path / "coding.json",
+        restart_ack=tmp_path / "restart-ack",
         group_gid=os.getegid(),
         root_uid=os.geteuid(),
     )
@@ -811,14 +814,20 @@ def test_root_request_rejects_forbidden_fields_and_is_idempotent_after_recovery(
             "canary_hash": "sha256:" + "8" * 64,
         },
     )
+    restart_evidence = {
+        "schema": "tgw-local-coding-static-restart-acknowledgement/v1",
+        "candidate_commit": commit,
+        "services": {"fixed": "active"},
+        "acknowledgement_hash": "sha256:" + "7" * 64,
+    }
+    monkeypatch.setattr(
+        coding_root_effect,
+        "_restart_acknowledged",
+        lambda _paths, _trigger: restart_evidence,
+    )
     first_effects = coding_root_effect._default_effects(paths, request)
     assert first_effects["selection"]["state"] == "completed"
-    assert first_effects["workers"] == {
-        "schema": "tgw-local-coding-static-restart-request/v1",
-        "mechanism": "tgw-coding-runtime-restart.path",
-        "candidate_commit": commit,
-        "privileged_candidate_code": False,
-    }
+    assert first_effects["workers"] == restart_evidence
     recovered = process_request(paths, request, store=store)
     replay = process_request(paths, request, store=store)
     assert recovered == replay
@@ -840,6 +849,99 @@ def test_root_request_rejects_forbidden_fields_and_is_idempotent_after_recovery(
     assert (
         paths.runtime_root / "releases" / commit / ".release-manifest.json"
     ).is_file()
+
+
+def test_exact_archive_ignores_repository_config_and_info_attributes(
+    tmp_path: Path,
+):
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "-q", repository], check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "archive@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Archive Test"],
+        cwd=repository,
+        check=True,
+    )
+    (repository / "kept.txt").write_text("exact bytes\n")
+    executable = repository / "run"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "candidate"], cwd=repository, check=True)
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True
+    ).strip()
+    info_attributes = repository / ".git/info/attributes"
+    info_attributes.write_text("kept.txt export-ignore\nrun -export-subst\n")
+    subprocess.run(
+        ["git", "config", "tar.umask", "0777"], cwd=repository, check=True
+    )
+    archive = tmp_path / "candidate.tar"
+    archive.touch()
+    write_exact_tree_archive(
+        repository, commit=commit, tree=tree, destination=archive
+    )
+    with tarfile.open(archive) as stream:
+        members = {member.name: member for member in stream.getmembers()}
+        assert set(members) == {"kept.txt", "run"}
+        assert members["kept.txt"].mode == 0o644
+        assert members["run"].mode == 0o755
+        assert stream.extractfile(members["kept.txt"]).read() == b"exact bytes\n"
+
+
+def test_db_bootstrap_materializes_without_context_lifecycle_or_review(
+    tmp_path: Path,
+):
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "-q", repository], check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "bootstrap@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Bootstrap Test"],
+        cwd=repository,
+        check=True,
+    )
+    (repository / "source.py").write_text("READY = True\n")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "candidate"], cwd=repository, check=True)
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True
+    ).strip()
+    effects = tmp_path / "effects"
+    effects.mkdir(mode=0o2750)
+    effects.chmod(0o2750)
+    paths = RootEffectPaths(
+        request_root=effects,
+        lifecycle_root=tmp_path / "absent-lifecycle",
+        repository=repository,
+        runtime_root=tmp_path / "runtime",
+        coding_config=tmp_path / "coding.json",
+        group_gid=os.getegid(),
+        root_uid=os.geteuid(),
+    )
+    receipt = coding_root_effect.bootstrap_candidate(
+        paths, commit=commit, tree=tree
+    )
+    assert receipt["actor"] == __import__("pwd").getpwuid(os.geteuid()).pw_name
+    assert receipt["commit"] == commit
+    assert receipt["tree"] == tree
+    assert receipt["receipt_hash"].startswith("sha256:")
+    assert (paths.runtime_root / "current").resolve() == (
+        paths.runtime_root / "releases" / commit
+    ).resolve()
 
 
 def test_context_projection_is_terminal_bound_and_retry_state_is_cadenced(
@@ -1155,7 +1257,10 @@ def test_installed_config_and_services_are_exact_and_forbid_broad_effects():
     restart_path = Path("systemd/tgw-coding-runtime-restart.path").read_text().lower()
     restart_service = Path("systemd/tgw-coding-runtime-restart.service").read_text().lower()
     assert "pathchanged=/opt/tgw/var/tgw-coders/coding-root-effects/.restart-request" in restart_path
-    assert "execstart=/bin/systemctl try-restart" in restart_service
+    assert "execstart=/bin/systemctl restart" in restart_service
+    assert "tgw-plan-render-local.service" in restart_service
+    assert "tgw-coding-root-effect.service" in restart_service
+    assert "/run/tgw-coding-runtime-restart/complete" in restart_service
     assert "python" not in restart_service
     assert "tgw.development" not in restart_service
 

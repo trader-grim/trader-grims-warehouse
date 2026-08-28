@@ -1,0 +1,15 @@
+[Unit]
+Description=Atomically promote the non-authoritative TGW Context snapshot
+ConditionPathExists=/opt/TGW/tgw-lib/context-input/current-context.pending.json
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/rm -f /opt/TGW/tgw-lib/config/.tgw-context-current.promote
+ExecStart=/usr/bin/install -o root -g root -m 0444 /opt/TGW/tgw-lib/context-input/current-context.pending.json /opt/TGW/tgw-lib/config/.tgw-context-current.promote
+ExecStart=/bin/mv -f /opt/TGW/tgw-lib/config/.tgw-context-current.promote /opt/TGW/tgw-lib/config/tgw-context-current.json
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/TGW/tgw-lib/context-input/current-context.pending.json
+ReadWritePaths=/opt/TGW/tgw-lib/config
