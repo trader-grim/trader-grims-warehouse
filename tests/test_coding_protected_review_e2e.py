@@ -97,6 +97,7 @@ def _root_python_result(code: str, *arguments: Path) -> subprocess.CompletedProc
             "sudo",
             "-n",
             "/usr/bin/env",
+            "PYTHONDONTWRITEBYTECODE=1",
             f"PYTHONPATH={python_path}",
             "/opt/TGW/.venvs/controller/bin/python3",
             "-c",
@@ -114,6 +115,26 @@ def _root_python(code: str, *arguments: Path) -> str:
     if result.returncode:
         raise AssertionError(result.stderr or result.stdout)
     return result.stdout
+
+
+def _generated_cache_artifacts(root: Path) -> list[str]:
+    exact_root = root.resolve(strict=True)
+    artifacts: list[str] = []
+    for directory, directories, files in os.walk(
+        exact_root, topdown=True, followlinks=False,
+    ):
+        current = Path(directory)
+        artifacts.extend(
+            str((current / name).relative_to(exact_root))
+            for name in directories
+            if name in {".ruff_cache", "__pycache__"}
+        )
+        artifacts.extend(
+            str((current / name).relative_to(exact_root))
+            for name in files
+            if name.endswith(".pyc")
+        )
+    return sorted(artifacts)
 
 
 def _archive_snapshot_hash(repository: Path, commit: str) -> str:
@@ -358,6 +379,7 @@ server.server_close()
             "sudo",
             "-n",
             "/usr/bin/env",
+            "PYTHONDONTWRITEBYTECODE=1",
             f"PYTHONPATH={python_path}",
             "/opt/TGW/.venvs/controller/bin/python3",
             "-c",
@@ -444,6 +466,7 @@ def test_disposable_services_execute_the_protected_governed_review_path(
         candidate, candidate_commit, candidate_tree = candidate_repository(
             tmp_path, plan_commit=plan_commit
         )
+        assert _generated_cache_artifacts(candidate) == []
         materialization_pin, materialization = w06_plan_materialization(
             plan_repository, plan_commit=plan_commit
         )
@@ -1318,6 +1341,7 @@ prepare_governed_request(
             )
             for item in root.iterdir()
         )
+        assert _generated_cache_artifacts(candidate) == []
     finally:
         if broker_process is not None:
             _stop_broker(broker_process)
