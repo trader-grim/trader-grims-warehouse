@@ -5,6 +5,7 @@ import grp
 import hashlib
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import os
 import pwd
@@ -499,10 +500,13 @@ def test_source_bootstrap_launcher_does_not_depend_on_selected_runtime() -> None
     assert "PYTHONPATH" in launcher
     assert "PYTHONSAFEPATH" in launcher
     assert 'Path("/usr/bin/python3.13")' in launcher
+    assert 'Path("/usr/sbin/runuser")' in launcher
     assert 'Path("/var/tmp")' in launcher
     assert '"tgw.doctor_cli"' in launcher
     assert "_extract_exact" in launcher
     assert '"--repair"' in launcher
+    assert "_unprivileged_status()" in launcher
+    assert '_git("status"' not in launcher
 
 
 def test_source_bootstrap_routes_privileged_repair_through_exact_candidate(
@@ -524,14 +528,11 @@ def test_source_bootstrap_routes_privileged_repair_through_exact_candidate(
     observed: list[str] = []
 
     monkeypatch.setattr(module, "_require_installed_root_copy", lambda: None)
+    monkeypatch.setattr(module, "_unprivileged_status", lambda: b"")
     monkeypatch.setattr(
         module,
         "_git",
-        lambda *args: (
-            b""
-            if args == ("status", "--porcelain=v1")
-            else (commit + "\n").encode()
-        ),
+        lambda *_args: (commit + "\n").encode(),
     )
     monkeypatch.setattr(module, "_extract_exact", lambda *_args: tree)
     monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_kwargs: str(staging))
@@ -4428,6 +4429,65 @@ def test_runtime_selector_rolls_back_if_post_switch_release_check_changes(tmp_pa
         doctor_cli.repair_runtime(paths)
 
     assert current.readlink() == Path("releases/previous")
+
+
+def test_runtime_selector_rollback_preserves_a_concurrent_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    previous = paths.runtime_root / "releases/previous"
+    previous.mkdir()
+    concurrent = paths.runtime_root / "releases/concurrent"
+    concurrent.mkdir()
+    current = paths.runtime_root / "current"
+    current.unlink()
+    current.symlink_to(Path("releases/previous"))
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    original_verify = doctor_cli._verify_release_tree
+    calls = 0
+
+    def verify(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            current.unlink()
+            current.symlink_to(Path("releases/concurrent"))
+            raise doctor_cli.DoctorError("release changed after selector switch")
+        return original_verify(*args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli, "_verify_release_tree", verify)
+
+    with pytest.raises(doctor_cli.DoctorError, match="concurrent selector change"):
+        doctor_cli.repair_runtime(paths)
+
+    assert current.readlink() == Path("releases/concurrent")
+
+
+def test_doctor_root_source_status_is_demoted_to_ordinary_db() -> None:
+    source = inspect.getsource(doctor_cli._source_identity)
+
+    assert "os.getuid() == 0" in source
+    assert '"/usr/sbin/runuser"' in source
+    assert '"db"' in source
+    assert "_CODING_RUNTIME_GROUP" in source
+
+
+def test_runtime_selector_lock_accepts_the_materializer_lock(
+    tmp_path: Path,
+) -> None:
+    operations = tmp_path / "runtime/operations"
+    operations.mkdir(parents=True)
+    operations.chmod(0o750)
+    lock = operations / ".selector.lock"
+    lock.touch(mode=0o600)
+    paths = replace(
+        doctor_cli.DoctorPaths(),
+        runtime_root=tmp_path / "runtime",
+        coding_root_effect_uid=os.getuid(),
+    )
+
+    with doctor_cli._runtime_selector_lock(paths):
+        assert lock.stat(follow_symlinks=False).st_nlink == 1
 
 
 def test_unit_definition_requires_exact_fragment_and_no_dropins(tmp_path: Path) -> None:

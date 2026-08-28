@@ -403,7 +403,36 @@ def _failed(identity: str, exc: Exception, *, repair: str | None = None) -> dict
 def _source_identity(paths: DoctorPaths) -> tuple[str, str, str]:
     head = _git(paths.repository, "rev-parse", "HEAD^{commit}")
     tree = _git(paths.repository, "rev-parse", "HEAD^{tree}")
-    status = _git(paths.repository, "status", "--short")
+    status_command = protected_git_command(paths.repository, "status", "--short")
+    status_environment = dict(protected_git_environment())
+    if os.getuid() == 0:
+        status_command = [
+            "/usr/sbin/runuser",
+            "-u",
+            "db",
+            "-g",
+            _CODING_RUNTIME_GROUP,
+            "--",
+            "/usr/bin/env",
+            "-i",
+            *(f"{key}={value}" for key, value in status_environment.items()),
+            *status_command,
+        ]
+        status_environment = None
+    observed = subprocess.run(
+        status_command,
+        cwd=paths.repository,
+        env=status_environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if observed.returncode:
+        raise DoctorError(
+            observed.stderr.strip() or "ordinary-user source status failed"
+        )
+    status = observed.stdout.strip()
     if _COMMIT.fullmatch(head) is None or _COMMIT.fullmatch(tree) is None:
         raise DoctorError("canonical source has an invalid Git identity")
     return head, tree, status
@@ -3649,6 +3678,61 @@ def _repair_lock(paths: DoctorPaths):
         os.close(descriptor)
 
 
+@contextmanager
+def _runtime_selector_lock(paths: DoctorPaths):
+    """Share the release materializer's selector lock during dependent repairs."""
+    operations = paths.runtime_root / "operations"
+    directory = os.open(
+        operations,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    descriptor = -1
+    try:
+        directory_state = os.fstat(directory)
+        materializer_uid = (
+            pwd.getpwnam("db").pw_uid
+            if paths.coding_root_effect_uid is None
+            else paths.coding_root_effect_uid
+        )
+        if (
+            not stat.S_ISDIR(directory_state.st_mode)
+            or directory_state.st_uid not in {materializer_uid, os.geteuid()}
+            or directory_state.st_mode & 0o022
+        ):
+            raise DoctorError("runtime selector lock directory is unsafe")
+        expected = os.stat(
+            ".selector.lock", dir_fd=directory, follow_symlinks=False
+        )
+        descriptor = os.open(
+            ".selector.lock",
+            os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory,
+        )
+        observed = os.fstat(descriptor)
+        if (
+            (expected.st_dev, expected.st_ino) != (observed.st_dev, observed.st_ino)
+            or not stat.S_ISREG(observed.st_mode)
+            or observed.st_nlink != 1
+            or observed.st_uid not in {materializer_uid, os.geteuid()}
+            or stat.S_IMODE(observed.st_mode) != 0o600
+        ):
+            raise DoctorError("runtime selector lock is unsafe")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        final = os.stat(
+            ".selector.lock", dir_fd=directory, follow_symlinks=False
+        )
+        if (final.st_dev, final.st_ino) != (observed.st_dev, observed.st_ino):
+            raise DoctorError("runtime selector lock changed while acquiring it")
+        yield
+    except FileNotFoundError as exc:
+        raise DoctorError("runtime selector lock is not initialized") from exc
+    finally:
+        if descriptor >= 0:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        os.close(directory)
+
+
 def _atomic_bytes(
     path: Path,
     value: bytes,
@@ -4762,7 +4846,20 @@ def repair_runtime(
         _verify_release_tree(paths, desired, release)
     except Exception as exc:
         rollback_errors = []
-        if previous_selector is not None:
+        installed_selector = str(Path("releases") / desired)
+        selector_still_ours = (
+            current_link.is_symlink()
+            and os.readlink(current_link) == installed_selector
+        )
+        if not changed:
+            rollback_errors.append(
+                "selector was not changed by this repair; no rollback attempted"
+            )
+        elif not selector_still_ours:
+            rollback_errors.append(
+                "concurrent selector change preserved; automatic rollback refused"
+            )
+        elif previous_selector is not None:
             try:
                 _replace_link(current_link, Path(previous_selector))
             except Exception as rollback_exc:
@@ -4774,6 +4871,12 @@ def repair_runtime(
                 rollback_errors.append(str(rollback_exc))
         suffix = "; rollback errors: " + "; ".join(rollback_errors) if rollback_errors else "; original selector restored"
         raise DoctorError(f"runtime commit failed: {exc}{suffix}") from exc
+    if (
+        not current_link.is_symlink()
+        or os.readlink(current_link) != str(Path("releases") / desired)
+        or current_link.resolve(strict=True) != release.resolve(strict=True)
+    ):
+        raise DoctorError("runtime selector changed before repair completion")
     after = {
         "current_link": os.readlink(current_link),
         "current": str(current_link.resolve(strict=True)),
@@ -7897,7 +8000,17 @@ def repair(
     if function is None:
         raise DoctorError(f"unknown repair: {operation}")
     _require_root()
-    with _repair_lock(paths):
+    with ExitStack() as locks:
+        locks.enter_context(_repair_lock(paths))
+        if desired_commit is not None and operation in {
+            "context",
+            "context-launcher",
+            "runtime",
+            "database",
+            "workers",
+            "plan-render-worker",
+        }:
+            locks.enter_context(_runtime_selector_lock(paths))
         exact_root: Path | None = None
         if desired_commit is not None:
             if source_root is None:

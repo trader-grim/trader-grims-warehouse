@@ -429,7 +429,13 @@ def todo_set_progress_note(item_id: int, note: str) -> Dict[str, Any]:
                 )
                 row = cur.fetchone()
     except psycopg2.errors.UndefinedColumn:
-        return {'ok': False, 'error': 'progress_note column unavailable; run `sudo -n tgw doctor repair database`'}
+        return {
+            'ok': False,
+            'error': (
+                'progress_note column unavailable; run `tgw doctor` as an ordinary '
+                'tgw-coders user and follow its exact bounded bootstrap action'
+            ),
+        }
     if row is None:
         return {'ok': False, 'error': f'item {item_id} not found or already done'}
     _enqueue_plan_render('todo_set_progress_note')
