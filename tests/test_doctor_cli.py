@@ -1820,6 +1820,37 @@ def test_root_post_repair_checks_use_the_invoking_operator(
     assert doctor_cli._operator_actor() == "codex"
 
 
+def test_root_context_probe_uses_durable_task_actor_without_sudo_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = tmp_path / "current-task.json"
+    _write_json(task, {"actor": "codex", "receiver": "codex"})
+    target = SimpleNamespace(pw_name="codex", pw_uid=1004, pw_gid=1004)
+    coding_group = SimpleNamespace(gr_name="tgw-coders", gr_gid=983)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _actor: target)
+    monkeypatch.setattr(doctor_cli.grp, "getgrnam", lambda _group: coding_group)
+    monkeypatch.setattr(doctor_cli.os, "getgrouplist", lambda *_args: [1004, 983])
+
+    actor = doctor_cli._context_probe_actor(
+        replace(doctor_cli.DoctorPaths(), context_task=task)
+    )
+
+    assert actor == "codex"
+
+
+def test_context_probe_rejects_task_actor_receiver_mismatch(tmp_path: Path) -> None:
+    task = tmp_path / "current-task.json"
+    _write_json(task, {"actor": "codex", "receiver": "claude"})
+
+    with pytest.raises(doctor_cli.DoctorError, match="actor and receiver differ"):
+        doctor_cli._context_probe_actor(
+            replace(doctor_cli.DoctorPaths(), context_task=task)
+        )
+
+
 def test_root_database_postcheck_runs_as_the_invoking_operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     observed = {}

@@ -1077,7 +1077,7 @@ def check_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
             if installed["uid"] != paths.context_install_uid or installed["gid"] != paths.context_install_gid or installed["mode"] != paths.context_launcher_mode:
                 raise DoctorError(f"installed Context {name} owner or mode differs from root:root 0555")
             installed_records[name] = installed
-        actor = _operator_actor()
+        actor = _context_probe_actor(paths)
         snapshot_raw = paths.context_snapshot.read_bytes()
         snapshot_value = json.loads(snapshot_raw.decode("utf-8"))
         expected = _validate_snapshot(
@@ -1719,6 +1719,37 @@ def _operator_actor() -> str:
     except KeyError as exc:
         raise DoctorError(f"sudo operator account does not exist: {sudo_user}") from exc
     return sudo_user
+
+
+def _context_probe_actor(paths: DoctorPaths) -> str:
+    """Resolve the read-only cold-probe identity from durable task context.
+
+    The fixed root bootstrap deliberately starts Doctor with a sanitized
+    environment, so ``SUDO_USER`` is not a durable actor binding.  The current
+    task already names the active harness actor and receiver.  That value has
+    no effect authority: it is accepted only when it identifies one existing
+    member of the ordinary ``tgw-coders`` group, then the probe drops to it.
+    Legacy task fixtures without an actor retain the interactive fallback.
+    """
+
+    task = _json(paths.context_task)
+    actor = task.get("actor")
+    if actor is None:
+        return _operator_actor()
+    receiver = task.get("receiver")
+    if not isinstance(actor, str) or not actor or actor == "root":
+        raise DoctorError("Context task probe actor is invalid")
+    if receiver is not None and receiver != actor:
+        raise DoctorError("Context task actor and receiver differ")
+    try:
+        target = pwd.getpwnam(actor)
+        coding_group = grp.getgrnam(_CODING_RUNTIME_GROUP)
+        actor_groups = os.getgrouplist(actor, target.pw_gid)
+    except (KeyError, OSError) as exc:
+        raise DoctorError("Context task probe actor cannot be resolved") from exc
+    if target.pw_name != actor or coding_group.gr_gid not in actor_groups:
+        raise DoctorError("Context task probe actor is not a tgw-coders member")
+    return actor
 
 
 def _actor_path_access(actor: str, path: Path) -> bool:
@@ -4333,7 +4364,7 @@ def repair_context_launcher(
                 raise DoctorError("selected Context runtime changed during repair replay")
             probe = _probe_context_stdio(
                 paths.context_launcher,
-                _operator_actor(),
+                _context_probe_actor(paths),
                 _selected_context_probe_expected(paths, selected),
             )
             retained_displaced_pointer = None
@@ -4439,7 +4470,7 @@ def repair_context_launcher(
         try:
             probe = _probe_context_stdio(
                 paths.context_launcher,
-                _operator_actor(),
+                _context_probe_actor(paths),
                 _selected_context_probe_expected(paths, selected),
             )
         except Exception as probe_exc:
@@ -4664,7 +4695,7 @@ def repair_context(
             # consulted again for bytes or metadata.
             staged_probe = _probe_context_stdio(
                 selected_launcher,
-                _operator_actor(),
+                _context_probe_actor(paths),
                 expanded_after,
                 staged_snapshot_descriptor=staged_descriptor,
                 staged_snapshot_uid=paths.context_install_uid,
