@@ -110,6 +110,39 @@ def _tree_files(
     return files
 
 
+def read_exact_tree_file(
+    repository: Path,
+    *,
+    commit: str,
+    tree: str,
+    path: str,
+) -> tuple[int, bytes]:
+    """Return one file's mode and bytes directly from verified Git objects.
+
+    The returned bytes are retained by the caller, so a writable worktree or
+    materialized release cannot replace them between verification and a later
+    privileged installation.
+    """
+
+    if _OBJECT.fullmatch(commit) is None or _OBJECT.fullmatch(tree) is None:
+        raise ValueError("exact Git commit/tree identity is invalid")
+    if not path or path.startswith("/") or any(
+        component in {"", ".", ".."} for component in path.split("/")
+    ):
+        raise ValueError("exact Git file path is unsafe")
+    commit_body = _object(repository, "commit", commit)
+    if commit_body.partition(b"\n")[0] != f"tree {tree}".encode():
+        raise ValueError("exact Git commit does not bind the requested tree")
+    matches = [
+        (mode, body)
+        for name, mode, body in _tree_files(repository, tree)
+        if name == path
+    ]
+    if len(matches) != 1:
+        raise ValueError("exact Git file is absent or ambiguous")
+    return matches[0]
+
+
 def write_exact_tree_archive(
     repository: Path,
     *,

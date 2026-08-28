@@ -691,7 +691,9 @@ def _restart_request(paths: RootEffectPaths, request: Mapping[str, Any]) -> Path
     return path
 
 
-def _restart_acknowledged(paths: RootEffectPaths, trigger: Path) -> dict[str, Any]:
+def _restart_acknowledged(
+    paths: RootEffectPaths, trigger: Path, *, candidate_commit: str
+) -> dict[str, Any]:
     """Prove the static service completed after this exact trigger was written."""
 
     acknowledgement = paths.restart_ack
@@ -729,9 +731,12 @@ def _restart_acknowledged(paths: RootEffectPaths, trigger: Path) -> dict[str, An
         observed[unit] = state
         if completed.returncode or state != "active":
             raise RestartPending(f"fixed restart has not made {unit} active")
+    selected = current_generation(paths.runtime_root)
+    if selected != candidate_commit:
+        raise RestartPending("fixed restart acknowledgement belongs to another runtime")
     unsigned = {
         "schema": "tgw-local-coding-static-restart-acknowledgement/v1",
-        "candidate_commit": current_generation(paths.runtime_root),
+        "candidate_commit": selected,
         "acknowledgement": str(acknowledgement),
         "acknowledgement_mtime_ns": ack_state.st_mtime_ns,
         "services": observed,
@@ -799,26 +804,28 @@ def _default_effects(
     previous = current_generation(paths.runtime_root)
     operation = str(request["root_id"]).removeprefix("coding:")[:32]
     operation_id = f"coding-{operation}"
-    if previous == request["candidate_commit"]:
-        selection_path = paths.runtime_root / "receipts" / f"{operation_id}.json"
+    evidence_identity = {
+        "request_hash": request["request_hash"],
+        "integration_receipt_hash": request["integration_receipt_hash"],
+    }
+    selection_path = paths.runtime_root / "receipts" / f"{operation_id}.json"
+    if selection_path.exists():
         try:
             selection = json.loads(selection_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise RootEffectError(
-                "selected lifecycle runtime lacks its exact selection receipt"
-            ) from exc
+            raise RootEffectError("lifecycle selection receipt is unreadable") from exc
         if (
             selection.get("state") != "completed"
             or selection.get("operation_id") != operation_id
             or selection.get("selected_generation") != request["candidate_commit"]
-            or selection.get("evidence_identity")
-            != {
-                "request_hash": request["request_hash"],
-                "integration_receipt_hash": request["integration_receipt_hash"],
-            }
+            or selection.get("evidence_identity") != evidence_identity
+            or previous != request["candidate_commit"]
         ):
             raise RootEffectError("selected lifecycle runtime receipt differs")
     else:
+        # Selecting the same generation is intentional.  It creates the exact
+        # lifecycle-bound receipt after a first-install bootstrap selected the
+        # bytes with its separate bootstrap operation identity.
         selection = select_fixed_local(
             paths.runtime_root,
             str(request["candidate_commit"]),
@@ -832,14 +839,13 @@ def _default_effects(
                     RootEffectError("selected release differs")
                 )
             ),
-            evidence_identity={
-                "request_hash": request["request_hash"],
-                "integration_receipt_hash": request["integration_receipt_hash"],
-            },
+            evidence_identity=evidence_identity,
         )
     _write_state(paths, request, "selected")
     trigger = _restart_request(paths, request)
-    workers = _restart_acknowledged(paths, trigger)
+    workers = _restart_acknowledged(
+        paths, trigger, candidate_commit=str(request["candidate_commit"])
+    )
     canary = _runtime_canary(paths, str(request["root_id"]))
     _write_state(paths, request, "verified")
     return {
@@ -1079,8 +1085,13 @@ def _project_terminal_task(
         or plan.get("approved_commit") != request["plan_commit"]
         or not isinstance(implementation, Mapping)
         or not isinstance(development, Mapping)
-        or development.get("commit")
-        not in {request["source_commit"], request["candidate_commit"]}
+        or (
+            development.get("commit"), development.get("tree")
+        )
+        not in {
+            (request["source_commit"], request["source_tree"]),
+            (request["candidate_commit"], request["candidate_tree"]),
+        }
     ):
         raise RootEffectError(
             "Context task cannot be projected from the exact lifecycle binding"
@@ -1139,11 +1150,23 @@ def _publish_context(
 
     from tgw import doctor_cli
 
-    task_file_sha256 = _project_terminal_task(paths, request)
+    # Bind both mutable inputs before changing either one.  Each later CAS
+    # still detects a concurrent replacement, while this preflight prevents a
+    # stale cursor from leaving a partially advanced task projection.
     cursor_surface = doctor_cli._surface_snapshot(paths.context_cursor)
     cursor = doctor_cli._json_from_surface(paths.context_cursor, cursor_surface)
-    if cursor.get("plan_commit") != request["plan_commit"]:
-        raise RootEffectError("Context cursor differs from the lifecycle Plan")
+    if (
+        cursor.get("plan_commit") != request["plan_commit"]
+        or (cursor.get("source_commit"), cursor.get("source_tree"))
+        not in {
+            (request["source_commit"], request["source_tree"]),
+            (request["candidate_commit"], request["candidate_tree"]),
+        }
+    ):
+        raise RootEffectError(
+            "Context cursor differs from the exact lifecycle Plan/source binding"
+        )
+    task_file_sha256 = _project_terminal_task(paths, request)
     cursor["source_commit"] = request["candidate_commit"]
     cursor["source_tree"] = request["candidate_tree"]
     cursor["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -1343,6 +1366,7 @@ def _refuse_invalid_file(
     paths: RootEffectPaths, request_file: Path, reason: str
 ) -> None:
     observed = request_file.lstat()
+    content_sha256 = _file_hash(request_file)
     unsigned = {
         "schema": "tgw-local-coding-root-effect-refusal/v1",
         "request_file": request_file.name,
@@ -1350,6 +1374,7 @@ def _refuse_invalid_file(
         "inode": observed.st_ino,
         "mode": stat.S_IFMT(observed.st_mode) | stat.S_IMODE(observed.st_mode),
         "link_count": observed.st_nlink,
+        "content_sha256": content_sha256,
         "reason": reason[-500:],
     }
     _atomic(
@@ -1387,6 +1412,7 @@ def _refusal_applies(
         and refusal.get("mode")
         == stat.S_IFMT(observed.st_mode) | stat.S_IMODE(observed.st_mode)
         and refusal.get("link_count") == observed.st_nlink
+        and refusal.get("content_sha256") == _file_hash(request_file)
     )
 
 

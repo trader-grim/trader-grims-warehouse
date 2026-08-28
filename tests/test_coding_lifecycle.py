@@ -39,7 +39,7 @@ from tgw.development.coding_root_effect import (
 )
 from tgw.development.local_workflow import LocalCodingWorkflowError, load_config
 from tgw.development.plan_binding import execution_root_hash
-from tgw.protected_git import write_exact_tree_archive
+from tgw.protected_git import read_exact_tree_file, write_exact_tree_archive
 from tgw.review_contract import ReviewRunnerError
 
 
@@ -823,7 +823,7 @@ def test_root_request_rejects_forbidden_fields_and_is_idempotent_after_recovery(
     monkeypatch.setattr(
         coding_root_effect,
         "_restart_acknowledged",
-        lambda _paths, _trigger: restart_evidence,
+        lambda _paths, _trigger, **_kwargs: restart_evidence,
     )
     first_effects = coding_root_effect._default_effects(paths, request)
     assert first_effects["selection"]["state"] == "completed"
@@ -888,6 +888,13 @@ def test_exact_archive_ignores_repository_config_and_info_attributes(
     write_exact_tree_archive(
         repository, commit=commit, tree=tree, destination=archive
     )
+    mode, exact_bytes = read_exact_tree_file(
+        repository, commit=commit, tree=tree, path="kept.txt"
+    )
+    assert mode == 0o644
+    assert exact_bytes == b"exact bytes\n"
+    (repository / "kept.txt").write_text("worktree replacement\n")
+    assert exact_bytes == b"exact bytes\n"
     with tarfile.open(archive) as stream:
         members = {member.name: member for member in stream.getmembers()}
         assert set(members) == {"kept.txt", "run"}
@@ -942,6 +949,64 @@ def test_db_bootstrap_materializes_without_context_lifecycle_or_review(
     assert (paths.runtime_root / "current").resolve() == (
         paths.runtime_root / "releases" / commit
     ).resolve()
+
+
+def test_lifecycle_selection_converges_after_bootstrap_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "-q", repository], check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "bootstrap@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Bootstrap Test"],
+        cwd=repository,
+        check=True,
+    )
+    (repository / "source.py").write_text("READY = True\n")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "candidate"], cwd=repository, check=True)
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True
+    ).strip()
+    store = store_at(tmp_path / "journal")
+    record = record_at_integration(
+        store,
+        repository,
+        source=commit,
+        source_tree=tree,
+        commit=commit,
+        tree=tree,
+    )
+    paths = root_paths(tmp_path, store, repository)
+    coding_root_effect.bootstrap_candidate(paths, commit=commit, tree=tree)
+    request = build_request(record)
+    monkeypatch.setattr(
+        coding_root_effect,
+        "_restart_acknowledged",
+        lambda _paths, _trigger, **_kwargs: {
+            "schema": "restart",
+            "candidate_commit": commit,
+        },
+    )
+    monkeypatch.setattr(
+        coding_root_effect,
+        "_runtime_canary",
+        lambda _paths, _root_id: {"schema": "canary", "status": "PASS"},
+    )
+
+    effects = coding_root_effect._default_effects(paths, request)
+
+    assert effects["selection"]["state"] == "completed"
+    assert effects["selection"]["operation_id"].startswith("coding-")
+    assert effects["selection"]["previous_generation"] == commit
+    assert effects["selection"]["selected_generation"] == commit
 
 
 def test_context_projection_is_terminal_bound_and_retry_state_is_cadenced(
@@ -1048,6 +1113,7 @@ def test_terminal_context_task_projection_is_single_cas_and_non_authoritative(
         "implementation": {
             "development_source": {
                 "commit": record["binding"]["source_commit"],
+                "tree": record["binding"]["source_tree"],
                 "next_leaf": "workflow.condition-derived-convergence@1",
             },
             "coding_workflow": {
@@ -1072,6 +1138,7 @@ def test_terminal_context_task_projection_is_single_cas_and_non_authoritative(
         implementation["development_source"]["commit"]
         == request["candidate_commit"]
     )
+    assert implementation["development_source"]["tree"] == request["candidate_tree"]
     assert (
         implementation["coding_workflow"]["commit"]
         == request["candidate_commit"]
@@ -1079,6 +1146,11 @@ def test_terminal_context_task_projection_is_single_cas_and_non_authoritative(
     terminal = implementation["coding_lifecycle_result"]
     assert terminal["result_hash"] == request["result_hash"]
     assert terminal["operator_acceptance"] == "PENDING"
+
+    projected["implementation"]["development_source"]["tree"] = "0" * 40
+    task_path.write_text(json.dumps(projected, sort_keys=True) + "\n")
+    with pytest.raises(RootEffectError, match="exact lifecycle binding"):
+        coding_root_effect._project_terminal_task(paths, request)
 
 
 def test_context_outage_does_not_block_technical_completion_or_rewrite_early(

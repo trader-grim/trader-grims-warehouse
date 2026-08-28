@@ -3,6 +3,8 @@ from __future__ import annotations
 import errno
 import grp
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import pwd
@@ -442,6 +444,61 @@ def test_coding_bootstrap_is_explicit_and_context_independent(
     assert result["context_required"] is False
     assert result["review_authority"] is False
     assert paths.coding_config.read_bytes() == config_source.read_bytes()
+
+
+def test_source_bootstrap_launcher_does_not_depend_on_selected_runtime() -> None:
+    launcher = (ROOT / "bin/tgw-coding-bootstrap").read_text(encoding="utf-8")
+    assert "coding-runtime/current" not in launcher
+    assert "tgw_context" not in launcher.lower()
+    assert "protected-review" not in launcher.lower()
+    assert "admission" not in launcher.lower()
+    assert "onboarding" not in launcher.lower()
+    assert "/usr/local/sbin/tgw-coding-bootstrap" in launcher
+    assert "st_uid != 0" in launcher
+    assert "PYTHONPATH" in launcher
+    assert '"tgw.doctor_cli"' in launcher
+    assert "_extract_exact" in launcher
+
+
+def test_source_bootstrap_reconstructs_only_exact_regular_git_files(
+    tmp_path: Path,
+) -> None:
+    launcher = ROOT / "bin/tgw-coding-bootstrap"
+    loader = importlib.machinery.SourceFileLoader("tgw_exact_bootstrap_test", str(launcher))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    repository = tmp_path / "source"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.name", "bootstrap")
+    _git(repository, "config", "user.email", "bootstrap@example.invalid")
+    (repository / "regular").write_bytes(b"exact\n")
+    executable = repository / "executable"
+    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-m", "exact")
+    commit = _git(repository, "rev-parse", "HEAD")
+    module._REPOSITORY = repository
+    destination = tmp_path / "exact"
+    destination.mkdir()
+
+    tree = module._extract_exact(commit, destination)
+
+    assert tree == _git(repository, "rev-parse", "HEAD^{tree}")
+    assert (destination / "regular").read_bytes() == b"exact\n"
+    assert stat.S_IMODE((destination / "regular").stat().st_mode) == 0o644
+    assert stat.S_IMODE((destination / "executable").stat().st_mode) == 0o755
+
+    link = repository / "link"
+    link.symlink_to("regular")
+    _git(repository, "add", "link")
+    _git(repository, "commit", "-m", "unsafe link")
+    linked_commit = _git(repository, "rev-parse", "HEAD")
+    with pytest.raises(module.BootstrapError, match="link or unsupported"):
+        module._extract_exact(linked_commit, tmp_path / "refused")
 
 
 def test_context_managed_parents_allow_a_non_install_group(tmp_path: Path) -> None:

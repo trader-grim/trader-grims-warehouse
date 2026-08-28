@@ -1,0 +1,219 @@
+#!/usr/bin/python3
+"""Acyclic, exact first-install entry point for the local coding runtime.
+
+Install this reviewed file as ``/usr/local/sbin/tgw-coding-bootstrap`` owned by
+root and mode 0555. It never imports Python from the group-writable checkout.
+Instead it verifies Git objects by identity, reconstructs the requested commit
+in a private root-owned directory, and invokes that exact Doctor implementation.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+_INSTALLED = Path("/usr/local/sbin/tgw-coding-bootstrap")
+_REPOSITORY = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
+_PYTHON = "/opt/TGW/.venvs/controller/bin/python3"
+_OBJECT = re.compile(r"[0-9a-f]{40}\Z")
+
+
+class BootstrapError(RuntimeError):
+    """The exact local bootstrap cannot proceed safely."""
+
+
+def _environment() -> dict[str, str]:
+    return {
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_PAGER": "cat",
+        "GIT_TERMINAL_PROMPT": "0",
+        "HOME": "/root",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+    }
+
+
+def _git(*arguments: str) -> bytes:
+    command = [
+        "/usr/bin/git",
+        "--no-replace-objects",
+        "-c",
+        f"safe.directory={_REPOSITORY}",
+        "-c",
+        f"core.worktree={_REPOSITORY}",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.attributesFile=/dev/null",
+        *arguments,
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=_REPOSITORY,
+        env=_environment(),
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode:
+        raise BootstrapError(
+            completed.stderr.decode(errors="replace").strip()
+            or "protected Git read failed"
+        )
+    return completed.stdout
+
+
+def _object(kind: str, oid: str) -> bytes:
+    if kind not in {"commit", "tree", "blob"} or _OBJECT.fullmatch(oid) is None:
+        raise BootstrapError("invalid exact Git object request")
+    body = _git("cat-file", kind, oid)
+    framed = kind.encode() + b" " + str(len(body)).encode() + b"\0" + body
+    if hashlib.sha1(framed, usedforsecurity=False).hexdigest() != oid:
+        raise BootstrapError("exact Git object content differs from its identity")
+    return body
+
+
+def _tree_files(
+    tree: str, prefix: tuple[str, ...] = ()
+) -> list[tuple[tuple[str, ...], int, bytes]]:
+    body = _object("tree", tree)
+    offset = 0
+    files: list[tuple[tuple[str, ...], int, bytes]] = []
+    while offset < len(body):
+        separator = body.find(b" ", offset)
+        terminator = body.find(b"\0", separator + 1)
+        if separator < 0 or terminator < 0 or terminator + 21 > len(body):
+            raise BootstrapError("exact Git tree encoding is invalid")
+        try:
+            mode = body[offset:separator].decode("ascii")
+            name = body[separator + 1 : terminator].decode("utf-8", "strict")
+        except UnicodeError as exc:
+            raise BootstrapError("exact Git tree path is not UTF-8") from exc
+        oid = body[terminator + 1 : terminator + 21].hex()
+        offset = terminator + 21
+        if not name or name in {".", ".."} or "/" in name:
+            raise BootstrapError("exact Git tree path is unsafe")
+        path = (*prefix, name)
+        if mode == "40000":
+            files.extend(_tree_files(oid, path))
+        elif mode in {"100644", "100755"}:
+            files.append(
+                (path, 0o755 if mode == "100755" else 0o644, _object("blob", oid))
+            )
+        else:
+            raise BootstrapError("exact Git tree contains a link or unsupported entry")
+    return files
+
+
+def _require_installed_root_copy() -> None:
+    invoked = Path(__file__)
+    state = invoked.lstat()
+    if (
+        invoked.is_symlink()
+        or invoked.resolve(strict=True) != _INSTALLED
+        or not stat.S_ISREG(state.st_mode)
+        or state.st_uid != 0
+        or state.st_gid != 0
+        or stat.S_IMODE(state.st_mode) != 0o555
+        or state.st_nlink != 1
+        or os.geteuid() != 0
+    ):
+        raise BootstrapError(
+            "bootstrap must run from the root-owned 0555 /usr/local/sbin installation"
+        )
+
+
+def _extract_exact(commit: str, destination: Path) -> str:
+    body = _object("commit", commit)
+    first = body.partition(b"\n")[0]
+    if not first.startswith(b"tree "):
+        raise BootstrapError("exact Git commit has no tree")
+    tree = first.removeprefix(b"tree ").decode("ascii")
+    if _OBJECT.fullmatch(tree) is None:
+        raise BootstrapError("exact Git commit tree identity is invalid")
+    for parts, mode, data in _tree_files(tree):
+        parent = destination.joinpath(*parts[:-1])
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = parent / parts[-1]
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            mode,
+        )
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            os.close(descriptor)
+        os.chmod(path, mode)
+    return tree
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="tgw-coding-bootstrap",
+        description="install one exact local coding runtime without Context or review",
+    )
+    parser.add_argument("--commit", required=True)
+    args = parser.parse_args(argv)
+    try:
+        _require_installed_root_copy()
+        if _OBJECT.fullmatch(args.commit) is None:
+            raise BootstrapError("bootstrap commit identity is invalid")
+        if _git("status", "--porcelain=v1"):
+            raise BootstrapError("canonical source is not clean")
+        if _git("rev-parse", "HEAD").decode().strip() != args.commit:
+            raise BootstrapError("canonical source does not select the requested commit")
+        staging = Path(tempfile.mkdtemp(prefix="tgw-coding-bootstrap-"))
+        try:
+            tree = _extract_exact(args.commit, staging)
+            environment = _environment()
+            environment.update(
+                {
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONPATH": str(staging / "src"),
+                }
+            )
+            completed = subprocess.run(
+                [
+                    _PYTHON,
+                    "-m",
+                    "tgw.doctor_cli",
+                    "coding-bootstrap",
+                    "--commit",
+                    args.commit,
+                ],
+                cwd=_REPOSITORY,
+                env=environment,
+                check=False,
+            )
+            if completed.returncode:
+                raise BootstrapError("exact candidate Doctor bootstrap failed")
+            print(f"bootstrapped exact local coding runtime {args.commit} tree {tree}")
+            return 0
+        finally:
+            shutil.rmtree(staging)
+    except (BootstrapError, OSError) as exc:
+        print(f"tgw-coding-bootstrap: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

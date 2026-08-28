@@ -190,6 +190,14 @@ def _plan_render_check_fixture(
         "_plan_render_process_runtime_identity",
         lambda *_args, **_kwargs: {"exact": True},
     )
+    monkeypatch.setattr(
+        doctor_cli,
+        "read_exact_tree_file",
+        lambda _repository, *, path, **_kwargs: (
+            0o644,
+            (release / path).read_bytes(),
+        ),
+    )
     return paths, release
 
 
@@ -235,7 +243,9 @@ def test_plan_render_repair_refuses_matching_config_symlink(
     paths.plan_render_config.unlink()
     paths.plan_render_config.symlink_to(target)
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
-    monkeypatch.setattr(doctor_cli, "_verify_release_tree", lambda *_args: {})
+    monkeypatch.setattr(
+        doctor_cli, "_verify_release_tree", lambda *_args: {"tree": "c" * 40}
+    )
 
     with pytest.raises(doctor_cli.DoctorError, match="unsafe plan_render config"):
         doctor_cli.repair_plan_render_worker(paths)
@@ -259,7 +269,9 @@ def test_plan_render_repair_refuses_runtime_selector_before_effects(
         current.symlink_to(Path("releases") / ("b" * 40))
     effects: list[str] = []
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
-    monkeypatch.setattr(doctor_cli, "_verify_release_tree", lambda *_args: {})
+    monkeypatch.setattr(
+        doctor_cli, "_verify_release_tree", lambda *_args: {"tree": "c" * 40}
+    )
     monkeypatch.setattr(
         doctor_cli,
         "_atomic_bytes",
@@ -422,7 +434,9 @@ def test_plan_render_repair_receipts_storage_before_service(
     )
     events: list[str] = []
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
-    monkeypatch.setattr(doctor_cli, "_verify_release_tree", lambda *_args: {})
+    monkeypatch.setattr(
+        doctor_cli, "_verify_release_tree", lambda *_args: {"tree": "c" * 40}
+    )
     monkeypatch.setattr(
         doctor_cli,
         "_receipt",
@@ -482,7 +496,9 @@ def test_plan_render_repair_restarts_only_stale_worker_and_then_is_noop(
         {"state": "PASS", "evidence": {"process_runtime": {"exact": True}}},
     ])
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
-    monkeypatch.setattr(doctor_cli, "_verify_release_tree", lambda *_args: {})
+    monkeypatch.setattr(
+        doctor_cli, "_verify_release_tree", lambda *_args: {"tree": "c" * 40}
+    )
     monkeypatch.setattr(doctor_cli, "check_plan_render_worker", lambda _paths: next(checks))
     monkeypatch.setattr(doctor_cli, "_repair_plan_render_storage", lambda _paths: False)
     monkeypatch.setattr(doctor_cli, "_receipt", lambda *_args: "receipt.json")

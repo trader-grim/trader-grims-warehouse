@@ -46,6 +46,7 @@ from tgw.protected_git import (
     GIT_EXECUTABLE,
     protected_git_command,
     protected_git_environment,
+    read_exact_tree_file,
 )
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -6206,7 +6207,9 @@ def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
     }
 
 
-def _unit_destination_exact(paths: DoctorPaths, destination: Path, source: Path) -> bool:
+def _unit_destination_bytes_exact(
+    paths: DoctorPaths, destination: Path, expected: bytes
+) -> bool:
     if destination.is_symlink() or not destination.is_file():
         return False
     state = destination.stat(follow_symlinks=False)
@@ -6216,7 +6219,13 @@ def _unit_destination_exact(paths: DoctorPaths, destination: Path, source: Path)
         and state.st_gid == paths.systemd_unit_gid
         and stat.S_IMODE(state.st_mode) == paths.systemd_unit_mode
         and state.st_nlink == 1
-        and destination.read_bytes() == source.read_bytes()
+        and destination.read_bytes() == expected
+    )
+
+
+def _unit_destination_exact(paths: DoctorPaths, destination: Path, source: Path) -> bool:
+    return source.is_file() and _unit_destination_bytes_exact(
+        paths, destination, source.read_bytes()
     )
 
 
@@ -6238,20 +6247,31 @@ def repair_workers(
             raise DoctorError(
                 "lifecycle worker repair requires the exact clean canonical candidate"
             )
-    _verify_release_tree(paths, desired, release)
+    verification = _verify_release_tree(paths, desired, release)
+    tree = str(verification.get("tree", ""))
+    if _COMMIT.fullmatch(tree) is None:
+        raise DoctorError("verified coding release has no exact Git tree identity")
     before = check_units(paths, desired_commit=desired)
     installed: list[str] = []
     for unit in _CODING_UNITS:
-        source = release / "systemd" / unit
         destination = paths.systemd_install_root / unit
-        if not source.is_file():
-            raise DoctorError(f"immutable runtime lacks coding unit: {unit}")
+        try:
+            source_mode, source_bytes = read_exact_tree_file(
+                paths.repository,
+                commit=desired,
+                tree=tree,
+                path=f"systemd/{unit}",
+            )
+        except ValueError as exc:
+            raise DoctorError(f"exact candidate lacks coding unit: {unit}") from exc
+        if source_mode != 0o644:
+            raise DoctorError(f"exact candidate coding unit mode differs: {unit}")
         if destination.is_symlink() or (destination.exists() and not destination.is_file()):
             raise DoctorError(f"refusing unsafe coding unit destination: {destination}")
-        if not _unit_destination_exact(paths, destination, source):
+        if not _unit_destination_bytes_exact(paths, destination, source_bytes):
             _atomic_bytes(
                 destination,
-                source.read_bytes(),
+                source_bytes,
                 mode=paths.systemd_unit_mode,
                 uid=paths.systemd_unit_uid,
                 gid=paths.systemd_unit_gid,
@@ -6385,30 +6405,46 @@ def repair_plan_render_worker(
             raise DoctorError(
                 "plan_render repair requires the exact clean canonical candidate"
             )
-    _verify_release_tree(paths, desired, release)
+    verification = _verify_release_tree(paths, desired, release)
     runtime = _runtime_selector_identity(paths, desired, release)
     if not runtime["exact"]:
         raise DoctorError("immutable runtime selector differs; repair runtime before plan_render")
+    tree = str(verification.get("tree", ""))
+    if _COMMIT.fullmatch(tree) is None:
+        raise DoctorError("verified plan_render release has no exact Git tree identity")
     before = (
         check_plan_render_worker(paths, desired_commit=desired)
         if explicit_commit
         else check_plan_render_worker(paths)
     )
-    config_source = release / "config/tgw-plan-render-local.json"
-    unit_source = release / "systemd" / _PLAN_RENDER_UNIT
-    if config_source.is_symlink() or not config_source.is_file() or unit_source.is_symlink() or not unit_source.is_file():
-        raise DoctorError("immutable runtime lacks plan_render config or unit")
+    try:
+        config_mode, config_bytes = read_exact_tree_file(
+            paths.repository,
+            commit=desired,
+            tree=tree,
+            path="config/tgw-plan-render-local.json",
+        )
+        unit_mode, unit_bytes = read_exact_tree_file(
+            paths.repository,
+            commit=desired,
+            tree=tree,
+            path=f"systemd/{_PLAN_RENDER_UNIT}",
+        )
+    except ValueError as exc:
+        raise DoctorError("exact candidate lacks plan_render config or unit") from exc
+    if config_mode != 0o644 or unit_mode != 0o644:
+        raise DoctorError("exact candidate plan_render file mode differs")
     if paths.plan_render_config.is_symlink() or (paths.plan_render_config.exists() and not paths.plan_render_config.is_file()):
         raise DoctorError("refusing unsafe plan_render config destination")
     destination = paths.systemd_install_root / _PLAN_RENDER_UNIT
     if destination.is_symlink() or (destination.exists() and not destination.is_file()):
         raise DoctorError("refusing unsafe plan_render unit destination")
     changed = False
-    if not paths.plan_render_config.is_file() or paths.plan_render_config.read_bytes() != config_source.read_bytes():
-        _atomic_bytes(paths.plan_render_config, config_source.read_bytes(), mode=0o444, uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
+    if not paths.plan_render_config.is_file() or paths.plan_render_config.read_bytes() != config_bytes:
+        _atomic_bytes(paths.plan_render_config, config_bytes, mode=0o444, uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
         changed = True
-    if not _unit_destination_exact(paths, destination, unit_source):
-        _atomic_bytes(destination, unit_source.read_bytes(), mode=paths.systemd_unit_mode, uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
+    if not _unit_destination_bytes_exact(paths, destination, unit_bytes):
+        _atomic_bytes(destination, unit_bytes, mode=paths.systemd_unit_mode, uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
         result = _run(["systemctl", "daemon-reload"], timeout=30)
         if result.returncode:
             raise DoctorError(result.stderr.strip() or "systemd daemon reload failed")
@@ -7661,7 +7697,10 @@ def _parser() -> argparse.ArgumentParser:
     reconcile_parser.add_argument("todo_id", type=int)
     bootstrap_parser = sub.add_parser(
         "coding-bootstrap",
-        help="install one exact local coding runtime without Context",
+        help=(
+            "install one exact local coding runtime without Context; initial cutover "
+            "uses the root-owned /usr/local/sbin/tgw-coding-bootstrap"
+        ),
     )
     bootstrap_parser.add_argument("--commit", required=True)
     repair_parser = sub.add_parser("repair", help="restore an exact declared local state")
