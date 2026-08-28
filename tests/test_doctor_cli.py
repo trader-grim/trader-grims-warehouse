@@ -127,7 +127,8 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         "bin/tgw-todo-local-operator": "#!/bin/sh\nexit 0\n",
         "bin/tgw-coding-mcp": "#!/bin/sh\nexit 0\n",
         "bin/tgw-doctor": "#!/bin/sh\nexit 0\n",
-        "bin/tgw-operator": "#!/bin/sh\nexit 0\n",
+        "bin/tgw-operator": (ROOT / "bin/tgw-operator").read_text(),
+        "bin/tgw-coding-bootstrap": (ROOT / "bin/tgw-coding-bootstrap").read_text(),
         "config/tgw-coding-local-roles.sql": "SELECT 1;\n",
         "systemd/tgw-codex-implement-worker.service": "[Service]\nExecStart=/bin/true\n",
         "systemd/tgw-claude-review-worker.service": "[Service]\nExecStart=/bin/true\n",
@@ -175,6 +176,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     release = runtime_root / "releases" / head
     local_bin = root / "bin"
     operator_cli = tmp_path / "usr-local-bin-tgw"
+    coding_bootstrap = tmp_path / "usr-local-sbin-tgw-coding-bootstrap"
     worktrees = tmp_path / "worktrees"
     worktrees.mkdir()
     support_root = tmp_path / "tgw-coders"
@@ -202,7 +204,10 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     (local_bin / "tgw-todo").symlink_to(runtime_root / "current/bin/tgw-todo-local-operator")
     (local_bin / "tgw-coding-mcp").symlink_to(runtime_root / "current/bin/tgw-coding-mcp")
     (local_bin / "tgw-doctor").symlink_to(runtime_root / "current/bin/tgw-doctor")
-    operator_cli.symlink_to(runtime_root / "current/bin/tgw-operator")
+    shutil.copyfile(release / "bin/tgw-operator", operator_cli)
+    operator_cli.chmod(0o555)
+    shutil.copyfile(release / "bin/tgw-coding-bootstrap", coding_bootstrap)
+    coding_bootstrap.chmod(0o555)
 
     config = root / "config/tgw-coding-local.json"
     _write_json(
@@ -274,6 +279,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         runtime_root=runtime_root,
         local_bin=local_bin,
         operator_cli=operator_cli,
+        coding_bootstrap=coding_bootstrap,
         context_snapshot=snapshot_path,
         context_task=task_path,
         context_cursor=cursor_path,
@@ -341,6 +347,19 @@ def test_coding_bootstrap_is_explicit_and_context_independent(
     config_source = repository / "config/tgw-coding-local.json"
     config_source.parent.mkdir(parents=True)
     config_source.write_text(json.dumps(candidate_config))
+    operator_source = repository / "bin/tgw-operator"
+    operator_source.parent.mkdir(parents=True)
+    operator_source.write_text(
+        "#!/bin/sh\n[ \"$(/usr/bin/id -u)\" -ne 0 ] || exit 126\nexit 0\n",
+        encoding="utf-8",
+    )
+    operator_source.chmod(0o755)
+    bootstrap_source = repository / "bin/tgw-coding-bootstrap"
+    bootstrap_source.write_text(
+        "#!/usr/bin/python3.13 -IS\n# exact fixture bootstrap\n",
+        encoding="utf-8",
+    )
+    bootstrap_source.chmod(0o755)
     _git(repository, "add", ".")
     _git(repository, "commit", "-m", "candidate")
     commit = _git(repository, "rev-parse", "HEAD")
@@ -359,6 +378,7 @@ def test_coding_bootstrap_is_explicit_and_context_independent(
         runtime_root=tmp_path / "runtime",
         local_bin=tmp_path / "bin",
         operator_cli=tmp_path / "tgw",
+        coding_bootstrap=tmp_path / "tgw-coding-bootstrap",
         context_task=task,
         context_cursor=cursor,
         systemd_install_root=tmp_path / "systemd",
@@ -402,7 +422,9 @@ def test_coding_bootstrap_is_explicit_and_context_independent(
         doctor_cli,
         "_atomic_bytes",
         lambda path, value, **_kwargs: (
-            path.parent.mkdir(parents=True, exist_ok=True), path.write_bytes(value)
+            path.parent.mkdir(parents=True, exist_ok=True),
+            path.write_bytes(value),
+            path.chmod(_kwargs["mode"]),
         ),
     )
 
@@ -412,11 +434,17 @@ def test_coding_bootstrap_is_explicit_and_context_independent(
         ]
         assert "--bootstrap-commit" in command
         release = paths.runtime_root / "releases" / commit
-        release.mkdir(parents=True)
+        (release / "bin").mkdir(parents=True)
         (release / "source-byte").write_text("exact\n", encoding="utf-8")
         (release / "source-byte").chmod(0o444)
+        for name in ("tgw-operator", "tgw-coding-bootstrap"):
+            shutil.copyfile(repository / "bin" / name, release / "bin" / name)
+            (release / "bin" / name).chmod(0o555)
+        (release / "bin").chmod(0o555)
         release.chmod(0o555)
         paths.runtime_root.mkdir(exist_ok=True)
+        paths.runtime_root.chmod(0o750)
+        (paths.runtime_root / "releases").chmod(0o750)
         (paths.runtime_root / "current").symlink_to(Path("releases") / commit)
         return subprocess.CompletedProcess(command, 0, json.dumps({"ok": True}), "")
 
@@ -474,6 +502,58 @@ def test_source_bootstrap_launcher_does_not_depend_on_selected_runtime() -> None
     assert 'Path("/var/tmp")' in launcher
     assert '"tgw.doctor_cli"' in launcher
     assert "_extract_exact" in launcher
+    assert '"--repair"' in launcher
+
+
+def test_source_bootstrap_routes_privileged_repair_through_exact_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = ROOT / "bin/tgw-coding-bootstrap"
+    loader = importlib.machinery.SourceFileLoader(
+        "tgw_exact_repair_bootstrap_test", str(launcher)
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    commit = "a" * 40
+    tree = "b" * 40
+    staging = tmp_path / "private-exact-candidate"
+    staging.mkdir()
+    observed: list[str] = []
+
+    monkeypatch.setattr(module, "_require_installed_root_copy", lambda: None)
+    monkeypatch.setattr(
+        module,
+        "_git",
+        lambda *args: (
+            b""
+            if args == ("status", "--porcelain=v1")
+            else (commit + "\n").encode()
+        ),
+    )
+    monkeypatch.setattr(module, "_extract_exact", lambda *_args: tree)
+    monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_kwargs: str(staging))
+    monkeypatch.setattr(module.shutil, "rmtree", lambda *_args: None)
+
+    def run(command, **_kwargs):
+        observed.extend(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    assert module.main(["--commit", commit, "--repair", "context"]) == 0
+    assert observed == [
+        str(module._PYTHON),
+        "-S",
+        "-P",
+        "-m",
+        "tgw.doctor_cli",
+        "repair",
+        "context",
+        "--json",
+    ]
 
 
 def test_bootstrap_release_ownership_promotion_rejects_symlink(
@@ -742,7 +822,7 @@ def test_context_snapshot_binds_task_cursor_and_canonical_source(tmp_path: Path)
 
 
 def test_context_snapshot_detects_cursor_drift_with_exact_repair(tmp_path: Path) -> None:
-    paths, _head, _tree = _fixture(tmp_path)
+    paths, head, _tree = _fixture(tmp_path)
     cursor = json.loads(paths.context_cursor.read_text())
     cursor["source_commit"] = "b" * 40
     cursor["source_tree"] = "c" * 40
@@ -751,21 +831,27 @@ def test_context_snapshot_detects_cursor_drift_with_exact_repair(tmp_path: Path)
     result = doctor_cli.check_context_snapshot(paths)
 
     assert result["state"] == "FAIL"
-    assert result["operator_action"] == "sudo -n tgw doctor repair context"
+    assert result["operator_action"] == (
+        "sudo -n /usr/local/sbin/tgw-coding-bootstrap "
+        f"--commit {head} --repair context"
+    )
 
 
 @pytest.mark.parametrize("wrong_mode", [0o400, 0o440, 0o644])
 def test_context_snapshot_detects_metadata_drift(
     tmp_path: Path, wrong_mode: int
 ) -> None:
-    paths, _head, _tree = _fixture(tmp_path)
+    paths, head, _tree = _fixture(tmp_path)
     paths.context_snapshot.chmod(wrong_mode)
 
     result = doctor_cli.check_context_snapshot(paths)
 
     assert result["state"] == "FAIL"
     assert "install uid/gid 0444" in result["detail"]
-    assert result["operator_action"] == "sudo -n tgw doctor repair context"
+    assert result["operator_action"] == (
+        "sudo -n /usr/local/sbin/tgw-coding-bootstrap "
+        f"--commit {head} --repair context"
+    )
 
 
 def test_doctor_selected_parser_has_exact_inline_non_ascii_byte_parity() -> None:
@@ -4241,6 +4327,25 @@ def test_runtime_check_rejects_mutated_immutable_release(tmp_path: Path) -> None
     assert "release tree differs from Git" in result["detail"]
 
 
+def test_fixed_operator_launcher_survives_mutable_runtime_selector_swap(
+    tmp_path: Path,
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    fixed_bytes = paths.operator_cli.read_bytes()
+    hostile = paths.runtime_root / "releases/hostile/bin"
+    hostile.mkdir(parents=True)
+    (hostile / "tgw-operator").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    current = paths.runtime_root / "current"
+    current.unlink()
+    current.symlink_to(Path("releases/hostile"))
+
+    observed = paths.operator_cli.stat(follow_symlinks=False)
+    assert stat.S_ISREG(observed.st_mode)
+    assert not paths.operator_cli.is_symlink()
+    assert paths.operator_cli.read_bytes() == fixed_bytes
+    assert b"privileged execution through the mutable coding runtime is disabled" in fixed_bytes
+
+
 def test_runtime_repair_switches_only_one_selector_behind_stable_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paths, head, _tree = _fixture(tmp_path)
     previous = paths.runtime_root / "releases/previous"
@@ -4484,6 +4589,8 @@ def test_operator_launcher_routes_only_local_todo_coding_and_doctor() -> None:
     assert "/opt/TGW/tgw-lib/bin/tgw-coding" in launcher
     assert "/opt/TGW/tgw-lib/bin/tgw-doctor" in launcher
     assert "exec /usr/local/libexec/tgw-production-client" in launcher
+    assert '"$(/usr/bin/id -u)" -eq 0' in launcher
+    assert "/usr/local/sbin/tgw-coding-bootstrap" in launcher
 
 
 def test_role_sql_persists_explicit_todo_sequence_update_grant() -> None:
@@ -4503,7 +4610,7 @@ def test_database_repair_sql_idempotently_adds_progress_note() -> None:
 
 
 def test_database_check_fails_until_progress_note_exists(tmp_path, monkeypatch) -> None:
-    paths, _head, _tree = _fixture(tmp_path)
+    paths, head, _tree = _fixture(tmp_path)
     observation = {
         key: True for key in (
             "database_connect", "schema_usage", "role_member", "todo_access",
@@ -4519,7 +4626,10 @@ def test_database_check_fails_until_progress_note_exists(tmp_path, monkeypatch) 
 
     assert result["state"] == "FAIL"
     assert result["evidence"]["progress_note_column"] is False
-    assert result["operator_action"] == "sudo -n tgw doctor repair database"
+    assert result["operator_action"] == (
+        "sudo -n /usr/local/sbin/tgw-coding-bootstrap "
+        f"--commit {head} --repair database"
+    )
 
 
 def test_database_repair_pipes_verified_sql_across_private_release_ancestry(

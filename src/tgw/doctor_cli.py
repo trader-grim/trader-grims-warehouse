@@ -214,6 +214,7 @@ class DoctorPaths:
     runtime_root: Path = Path("/opt/TGW/tgw-lib/coding-runtime")
     local_bin: Path = Path("/opt/TGW/tgw-lib/bin")
     operator_cli: Path = Path("/usr/local/bin/tgw")
+    coding_bootstrap: Path = Path("/usr/local/sbin/tgw-coding-bootstrap")
     context_snapshot: Path = Path("/opt/TGW/tgw-lib/config/tgw-context-current.json")
     context_task: Path = Path("/opt/TGW/tgw-lib/context-input/current-task.json")
     context_cursor: Path = Path("/opt/TGW/tgw-lib/context-input/plan-cycle-cursor.json")
@@ -408,6 +409,20 @@ def _source_identity(paths: DoctorPaths) -> tuple[str, str, str]:
     return head, tree, status
 
 
+def _privileged_repair_action(paths: DoctorPaths, target: str) -> str:
+    """Return the exact root-owned repair path, never the mutable tgw launcher."""
+    try:
+        head, _tree, status = _source_identity(paths)
+    except Exception:
+        return "restore the exact clean canonical source before privileged repair"
+    if status:
+        return "restore the exact clean canonical source before privileged repair"
+    return (
+        "sudo -n /usr/local/sbin/tgw-coding-bootstrap "
+        f"--commit {head} --repair {target}"
+    )
+
+
 def check_host(paths: DoctorPaths) -> dict[str, Any]:
     host = socket.gethostname().split(".", 1)[0]
     state = "PASS" if host == "tgw-lib" else "FAIL"
@@ -512,7 +527,7 @@ def _validate_snapshot(
 
 
 def check_context_snapshot(paths: DoctorPaths) -> dict[str, Any]:
-    repair = "sudo -n tgw doctor repair context"
+    repair = _privileged_repair_action(paths, "context")
     try:
         snapshot_state = paths.context_snapshot.stat(follow_symlinks=False)
         if (
@@ -952,7 +967,7 @@ def _context_pair(paths: DoctorPaths) -> dict[str, Any]:
 
 
 def check_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
-    repair = "sudo -n tgw doctor repair context-launcher"
+    repair = _privileged_repair_action(paths, "context-launcher")
     try:
         selected = _selected_context_artifacts(paths)
         desired = selected["commit"]
@@ -1678,13 +1693,13 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
                 "shared_trees": shared_trees,
                 "protected_coding_roots": protected_roots,
             },
-            repair=None if exact else "sudo -n tgw doctor repair unix-git-access",
+            repair=None if exact else _privileged_repair_action(paths, "unix-git-access"),
         )
     except Exception as exc:
         return _failed(
             "access.unix-group",
             exc,
-            repair="sudo -n tgw doctor repair unix-git-access",
+            repair=_privileged_repair_action(paths, "unix-git-access"),
         )
 
 
@@ -2461,7 +2476,7 @@ def _database_observation(config: Mapping[str, Any]) -> tuple[dict[str, Any], in
 
 
 def check_database(paths: DoctorPaths) -> dict[str, Any]:
-    repair = "sudo -n tgw doctor repair database"
+    repair = _privileged_repair_action(paths, "database")
     try:
         config = _coding_config(paths)
         row, active = _database_observation(config)
@@ -2638,7 +2653,7 @@ def _plan_render_process_runtime_identity(
 def check_units(
     paths: DoctorPaths, *, desired_commit: str | None = None
 ) -> dict[str, Any]:
-    repair = "sudo -n tgw doctor repair workers"
+    repair = _privileged_repair_action(paths, "workers")
     try:
         observed = {}
         for unit in _CODING_UNITS:
@@ -2772,7 +2787,7 @@ def _plan_render_storage_identity(paths: DoctorPaths) -> dict[str, Any]:
 def check_plan_render_worker(
     paths: DoctorPaths, *, desired_commit: str | None = None
 ) -> dict[str, Any]:
-    repair = "sudo -n tgw doctor repair plan-render-worker"
+    repair = _privileged_repair_action(paths, "plan-render-worker")
     try:
         explicit_commit = desired_commit is not None
         if desired_commit is None:
@@ -3240,12 +3255,58 @@ def _launcher_links(paths: DoctorPaths) -> dict[Path, Path]:
         paths.local_bin / "tgw-coding": current / "tgw-coding-local-operator",
         paths.local_bin / "tgw-coding-mcp": current / "tgw-coding-mcp",
         paths.local_bin / "tgw-doctor": current / "tgw-doctor",
-        paths.operator_cli: current / "tgw-operator",
     }
 
 
+def _fixed_root_launcher_identity(
+    paths: DoctorPaths, destination: Path, source: Path
+) -> dict[str, Any]:
+    expected_hash = _file_hash(source) if source.is_file() else None
+    try:
+        observed = destination.stat(follow_symlinks=False)
+        installed_hash = (
+            _file_hash(destination)
+            if stat.S_ISREG(observed.st_mode) and not destination.is_symlink()
+            else None
+        )
+    except FileNotFoundError:
+        observed = None
+        installed_hash = None
+    exact = bool(
+        expected_hash is not None
+        and observed is not None
+        and stat.S_ISREG(observed.st_mode)
+        and not destination.is_symlink()
+        and observed.st_uid == paths.context_install_uid
+        and observed.st_gid == paths.context_install_gid
+        and stat.S_IMODE(observed.st_mode) == 0o555
+        and observed.st_nlink == 1
+        and installed_hash == expected_hash
+    )
+    return {
+        "exact": exact,
+        "destination": str(destination),
+        "source": str(source),
+        "source_sha256": expected_hash,
+        "installed_sha256": installed_hash,
+        "uid": observed.st_uid if observed is not None else None,
+        "gid": observed.st_gid if observed is not None else None,
+        "mode": stat.S_IMODE(observed.st_mode) if observed is not None else None,
+        "link_count": observed.st_nlink if observed is not None else None,
+        "kind": (
+            "regular"
+            if observed is not None and stat.S_ISREG(observed.st_mode)
+            else "missing-or-unsupported"
+        ),
+    }
+
+
+def _operator_launcher_identity(paths: DoctorPaths, source: Path) -> dict[str, Any]:
+    return _fixed_root_launcher_identity(paths, paths.operator_cli, source)
+
+
 def check_runtime(paths: DoctorPaths) -> dict[str, Any]:
-    repair = "sudo -n tgw doctor repair runtime"
+    repair = _privileged_repair_action(paths, "runtime")
     try:
         desired, release, _task = _desired_runtime(paths)
         current_link = paths.runtime_root / "current"
@@ -3285,6 +3346,20 @@ def check_runtime(paths: DoctorPaths) -> dict[str, Any]:
                 launcher_surface_drift = True
             elif destination_hash != source_hash:
                 mismatches.append(f"{destination} via current selector")
+        operator_source = release / "bin/tgw-operator"
+        operator = _operator_launcher_identity(paths, operator_source)
+        hashes[str(paths.operator_cli)] = operator
+        if not operator["exact"]:
+            mismatches.append(f"{paths.operator_cli} fixed privileged boundary")
+            launcher_surface_drift = True
+        bootstrap_source = release / "bin/tgw-coding-bootstrap"
+        bootstrap = _fixed_root_launcher_identity(
+            paths, paths.coding_bootstrap, bootstrap_source
+        )
+        hashes[str(paths.coding_bootstrap)] = bootstrap
+        if not bootstrap["exact"]:
+            mismatches.append(f"{paths.coding_bootstrap} fixed privileged boundary")
+            launcher_surface_drift = True
         config_text = paths.coding_config.read_text(encoding="utf-8").lower()
         forbidden = [item for item in _FORBIDDEN_CODING_DEPENDENCIES if item in config_text]
         if forbidden:
@@ -3412,7 +3487,7 @@ def check_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
     elif visible:
         state = "WARN"
         detail = "verified obsolete active surfaces remain: " + ", ".join(item["path"] for item in visible)
-        repair = "sudo -n tgw doctor repair obsolete-surfaces"
+        repair = _privileged_repair_action(paths, "obsolete-surfaces")
     else:
         state = "PASS"
         detail = "no declared obsolete active surface remains"
@@ -4554,6 +4629,20 @@ def repair_runtime(paths: DoctorPaths) -> dict[str, Any]:
             raise DoctorError(f"declared release lacks launcher {source}")
         if not destination.is_symlink() or os.readlink(destination) != str(target):
             raise DoctorError(f"fixed launcher drift requires bounded bootstrap repair: {destination}")
+    operator_source = release / "bin/tgw-operator"
+    operator_before = _operator_launcher_identity(paths, operator_source)
+    if not operator_before["exact"]:
+        raise DoctorError(
+            f"fixed launcher drift requires bounded bootstrap repair: {paths.operator_cli}"
+        )
+    bootstrap_source = release / "bin/tgw-coding-bootstrap"
+    bootstrap_before = _fixed_root_launcher_identity(
+        paths, paths.coding_bootstrap, bootstrap_source
+    )
+    if not bootstrap_before["exact"]:
+        raise DoctorError(
+            f"fixed launcher drift requires bounded bootstrap repair: {paths.coding_bootstrap}"
+        )
     previous_selector = os.readlink(current_link) if current_link.is_symlink() else None
     before = {
         "current_link": previous_selector,
@@ -4566,6 +4655,8 @@ def repair_runtime(paths: DoctorPaths) -> dict[str, Any]:
             }
             for path in launcher_links
         },
+        "operator_launcher": operator_before,
+        "bootstrap_launcher": bootstrap_before,
     }
     changed = current_link.resolve(strict=False) != release.resolve()
     try:
@@ -4590,6 +4681,10 @@ def repair_runtime(paths: DoctorPaths) -> dict[str, Any]:
         "current_link": os.readlink(current_link),
         "current": str(current_link.resolve(strict=True)),
         "launchers": {str(path): {"target": os.readlink(path), "sha256": _file_hash(path)} for path in launcher_links},
+        "operator_launcher": _operator_launcher_identity(paths, operator_source),
+        "bootstrap_launcher": _fixed_root_launcher_identity(
+            paths, paths.coding_bootstrap, bootstrap_source
+        ),
         "release_tree": release_tree,
     }
     receipt = _receipt(paths, "runtime", before, after)
@@ -7912,6 +8007,34 @@ def repair_coding_bootstrap(
         if not destination.is_symlink() or os.readlink(destination) != str(target):
             _replace_link(destination, target)
             launcher_changes.append(str(destination))
+    fixed_launchers = (
+        ("bin/tgw-operator", paths.operator_cli),
+        ("bin/tgw-coding-bootstrap", paths.coding_bootstrap),
+    )
+    for relative, destination in fixed_launchers:
+        try:
+            launcher_mode, launcher_bytes = read_exact_tree_file(
+                paths.repository,
+                commit=commit,
+                tree=tree,
+                path=relative,
+            )
+        except ValueError as exc:
+            raise DoctorError(f"candidate lacks fixed launcher {relative}") from exc
+        if launcher_mode != 0o755:
+            raise DoctorError(f"candidate fixed launcher mode differs: {relative}")
+        source = release / relative
+        if not _fixed_root_launcher_identity(paths, destination, source)["exact"]:
+            _atomic_bytes(
+                destination,
+                launcher_bytes,
+                mode=0o555,
+                uid=paths.context_install_uid,
+                gid=paths.context_install_gid,
+            )
+            launcher_changes.append(str(destination))
+        if not _fixed_root_launcher_identity(paths, destination, source)["exact"]:
+            raise DoctorError(f"fixed launcher installation is incomplete: {relative}")
     plan_render = repair_plan_render_worker(paths, desired_commit=commit)
     workers = repair_workers(paths, desired_commit=commit)
     if paths.coding_config.read_bytes() != raw_config:

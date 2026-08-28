@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+if [ "$(/usr/bin/id -u)" -eq 0 ]; then
+    echo "tgw: privileged execution through the mutable coding runtime is disabled" >&2
+    echo "use /usr/local/sbin/tgw-coding-bootstrap with an exact commit" >&2
+    exit 126
+fi
+
 case "${1-}" in
     --help|-h|help|"")
         cat <<'EOF'

@@ -227,9 +227,23 @@ def _extract_exact(commit: str, destination: Path) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="tgw-coding-bootstrap",
-        description="install one exact local coding runtime without Context or review",
+        description="run one exact local coding bootstrap or privileged repair",
     )
     parser.add_argument("--commit", required=True)
+    parser.add_argument(
+        "--repair",
+        choices=(
+            "context",
+            "context-launcher",
+            "database",
+            "workers",
+            "plan-render-worker",
+            "runtime",
+            "unix-git-access",
+            "obsolete-surfaces",
+        ),
+        help="run one exact Doctor repair instead of the coding bootstrap",
+    )
     args = parser.parse_args(argv)
     try:
         _require_installed_root_copy()
@@ -246,24 +260,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             tree = _extract_exact(args.commit, staging)
+            doctor_arguments = (
+                ["coding-bootstrap", "--commit", args.commit]
+                if args.repair is None
+                else ["repair", args.repair, "--json"]
+            )
             completed = subprocess.run(
-                [
-                    str(_PYTHON),
-                    "-S",
-                    "-P",
-                    "-m",
-                    "tgw.doctor_cli",
-                    "coding-bootstrap",
-                    "--commit",
-                    args.commit,
-                ],
+                [str(_PYTHON), "-S", "-P", "-m", "tgw.doctor_cli", *doctor_arguments],
                 cwd=staging,
                 env=_candidate_environment(staging),
                 check=False,
             )
             if completed.returncode:
                 raise BootstrapError("exact candidate Doctor bootstrap failed")
-            print(f"bootstrapped exact local coding runtime {args.commit} tree {tree}")
+            operation = "coding bootstrap" if args.repair is None else f"{args.repair} repair"
+            print(f"completed exact local {operation} from {args.commit} tree {tree}")
             return 0
         finally:
             shutil.rmtree(staging)
