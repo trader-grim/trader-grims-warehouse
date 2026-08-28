@@ -498,6 +498,42 @@ def test_source_bootstrap_shebang_ignores_hostile_python_startup(
     assert not site_marker.exists()
 
 
+def test_release_verification_imports_in_isolated_bootstrap_interpreter() -> None:
+    environment = {
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_PAGER": "cat",
+        "GIT_TERMINAL_PROMPT": "0",
+        "HOME": "/tmp",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": str(ROOT / "src"),
+        "PYTHONSAFEPATH": "1",
+    }
+    completed = subprocess.run(
+        [
+            "/usr/bin/python3.13",
+            "-S",
+            "-P",
+            "-c",
+            "from tgw.release_installer import verify; assert callable(verify)",
+        ],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_source_bootstrap_reconstructs_only_exact_regular_git_files(
     tmp_path: Path,
 ) -> None:

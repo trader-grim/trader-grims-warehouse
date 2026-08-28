@@ -23,14 +23,6 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Mapping
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-from tgw.admission_recovery import (
-    AdmissionRecoveryError,
-    validate_environment_preflight_for_admission,
-    validate_release_admission,
-)
-
 SCHEMA = "tgw-release-manifest-v1"
 RECEIPT_SCHEMA = "tgw-immutable-release-selection-v1"
 REFUSAL_SCHEMA = "tgw-immutable-release-refusal-v1"
@@ -621,6 +613,12 @@ def select(
     current_time: str | Callable[[], str] | None = None,
 ) -> dict[str, Any]:
     """Select only after revalidating exact W15/W16 evidence at this boundary."""
+    from tgw.admission_recovery import (
+        AdmissionRecoveryError,
+        validate_environment_preflight_for_admission,
+        validate_release_admission,
+    )
+
     if (
         admission_receipt is None
         or environment_preflight_receipt is None
@@ -682,6 +680,12 @@ def select_owner_directed(
     current_time: str | Callable[[], str],
 ) -> dict[str, Any]:
     """CAS-select one exact owner-directed candidate without review masquerade."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    from tgw.admission_recovery import (
+        AdmissionRecoveryError,
+        validate_environment_preflight_for_admission,
+    )
 
     def validate_evidence(manifest: Mapping[str, Any]) -> None:
         evidence_time = current_time() if callable(current_time) else current_time
@@ -909,6 +913,12 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "install":
+            from tgw.admission_recovery import (
+                AdmissionRecoveryError,
+                validate_environment_preflight_for_admission,
+                validate_release_admission,
+            )
+
             if (
                 args.admission_receipt is None
                 or args.environment_preflight_receipt is None
