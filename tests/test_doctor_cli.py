@@ -552,6 +552,8 @@ def test_source_bootstrap_routes_privileged_repair_through_exact_candidate(
         "tgw.doctor_cli",
         "repair",
         "context",
+        "--commit",
+        commit,
         "--json",
     ]
 
@@ -630,6 +632,8 @@ def test_bootstrap_release_ownership_promotion_never_path_chowns(
     payload.chmod(0o444)
     nested.chmod(0o555)
     release.chmod(0o555)
+    runtime_parent_before = release.parent.parent.stat(follow_symlinks=False)
+    releases_parent_before = release.parent.stat(follow_symlinks=False)
 
     monkeypatch.setattr(
         os,
@@ -646,6 +650,26 @@ def test_bootstrap_release_ownership_promotion_never_path_chowns(
 
     assert payload.read_text(encoding="utf-8") == "exact bytes"
     assert payload.stat(follow_symlinks=False).st_nlink == 1
+    runtime_parent_after = release.parent.parent.stat(follow_symlinks=False)
+    releases_parent_after = release.parent.stat(follow_symlinks=False)
+    assert (
+        runtime_parent_after.st_uid,
+        runtime_parent_after.st_gid,
+        stat.S_IMODE(runtime_parent_after.st_mode),
+    ) == (
+        runtime_parent_before.st_uid,
+        runtime_parent_before.st_gid,
+        stat.S_IMODE(runtime_parent_before.st_mode),
+    )
+    assert (
+        releases_parent_after.st_uid,
+        releases_parent_after.st_gid,
+        stat.S_IMODE(releases_parent_after.st_mode),
+    ) == (
+        releases_parent_before.st_uid,
+        releases_parent_before.st_gid,
+        stat.S_IMODE(releases_parent_before.st_mode),
+    )
 
 
 def test_source_bootstrap_shebang_ignores_hostile_python_startup(
@@ -4344,6 +4368,10 @@ def test_fixed_operator_launcher_survives_mutable_runtime_selector_swap(
     assert not paths.operator_cli.is_symlink()
     assert paths.operator_cli.read_bytes() == fixed_bytes
     assert b"privileged execution through the mutable coding runtime is disabled" in fixed_bytes
+    launcher = fixed_bytes.decode("utf-8")
+    assert launcher.index('"$(/usr/bin/id -u)" -eq 0') < launcher.index(
+        "/opt/TGW/tgw-lib/coding-runtime/current"
+    )
 
 
 def test_runtime_repair_switches_only_one_selector_behind_stable_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4632,12 +4660,15 @@ def test_database_check_fails_until_progress_note_exists(tmp_path, monkeypatch) 
     )
 
 
-def test_database_repair_pipes_verified_sql_across_private_release_ancestry(
+def test_database_repair_pipes_exact_git_sql_across_private_release_ancestry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paths, head, _tree = _fixture(tmp_path)
+    paths, head, tree = _fixture(tmp_path)
     release = paths.runtime_root / "releases" / head
-    migration = (release / "config/tgw-coding-local-roles.sql").read_text()
+    migration = (paths.repository / "config/tgw-coding-local-roles.sql").read_text()
+    (release / "config/tgw-coding-local-roles.sql").write_text(
+        "SELECT 'mutable release path';\n", encoding="utf-8"
+    )
     paths.runtime_root.chmod(0o700)
     reports = iter([
         {"state": "FAIL", "evidence": {"progress_note_column": False}},
@@ -4661,7 +4692,9 @@ def test_database_repair_pipes_verified_sql_across_private_release_ancestry(
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
     monkeypatch.setattr(
         doctor_cli, "_verify_release_tree",
-        lambda _paths, desired, selected: verified.append((desired, selected)),
+        lambda _paths, desired, selected: (
+            verified.append((desired, selected)) or {"tree": tree}
+        ),
     )
     monkeypatch.setattr(doctor_cli, "check_database", lambda _paths: next(reports))
     monkeypatch.setattr(doctor_cli, "_run", run)
@@ -4680,7 +4713,7 @@ def test_database_repair_pipes_verified_sql_across_private_release_ancestry(
 def test_database_stdin_failure_is_receipted_and_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paths, _head, _tree = _fixture(tmp_path)
+    paths, _head, tree = _fixture(tmp_path)
     receipts: list[str] = []
 
     def run(command, **kwargs):
@@ -4692,7 +4725,9 @@ def test_database_stdin_failure_is_receipted_and_fails_closed(
         return operation + ".json"
 
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
-    monkeypatch.setattr(doctor_cli, "_verify_release_tree", lambda *_args: None)
+    monkeypatch.setattr(
+        doctor_cli, "_verify_release_tree", lambda *_args: {"tree": tree}
+    )
     monkeypatch.setattr(
         doctor_cli, "check_database",
         lambda _paths: {"state": "FAIL", "evidence": {"progress_note_column": False}},

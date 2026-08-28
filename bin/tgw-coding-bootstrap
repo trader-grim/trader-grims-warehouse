@@ -263,7 +263,13 @@ def main(argv: list[str] | None = None) -> int:
             doctor_arguments = (
                 ["coding-bootstrap", "--commit", args.commit]
                 if args.repair is None
-                else ["repair", args.repair, "--json"]
+                else [
+                    "repair",
+                    args.repair,
+                    "--commit",
+                    args.commit,
+                    "--json",
+                ]
             )
             completed = subprocess.run(
                 [str(_PYTHON), "-S", "-P", "-m", "tgw.doctor_cli", *doctor_arguments],

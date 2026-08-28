@@ -579,17 +579,70 @@ def check_context_snapshot(paths: DoctorPaths) -> dict[str, Any]:
         return _failed("context.snapshot", exc, repair=repair)
 
 
-def _selected_context_artifacts(paths: DoctorPaths) -> dict[str, Any]:
-    desired, release, _task = _desired_runtime(paths)
+def _validated_exact_repair_root(
+    paths: DoctorPaths,
+    desired_commit: str,
+    source_root: Path,
+) -> tuple[Path, str]:
+    """Bind a privileged repair to the exact private bootstrap extraction."""
+    if _COMMIT.fullmatch(desired_commit) is None:
+        raise DoctorError("privileged repair commit is invalid")
+    head, tree, status = _source_identity(paths)
+    if status or head != desired_commit:
+        raise DoctorError(
+            "privileged repair requires the exact clean canonical source commit"
+        )
+    root = source_root.resolve(strict=True)
+    module_root = Path(__file__).resolve(strict=True).parents[2]
+    observed = root.stat(follow_symlinks=False)
+    if (
+        root != module_root
+        or source_root.is_symlink()
+        or not stat.S_ISDIR(observed.st_mode)
+        or observed.st_uid != os.geteuid()
+        or observed.st_mode & 0o077
+    ):
+        raise DoctorError("privileged repair source is not the private exact extraction")
+    try:
+        mode, expected = read_exact_tree_file(
+            paths.repository,
+            commit=desired_commit,
+            tree=tree,
+            path="src/tgw/doctor_cli.py",
+        )
+    except ValueError as exc:
+        raise DoctorError("privileged repair source is absent from the exact commit") from exc
+    if mode != 0o644 or Path(__file__).read_bytes() != expected:
+        raise DoctorError("privileged repair Doctor differs from the exact commit")
+    return root, tree
+
+
+def _selected_context_artifacts(
+    paths: DoctorPaths,
+    *,
+    desired_commit: str | None = None,
+    source_root: Path | None = None,
+) -> dict[str, Any]:
+    if desired_commit is None:
+        desired, release, _task = _desired_runtime(paths)
+        artifact_root = release
+    else:
+        if source_root is None:
+            raise DoctorError("exact Context repair source is required")
+        artifact_root, _tree = _validated_exact_repair_root(
+            paths, desired_commit, source_root
+        )
+        desired = desired_commit
+        release = paths.runtime_root / "releases" / desired
     release_tree = _verify_release_tree(paths, desired, release)
     for runtime_path in (release, *release.rglob("*")):
         observed = runtime_path.stat(follow_symlinks=False)
         relative = str(runtime_path.relative_to(release)) or "."
         if runtime_path.is_symlink() or observed.st_uid != paths.context_install_uid or observed.st_gid != paths.context_install_gid or observed.st_mode & 0o022:
             raise DoctorError("selected Context release is not root:root immutable: " + relative)
-    launcher = release / "scripts/tgw_context_debian_stdio.py"
-    publisher = release / "scripts/tgw_context_publish.py"
-    runtime_source = release / "src"
+    launcher = artifact_root / "scripts/tgw_context_debian_stdio.py"
+    publisher = artifact_root / "scripts/tgw_context_publish.py"
+    runtime_source = artifact_root / "src"
     modules = {
         name: runtime_source / f"tgw/{name}.py"
         for name in (
@@ -621,6 +674,20 @@ def _selected_context_artifacts(paths: DoctorPaths) -> dict[str, Any]:
         "hashes": {name: _file_hash(source) for name, source in required.items()},
         "runtime_inventory": runtime_inventory,
     }
+
+
+def _repair_context_artifacts(
+    paths: DoctorPaths,
+    *,
+    desired_commit: str | None,
+    source_root: Path | None,
+) -> dict[str, Any]:
+    """Preserve the direct test/diagnostic path while binding privileged CLI repairs."""
+    if desired_commit is None and source_root is None:
+        return _selected_context_artifacts(paths)
+    return _selected_context_artifacts(
+        paths, desired_commit=desired_commit, source_root=source_root
+    )
 
 
 def _selected_context_launcher(paths: DoctorPaths) -> tuple[str, Path]:
@@ -3026,10 +3093,11 @@ def _promote_bootstrap_release_ownership(
     """Promote verified bytes without chowning a materializer-owned file inode.
 
     Directory descriptors bind every lookup to the opened release even if a
-    pathname is concurrently renamed.  Directories are frozen top-down.  Each
-    regular file must start single-linked and is replaced by a new root-owned
-    inode, so an external hard link can never receive a privileged ownership
-    change.
+    pathname is concurrently renamed.  Only the candidate release is frozen;
+    the ordinary-user runtime and releases parents are never re-owned or made
+    inaccessible.  Each regular file must start single-linked and is replaced
+    by a new root-owned inode, so an external hard link can never receive a
+    privileged ownership change.
     """
 
     open_directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -3188,8 +3256,6 @@ def _promote_bootstrap_release_ownership(
     runtime_fd: int | None = None
     releases_fd: int | None = None
     release_fd: int | None = None
-    runtime_original: os.stat_result | None = None
-    releases_original: os.stat_result | None = None
     try:
         runtime_fd = os.open(runtime_root, open_directory_flags)
         runtime_original = os.fstat(runtime_fd)
@@ -3198,9 +3264,7 @@ def _promote_bootstrap_release_ownership(
             or runtime_original.st_uid not in allowed_source_uids
             or runtime_original.st_mode & 0o022
         ):
-            raise DoctorError("bootstrap runtime root cannot be frozen safely")
-        os.fchown(runtime_fd, uid, gid)
-        os.fchmod(runtime_fd, 0o700)
+            raise DoctorError("bootstrap runtime root is unsafe")
 
         releases_expected = os.stat(
             "releases", dir_fd=runtime_fd, follow_symlinks=False
@@ -3214,9 +3278,7 @@ def _promote_bootstrap_release_ownership(
             or releases_original.st_uid not in allowed_source_uids
             or releases_original.st_mode & 0o022
         ):
-            raise DoctorError("bootstrap releases root cannot be frozen safely")
-        os.fchown(releases_fd, uid, gid)
-        os.fchmod(releases_fd, 0o700)
+            raise DoctorError("bootstrap releases root is unsafe")
 
         release_expected = os.stat(
             release.name, dir_fd=releases_fd, follow_symlinks=False
@@ -3229,22 +3291,23 @@ def _promote_bootstrap_release_ownership(
         ):
             raise DoctorError("bootstrap release changed before ownership promotion")
         promote_directory(release_fd)
+        release_final = os.stat(
+            release.name, dir_fd=releases_fd, follow_symlinks=False
+        )
+        if (release_final.st_dev, release_final.st_ino) != (
+            release_bound.st_dev,
+            release_bound.st_ino,
+        ):
+            raise DoctorError("bootstrap release changed during ownership promotion")
+        os.fsync(releases_fd)
     except OSError as exc:
         raise DoctorError("bootstrap release ownership promotion failed") from exc
     finally:
         if release_fd is not None:
             os.close(release_fd)
         if releases_fd is not None:
-            if releases_original is not None:
-                os.fchown(
-                    releases_fd, releases_original.st_uid, releases_original.st_gid
-                )
-                os.fchmod(releases_fd, stat.S_IMODE(releases_original.st_mode))
             os.close(releases_fd)
         if runtime_fd is not None:
-            if runtime_original is not None:
-                os.fchown(runtime_fd, runtime_original.st_uid, runtime_original.st_gid)
-                os.fchmod(runtime_fd, stat.S_IMODE(runtime_original.st_mode))
             os.close(runtime_fd)
 
 
@@ -3945,10 +4008,17 @@ def _restore_surface(path: Path, surface: Mapping[str, Any]) -> None:
     raise DoctorError(f"cannot restore unsupported surface type at {path}")
 
 
-def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
+def repair_context_launcher(
+    paths: DoctorPaths,
+    *,
+    desired_commit: str | None = None,
+    source_root: Path | None = None,
+) -> dict[str, Any]:
     """Migrate old semantics behind shims, then switch the pair exactly once."""
     _require_root()
-    selected = _selected_context_artifacts(paths)
+    selected = _repair_context_artifacts(
+        paths, desired_commit=desired_commit, source_root=source_root
+    )
     desired = selected["commit"]
     signature = _context_artifact_signature(selected)
     artifacts = {"launcher": selected["launcher"].read_bytes(), "publisher": selected["publisher"].read_bytes()}
@@ -3982,7 +4052,11 @@ def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
     post_cutover_probe_failed = False
     pointer_switch_unproven = False
     try:
-        if _context_artifact_signature(_selected_context_artifacts(paths)) != signature:
+        if _context_artifact_signature(
+            _repair_context_artifacts(
+                paths, desired_commit=desired_commit, source_root=source_root
+            )
+        ) != signature:
             raise DoctorError("selected Context runtime changed before repair")
         paths.context_generation_pointer.parent.mkdir(parents=True, exist_ok=True)
         paths.context_generation_root.mkdir(parents=True, exist_ok=True)
@@ -4145,7 +4219,11 @@ def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
             for name, expected in artifacts.items():
                 if not _launcher_surface_exact(pair[name], expected, paths):
                     raise DoctorError(f"Context {name} generation did not converge")
-            if _context_artifact_signature(_selected_context_artifacts(paths)) != signature:
+            if _context_artifact_signature(
+                _repair_context_artifacts(
+                    paths, desired_commit=desired_commit, source_root=source_root
+                )
+            ) != signature:
                 raise DoctorError("selected Context runtime changed during repair replay")
             probe = _probe_context_stdio(
                 paths.context_launcher,
@@ -4246,7 +4324,11 @@ def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
         for name, expected in artifacts.items():
             if not _launcher_surface_exact(installed[name], expected, paths):
                 raise DoctorError(f"Context {name} generation did not converge")
-        if _context_artifact_signature(_selected_context_artifacts(paths)) != signature:
+        if _context_artifact_signature(
+            _repair_context_artifacts(
+                paths, desired_commit=desired_commit, source_root=source_root
+            )
+        ) != signature:
             raise DoctorError("selected Context runtime changed during repair")
         try:
             probe = _probe_context_stdio(
@@ -4339,9 +4421,16 @@ def repair_context_launcher(paths: DoctorPaths) -> dict[str, Any]:
         "restart_detection_error": process_error,
     }
 
-def repair_context(paths: DoctorPaths) -> dict[str, Any]:
+def repair_context(
+    paths: DoctorPaths,
+    *,
+    desired_commit: str | None = None,
+    source_root: Path | None = None,
+) -> dict[str, Any]:
     _require_root()
-    selected = _selected_context_artifacts(paths)
+    selected = _repair_context_artifacts(
+        paths, desired_commit=desired_commit, source_root=source_root
+    )
     # Context publication is the convergence bootstrap: the live generation may
     # legitimately still contain the predecessor publisher/launcher.  Bind both
     # halves of preflight directly to the selected root-owned immutable release;
@@ -4612,9 +4701,17 @@ def _replace_link(path: Path, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def repair_runtime(paths: DoctorPaths) -> dict[str, Any]:
+def repair_runtime(
+    paths: DoctorPaths, *, desired_commit: str | None = None
+) -> dict[str, Any]:
     _require_root()
-    desired, release, _task = _desired_runtime(paths)
+    if desired_commit is None:
+        desired, release, _task = _desired_runtime(paths)
+    else:
+        if _COMMIT.fullmatch(desired_commit) is None:
+            raise DoctorError("runtime repair commit is invalid")
+        desired = desired_commit
+        release = paths.runtime_root / "releases" / desired
     head, _tree, status = _source_identity(paths)
     if status or head != desired:
         raise DoctorError("runtime repair requires clean canonical source at the declared commit")
@@ -4691,16 +4788,32 @@ def repair_runtime(paths: DoctorPaths) -> dict[str, Any]:
     return {"ok": True, "operation": "runtime", "changed": changed, "receipt": receipt}
 
 
-def repair_database(paths: DoctorPaths) -> dict[str, Any]:
+def repair_database(
+    paths: DoctorPaths, *, desired_commit: str | None = None
+) -> dict[str, Any]:
     _require_root()
-    desired, release, _task = _desired_runtime(paths)
-    _verify_release_tree(paths, desired, release)
-    sql = release / "config/tgw-coding-local-roles.sql"
-    if not sql.is_file():
-        raise DoctorError(f"runtime {desired} lacks the coding role SQL")
+    if desired_commit is None:
+        desired, release, _task = _desired_runtime(paths)
+    else:
+        if _COMMIT.fullmatch(desired_commit) is None:
+            raise DoctorError("database repair commit is invalid")
+        desired = desired_commit
+        release = paths.runtime_root / "releases" / desired
+    verification = _verify_release_tree(paths, desired, release)
+    tree = str(verification.get("tree", ""))
+    if _COMMIT.fullmatch(tree) is None:
+        raise DoctorError("verified coding release has no exact Git tree identity")
     try:
-        migration = sql.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        sql_mode, migration_bytes = read_exact_tree_file(
+            paths.repository,
+            commit=desired,
+            tree=tree,
+            path="config/tgw-coding-local-roles.sql",
+        )
+        if sql_mode != 0o644:
+            raise DoctorError("exact coding role SQL mode differs")
+        migration = migration_bytes.decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
         raise DoctorError(f"cannot read the verified coding role SQL: {exc}") from exc
     before = check_database(paths)
     result = _run(
@@ -7773,12 +7886,40 @@ _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
 }
 
 
-def repair(operation: str, paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
+def repair(
+    operation: str,
+    paths: DoctorPaths = DoctorPaths(),
+    *,
+    desired_commit: str | None = None,
+    source_root: Path | None = None,
+) -> dict[str, Any]:
     function = _REPAIRS.get(operation)
     if function is None:
         raise DoctorError(f"unknown repair: {operation}")
     _require_root()
     with _repair_lock(paths):
+        exact_root: Path | None = None
+        if desired_commit is not None:
+            if source_root is None:
+                raise DoctorError("privileged repair requires its private exact source")
+            exact_root, _tree = _validated_exact_repair_root(
+                paths, desired_commit, source_root
+            )
+            if operation in {
+                "context",
+                "context-launcher",
+                "database",
+                "workers",
+                "plan-render-worker",
+            }:
+                release = paths.runtime_root / "releases" / desired_commit
+                _verify_release_tree(paths, desired_commit, release)
+                if not _runtime_selector_identity(
+                    paths, desired_commit, release
+                )["exact"]:
+                    raise DoctorError(
+                        "privileged repair runtime selector differs from the exact commit"
+                    )
         started_receipt = _receipt(
             paths,
             operation + "-started",
@@ -7786,7 +7927,21 @@ def repair(operation: str, paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]
             {"state": "STARTED"},
         )
         try:
-            result = function(paths)
+            if operation in {"context", "context-launcher"}:
+                result = function(
+                    paths,
+                    desired_commit=desired_commit,
+                    source_root=exact_root,
+                )
+            elif operation in {
+                "runtime",
+                "database",
+                "workers",
+                "plan-render-worker",
+            }:
+                result = function(paths, desired_commit=desired_commit)
+            else:
+                result = function(paths)
             result = {**result, "started_receipt": started_receipt}
         except Exception as exc:
             try:
@@ -8084,6 +8239,7 @@ def _parser() -> argparse.ArgumentParser:
     bootstrap_parser.add_argument("--commit", required=True)
     repair_parser = sub.add_parser("repair", help="restore an exact declared local state")
     repair_parser.add_argument("target", choices=[*_REPAIRS])
+    repair_parser.add_argument("--commit", required=True)
     repair_parser.add_argument("--json", action="store_true", dest="repair_json_output")
     return parser
 
@@ -8092,7 +8248,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.operation == "repair":
-            result = repair(args.target)
+            result = repair(
+                args.target,
+                desired_commit=args.commit,
+                source_root=Path(__file__).resolve().parents[2],
+            )
             print(json.dumps(result, indent=2, sort_keys=True))
             return int(result["diagnosis"]["exit_code"])
         if args.operation == "inventory":
