@@ -128,7 +128,10 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         "bin/tgw-operator": "#!/bin/sh\nexit 0\n",
         "config/tgw-coding-local-roles.sql": "SELECT 1;\n",
         "systemd/tgw-codex-implement-worker.service": "[Service]\nExecStart=/bin/true\n",
+        "systemd/tgw-claude-review-worker.service": "[Service]\nExecStart=/bin/true\n",
         "systemd/tgw-controller-verify-worker.service": "[Service]\nExecStart=/bin/true\n",
+        "systemd/tgw-coding-lifecycle-supervisor.service": "[Service]\nExecStart=/bin/true\n",
+        "systemd/tgw-coding-root-effect.service": "[Service]\nExecStart=/bin/true\n",
         "systemd/tgw-coding-local-foreman.timer": "[Timer]\nOnBootSec=1s\n",
         "systemd/tgw-coding-local-foreman.service": "[Service]\nType=oneshot\nExecStart=/bin/true\n",
         "scripts/tgw_context_debian_stdio.py": (f"#!/bin/sh\n# runtime snapshot: {snapshot_fixture_path}\nexit 0\n"),
@@ -162,10 +165,17 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     support_root = tmp_path / "tgw-coders"
     archive_root = support_root / "archive"
     runner_root = support_root / "runner"
-    for directory in (archive_root, runner_root):
+    lifecycle_root = support_root / "lifecycles"
+    root_effect_root = support_root / "root-effects"
+    for directory in (archive_root, runner_root, lifecycle_root, root_effect_root):
         directory.mkdir(parents=True, exist_ok=True)
-        directory.chmod(0o2770)
-        os.chown(directory, -1, grp.getgrnam("tgw-coders").gr_gid)
+        root_effect = directory == root_effect_root
+        directory.chmod(0o3770 if root_effect else 0o2770)
+        os.chown(
+            directory,
+            0 if root_effect else -1,
+            grp.getgrnam("tgw-coders").gr_gid,
+        )
     for relative in _git(repository, "ls-files").splitlines():
         source = repository / relative
         path = release / relative
@@ -194,6 +204,8 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
                 "worktree_root": str(worktrees),
                 "preservation_archive_root": str(archive_root),
                 "runner_state_root": str(runner_root),
+                "lifecycle_root": str(lifecycle_root),
+                "root_effect_root": str(root_effect_root),
                 "commands": {"codex-implement": ["/bin/true"]},
                 "allowed_runners": ["/bin/true"],
             },
@@ -5570,5 +5582,5 @@ def test_coding_support_roots_reject_incomplete_or_aliased_configuration(tmp_pat
     _write_json(paths.coding_config, config)
     group_gid = grp.getgrnam("tgw-coders").gr_gid
     assert not all(row["exact"] for row in doctor_cli._coding_support_roots(paths, group_gid).values())
-    with pytest.raises(doctor_cli.DoctorError, match="both distinct non-empty absolute"):
+    with pytest.raises(doctor_cli.DoctorError, match="distinct non-empty absolute"):
         doctor_cli._provision_coding_support_roots(paths, group_gid, [])

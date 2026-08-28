@@ -351,13 +351,14 @@ class CodingWorker(QueueWorker):
                 "lease_token": str(active_job.get("lease_token") or payload.get("lease_token") or ""),
                 "worktree": str(worktree),
             }
+            launched_payload = {**payload, "job_id": job_id}
             completed = _run_bounded_process_group(
                 command,
                 cwd=worktree,
                 timeout=self._timeout_seconds(),
                 env={
                     **os.environ,
-                    "TGW_CODING_JOB": json.dumps(payload),
+                    "TGW_CODING_JOB": json.dumps(launched_payload),
                     "TGW_CODING_WORKTREE_SRC": str(worktree / "src"),
                     **({"TGW_CODING_PRESERVATION_ARCHIVE_ROOT": str(coding["preservation_archive_root"])} if coding.get("preservation_archive_root") else {}),
                     **({"TGW_CODING_WORKTREE_LEASE_FD": str(lease_fd)} if lease_fd is not None else {}),
@@ -566,6 +567,10 @@ class CodingWorker(QueueWorker):
         self,
         treatment_id: str,
         launcher_result: dict[str, Any] | None,
+        *,
+        payload: dict[str, Any] | None = None,
+        worktree: Path | None = None,
+        job_id: str = "",
     ) -> tuple[str, list[str], list[Any]]:
         if not isinstance(launcher_result, dict):
             raise HardFailure("coding launcher returned no structured outcome")
@@ -585,6 +590,24 @@ class CodingWorker(QueueWorker):
             raise HardFailure("unsatisfied coding outcome cannot establish conditions")
         if outcome == OUTCOME_SATISFIED and not established:
             raise HardFailure("satisfied coding outcome must establish a condition")
+        if (
+            treatment_id == "claude-review"
+            and outcome == OUTCOME_SATISFIED
+            and isinstance(payload, dict)
+            and payload.get("coding_lifecycle") is not None
+        ):
+            from tgw.development.coding_review import validate_review_artifact
+            from tgw.review_contract import ReviewRunnerError
+
+            try:
+                validate_review_artifact(
+                    launcher_result,
+                    payload=payload,
+                    worktree=worktree or Path.cwd(),
+                    expected_job_id=job_id,
+                )
+            except ReviewRunnerError as exc:
+                raise HardFailure(str(exc)) from exc
         return outcome, established, artifacts
 
     @staticmethod
@@ -788,6 +811,9 @@ class CodingWorker(QueueWorker):
             outcome, established, artifacts = self._validated_launcher_result(
                 treatment_id,
                 launcher_result,
+                payload=payload,
+                worktree=worktree,
+                job_id=str(job.get("job_id") or payload.get("job_id") or ""),
             )
             if attempt_binding is not None and outcome == OUTCOME_SATISFIED:
                 candidate = source_fingerprint(worktree)
@@ -850,6 +876,12 @@ class CodingWorker(QueueWorker):
                     if payload.get("coding_candidate") is not None
                     else {}
                 ),
+                **(
+                    {"task_spec": dict(payload["task_spec"])}
+                    if treatment_id == "claude-review"
+                    and isinstance(payload.get("task_spec"), dict)
+                    else {}
+                ),
             }
             if attempt_binding is not None:
                 append_attempt(worktree, make_attempt(attempt_binding, worktree, outcome=OUTCOME_FAILED, predecessor=predecessor, artifacts=receipt["artifacts"]))
@@ -880,6 +912,12 @@ class CodingWorker(QueueWorker):
             **(
                 {"coding_candidate": dict(payload["coding_candidate"])}
                 if payload.get("coding_candidate") is not None
+                else {}
+            ),
+            **(
+                {"task_spec": dict(payload["task_spec"])}
+                if treatment_id == "claude-review"
+                and isinstance(payload.get("task_spec"), dict)
                 else {}
             ),
         }

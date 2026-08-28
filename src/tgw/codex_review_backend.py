@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -78,13 +79,23 @@ def health(
 
 
 def _prompt(request: Mapping[str, Any]) -> str:
+    context = request.get("review_context")
+    context_text = (
+        json.dumps(context, sort_keys=True, indent=2)
+        if isinstance(context, Mapping)
+        else "No additional bounded task context was supplied."
+    )
     return f"""Perform an independent semantic and security review of the immutable snapshot in the current directory.
 
 This is review-only. Do not modify files, run network operations, deploy, commit,
 or grant authority. Inspect the snapshot directly. Report every material semantic
-or security defect with an exact snapshot-relative path and line. PASS means there
-are no unresolved findings. Bind the report to snapshot hash:
+or security defect against the bounded task intent and acceptance conditions below,
+with an exact snapshot-relative path and line. PASS means there are no unresolved
+findings. Bind the report to snapshot hash:
 {request['snapshot_hash']}
+
+Bound task and candidate context:
+{context_text}
 
 Return only the requested JSON report schema.
 """
@@ -98,15 +109,34 @@ def run(
     auth_file: str | Path | None = None,
     invoke: Invoke = subprocess.run,
 ) -> dict[str, Any]:
-    if set(request) != {
+    required = {
         "schema",
         "handoff_hash",
         "card_hash",
         "snapshot_hash",
         "snapshot_root",
         "output_contract",
-    } or request.get("schema") != "tgw-code-review-request/v1":
+    }
+    allowed_fields = {frozenset(required), frozenset({*required, "review_context"})}
+    if (
+        frozenset(request) not in allowed_fields
+        or request.get("schema") != "tgw-code-review-request/v1"
+    ):
         raise CodexReviewBackendError("Codex review request contract is invalid")
+    context = request.get("review_context")
+    if context is not None:
+        if not isinstance(context, Mapping):
+            raise CodexReviewBackendError("Codex review context is invalid")
+        unsigned_context = dict(context)
+        claimed_context = unsigned_context.pop("context_hash", None)
+        canonical = json.dumps(
+            unsigned_context,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+        if claimed_context != "sha256:" + hashlib.sha256(canonical).hexdigest():
+            raise CodexReviewBackendError("Codex review context hash is invalid")
     if Path(str(request["snapshot_root"])).resolve() != cwd.resolve():
         raise CodexReviewBackendError("Codex review request snapshot root mismatch")
     observed = health(codex_bin=codex_bin, auth_file=auth_file)

@@ -16,9 +16,9 @@
       "materialization": "doctor-receipt:runtime-materialization/v1",
       "live_verification": "doctor-receipt:runtime/v1",
       "terminal_publication": "current-task-receipt:context/v1",
-      "operator_notification": "lifecycle-journal:notification/v1",
-      "operator_readback": "lifecycle-journal:explicit-readback/v1"
+      "operator_notification": "lifecycle-journal:notification/v1"
     },
+    "root_effect_root": "/opt/TGW/var/tgw-coders/coding-root-effects",
     "doctor_receipt_root": "/opt/TGW/tgw-lib/doctor-receipts",
     "runtime_root": "/opt/TGW/tgw-lib/coding-runtime",
     "repository_root": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
@@ -32,11 +32,15 @@
       ],
       "controller-verify": [
         "/opt/TGW/.venvs/controller/bin/tgw-controller-verify-runner"
+      ],
+      "claude-review": [
+        "/opt/TGW/.venvs/controller/bin/tgw-local-independent-review-runner"
       ]
     },
     "allowed_runners": [
       "/opt/TGW/.venvs/controller/bin/tgw-codex-implement-runner",
-      "/opt/TGW/.venvs/controller/bin/tgw-controller-verify-runner"
+      "/opt/TGW/.venvs/controller/bin/tgw-controller-verify-runner",
+      "/opt/TGW/.venvs/controller/bin/tgw-local-independent-review-runner"
     ]
   }
 }

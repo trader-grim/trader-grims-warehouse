@@ -1,44 +1,71 @@
+import hashlib
 import json
 import os
 import stat
+import subprocess
+from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from tgw import coding_cli
-from tgw.development import coding_lifecycle
+from tgw.development import coding_lifecycle, coding_root_effect
 from tgw.development.coding_lifecycle import (
     STAGES,
     LifecycleError,
     LifecycleStore,
     advance,
     build_binding,
+    candidate_job_binding,
     create,
     job_binding,
     record_operator_readback,
-    report_stale_source,
     request_resume,
     stage_result,
     validate_job_binding_payload,
 )
+from tgw.development.coding_review import run_local_review, validate_review_artifact
+from tgw.development.coding_root_effect import (
+    RootEffectError,
+    RootEffectPaths,
+    build_projection_request,
+    build_request,
+    ensure_projection_request,
+    process_projection,
+    process_request,
+    validate_request,
+)
 from tgw.development.local_workflow import LocalCodingWorkflowError, load_config
 from tgw.development.plan_binding import execution_root_hash
+from tgw.review_contract import ReviewRunnerError
 
 
-def plan_binding(worktree: Path, *, source: str = "c" * 40) -> dict:
-    root = {
-        "schema": "tgw-execution-root/v1",
-        "kind": "todo",
-        "todo_id": 1915,
-    }
+def canonical(value):
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()
+
+
+def digest(value):
+    return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
+
+
+def plan_binding(
+    worktree: Path,
+    *,
+    source: str = "c" * 40,
+    source_tree: str = "d" * 40,
+) -> dict:
+    root = {"schema": "tgw-execution-root/v1", "kind": "todo", "todo_id": 1915}
     root["identity_hash"] = execution_root_hash(root)
     return {
         "schema": "tgw-plan-coding-todo/v1",
         "plan_commit": "a" * 40,
         "solution_hash": "sha256:" + "b" * 64,
         "closure_hash": "sha256:" + "1" * 64,
-        "capability": "workflow.condition-derived-convergence",
-        "treatment_id": "establish:workflow.condition-derived-convergence@1",
+        "capability": "workflow.condition-derived-convergence@1",
+        "treatment_id": coding_cli.DEFAULT_TREATMENT,
         "source_commit": source,
         "idempotency_key": "sha256:" + "2" * 64,
         "worktree": str(worktree),
@@ -50,6 +77,7 @@ def plan_binding(worktree: Path, *, source: str = "c" * 40) -> dict:
             "created": True,
         },
         "execution_root": root,
+        "source_tree": source_tree,
     }
 
 
@@ -57,28 +85,183 @@ def store_at(path: Path) -> LifecycleStore:
     return LifecycleStore(path, group_gid=os.getegid())
 
 
-def new(store: LifecycleStore, worktree: Path | None = None) -> dict:
+def new(
+    store: LifecycleStore,
+    worktree: Path | None = None,
+    *,
+    source: str = "c" * 40,
+    source_tree: str = "d" * 40,
+) -> dict:
     selected = worktree or store.root.parent / "worktree"
     selected.mkdir(exist_ok=True)
     binding = build_binding(
         target=1915,
-        plan_binding=plan_binding(selected),
-        source_tree="d" * 40,
+        plan_binding=plan_binding(selected, source=source, source_tree=source_tree),
+        source_tree=source_tree,
     )
     return create(store, target=1915, binding=binding)
 
 
-def result_handler(stage: str, *, outcome: str = "satisfied", receipt=None):
-    def run(record):
-        return stage_result(
-            record,
-            stage,
-            outcome,
-            receipt=receipt or {"stage": stage},
-            reason="exact reason" if outcome != "satisfied" else None,
-        )
+def review_result(
+    record: dict,
+    *,
+    commit: str,
+    tree: str,
+    job_id: str = "review-job",
+) -> dict:
+    fence = job_binding(record)
+    candidate = candidate_job_binding(fence, commit=commit, tree=tree)
+    task = {
+        "schema": "coding-task/v1",
+        "todo_id": 1915,
+        "agent": "codex",
+        "body": "Implement the exact bounded headless lifecycle card.",
+    }
+    snapshot = digest(
+        {"schema": "tgw-local-review-snapshot/v1", "commit": commit, "tree": tree}
+    )
+    report = {
+        "schema": "tgw-code-review/v1",
+        "verdict": "PASS",
+        "snapshot_hash": snapshot,
+        "summary": "independent diagnostic review passed",
+        "findings": [],
+    }
+    context_unsigned = {
+        "schema": "tgw-local-independent-review-context/v1",
+        "mode": "exact-clean-candidate-semantic-review",
+        "snapshot_hash": snapshot,
+        "worktree": str(Path(record["binding"]["worktree"]).resolve()),
+        "plan_commit": record["binding"]["plan_commit"],
+        "source_commit": record["binding"]["source_commit"],
+        "card_idempotency_key": fence["card_idempotency_key"],
+        "candidate_binding_hash": candidate["candidate_binding_hash"],
+        "task_spec_hash": digest(task),
+    }
+    execution_unsigned = {
+        "schema": "tgw-local-independent-review-execution/v1",
+        "actor": "codex",
+        "uid": 1001,
+        "pid": 1234,
+        "service": "tgw-claude-review-worker.service",
+        "queue": "claude-review",
+        "network": True,
+        "provider": "codex-ephemeral-read-only",
+        "independence": {
+            "separate_queue_job": True,
+            "ephemeral_provider_session": True,
+            "candidate_sandbox": "read-only",
+            "authority": False,
+        },
+        "context": {
+            **context_unsigned,
+            "context_hash": digest(context_unsigned),
+        },
+    }
+    artifact = {
+        "kind": "tgw_review_report",
+        "diagnostic_verdict": "PASS_NON_ADMITTING",
+        "execution": {
+            **execution_unsigned,
+            "execution_hash": digest(execution_unsigned),
+        },
+        "root_id": record["root_id"],
+        "binding_hash": record["binding"]["binding_hash"],
+        "job_binding_hash": fence["job_binding_hash"],
+        "job_id": job_id,
+        "card_idempotency_key": fence["card_idempotency_key"],
+        "candidate_binding_hash": candidate["candidate_binding_hash"],
+        "candidate_commit": commit,
+        "candidate_tree": tree,
+        "report": report,
+        "report_bytes": canonical(report).decode(),
+        "report_sha256": "sha256:" + hashlib.sha256(canonical(report)).hexdigest(),
+        "checks": [
+            {
+                "name": name,
+                "returncode": 0,
+                "output_sha256": "sha256:" + "7" * 64,
+            }
+            for name in ("git-diff-check",)
+        ],
+    }
+    return {
+        "status": "PASS",
+        "todo_id": 1915,
+        "outcome": "satisfied",
+        "treatment_id": "claude-review",
+        "established_conditions": ["reviewed"],
+        "artifacts": [artifact],
+        "plan_binding": record["binding"]["plan_todo_binding"],
+        "coding_lifecycle": fence,
+        "coding_candidate": candidate,
+        "task_spec": task,
+    }
 
-    return run
+
+def record_at_integration(
+    store: LifecycleStore,
+    worktree: Path,
+    *,
+    source: str = "c" * 40,
+    source_tree: str = "d" * 40,
+    commit: str = "e" * 40,
+    tree: str = "f" * 40,
+) -> dict:
+    record = new(store, worktree, source=source, source_tree=source_tree)
+    candidate = {
+        "schema": "tgw-local-coding-candidate-evidence/v1",
+        "root_id": record["root_id"],
+        "binding_hash": record["binding"]["binding_hash"],
+        "worktree": str(worktree),
+        "commit": commit,
+        "tree": tree,
+        "classification": "CLOSED_CANDIDATE",
+    }
+    reviewed = review_result(record, commit=commit, tree=tree)
+    review_evidence = {
+        "schema": "tgw-local-coding-queue-evidence/v1",
+        "root_id": record["root_id"],
+        "binding_hash": record["binding"]["binding_hash"],
+        "job_id": "review-job",
+        "result": reviewed,
+    }
+    receipts = {
+        "controller": {"schema": "controller", "status": "PASS"},
+        "candidate": candidate,
+        "review": review_evidence,
+        "integration": {
+            "schema": "tgw-local-coding-integration/v1",
+            "candidate_commit": commit,
+            "candidate_tree": tree,
+        },
+    }
+    record["effects"] = {
+        stage: {
+            "receipt": receipt,
+            "receipt_hash": digest(receipt),
+            "idempotency_key": coding_lifecycle.stage_idempotency_key(record, stage),
+        }
+        for stage, receipt in receipts.items()
+    }
+    record["stage"] = "materialization"
+    record["state"] = "WAITING"
+    return store.put(record)
+
+
+def root_paths(tmp_path: Path, store: LifecycleStore, worktree: Path) -> RootEffectPaths:
+    effects = tmp_path / "root-effects"
+    effects.mkdir(mode=0o3770)
+    effects.chmod(0o3770)
+    return RootEffectPaths(
+        request_root=effects,
+        lifecycle_root=store.root,
+        repository=worktree,
+        runtime_root=tmp_path / "runtime",
+        coding_config=tmp_path / "coding.json",
+        group_gid=os.getegid(),
+        root_uid=os.geteuid(),
+    )
 
 
 def test_create_is_immediate_group_shared_and_duplicate_replay_is_one_record(
@@ -94,200 +277,920 @@ def test_create_is_immediate_group_shared_and_duplicate_replay_is_one_record(
     assert all(value is False for value in first["boundaries"].values())
 
 
-def test_repeated_start_retains_one_root_and_reports_stale_source(tmp_path: Path):
+def test_foreign_root_owned_exact_lifecycle_directory_is_validated_not_mutated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = tmp_path / "root-owned-lifecycle"
+    root.mkdir(mode=0o2770)
+    root.chmod(0o2770)
+    store = LifecycleStore(root, group_gid=os.getegid())
+    monkeypatch.setattr(
+        coding_lifecycle.os, "geteuid", lambda: os.getuid() + 1000
+    )
+    monkeypatch.setattr(
+        coding_lifecycle.os,
+        "fchown",
+        lambda *_args: pytest.fail("foreign exact root must not be mutated"),
+    )
+    monkeypatch.setattr(
+        coding_lifecycle.os,
+        "fchmod",
+        lambda *_args: pytest.fail("foreign exact root must not be mutated"),
+    )
+    store._prepare_root()
+
+
+def test_managed_service_reconstructs_persisted_nonterminal_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    unit = Path("systemd/tgw-coding-lifecycle-supervisor.service").read_text()
+    assert "Type=simple" in unit
+    assert "Restart=always" in unit
+    assert "--managed" in unit
+    assert "KillMode=" not in unit
+    assert "sudo" not in unit
+
     store = store_at(tmp_path / "journal")
     record = new(store)
-    stale = report_stale_source(
-        store,
-        record["root_id"],
-        source_commit="e" * 40,
-        source_tree="f" * 40,
+    local = __import__("tgw.development.local_workflow", fromlist=["load_config"])
+    monkeypatch.setattr(
+        local,
+        "load_config",
+        lambda _path: {"coding": {"lifecycle_root": str(store.root)}},
     )
-    assert stale["root_id"] == record["root_id"]
-    assert stale["state"] == "REMEDIATION_REQUIRED"
-    assert stale["failure"]["bound_source_commit"] == "c" * 40
-    assert len(list(store.root.glob("*.json"))) == 1
-    assert store.find(1915) == stale
-
-
-def test_restart_at_each_stage_replays_no_satisfied_effect(tmp_path: Path):
-    store = store_at(tmp_path / "journal")
-    record = new(store)
-    calls = {stage: 0 for stage in STAGES}
-
-    def handler(stage):
-        def run(current):
-            calls[stage] += 1
-            if calls[stage] == 1:
-                return stage_result(
-                    current, stage, "waiting", reason=f"{stage} pending"
-                )
-            if stage == "operator_readback":
-                readback = current["operator"]["readback"]
-                if readback is None:
-                    return stage_result(
-                        current, stage, "waiting", reason="operator pending"
-                    )
-                return stage_result(current, stage, "satisfied", receipt=readback)
-            return stage_result(
-                current, stage, "satisfied", receipt={"stage": stage}
-            )
-
-        return run
-
-    handlers = {stage: handler(stage) for stage in STAGES}
-    while True:
-        record = advance(store, record["root_id"], handlers)
-        if (
-            record["stage"] == "operator_readback"
-            and record["operator"]["notification"] is not None
-        ):
-            break
-    record_operator_readback(
-        store, record["root_id"], actor="operator", decision="accept"
+    monkeypatch.setattr(
+        coding_lifecycle,
+        "LifecycleStore",
+        lambda _root: LifecycleStore(store.root, group_gid=os.getegid()),
     )
-    record = advance(store, record["root_id"], handlers)
-    assert record["state"] == "SUCCEEDED"
-    assert record["operator_acceptance"] == "ACCEPTED"
-    assert set(record["effects"]) == set(STAGES)
-    before = dict(calls)
-    assert advance(store, record["root_id"], handlers) == record
-    assert calls == before
+    calls = []
+
+    def supervise(identity, *, config_path):
+        calls.append((identity, Path(config_path)))
+        current = store.get(identity)
+        current["state"] = "TECHNICALLY_COMPLETE"
+        return store.put(current)
+
+    monkeypatch.setattr(coding_cli, "supervise", supervise)
+    observed = coding_lifecycle.run_managed_supervisor(
+        config_path=tmp_path / "coding.json", once=True
+    )
+    assert observed == [
+        {"root_id": record["root_id"], "state": "TECHNICALLY_COMPLETE"}
+    ]
+    assert calls == [(record["root_id"], tmp_path / "coding.json")]
 
 
-def test_resumable_partial_reopens_same_root_and_remains_recoverable(tmp_path: Path):
+def test_pp_start_aliases_exactly_one_smallest_todo_root_and_refuses_ambiguity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    binding = plan_binding(worktree)
+    row = {
+        "id": 1915,
+        "pp_ref": coding_cli.PP_REF,
+        "done_at": None,
+        "status_note": json.dumps(binding),
+    }
+    solution = {
+        "plan_commit": binding["plan_commit"],
+        "solution_hash": binding["solution_hash"],
+        "closure_hash": binding["closure_hash"],
+        "work_units": [
+            {
+                "id": coding_cli.DEFAULT_TREATMENT,
+                "capability": binding["capability"],
+            }
+        ],
+    }
+    projection = {
+        "pp_ref": coding_cli.PP_REF,
+        "resolver_binding": {"agreement": "verified"},
+        "solution": {
+            "conformance_verified": True,
+            "solution_hash": binding["solution_hash"],
+        },
+    }
+    config = {
+        "postgres_dsn": "test",
+        "coding": {"lifecycle_root": str(tmp_path / "journal")},
+    }
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: config)
+    monkeypatch.setattr(
+        coding_cli,
+        "_pp_runtime_binding",
+        lambda *_args: {
+            "selected_commit": binding["source_commit"],
+            "selected_tree": "d" * 40,
+        },
+    )
+    monkeypatch.setattr(coding_cli.todo, "todo_list", lambda **_kwargs: [row])
+    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda _identifier: row)
+    monkeypatch.setattr(coding_cli, "reconcile_pp_workflow", lambda **_kwargs: projection)
+    monkeypatch.setattr(
+        coding_cli, "_plan_binding_for_todo", lambda _identifier: (row, binding)
+    )
+    monkeypatch.setattr(
+        coding_cli,
+        "start",
+        lambda *_args, **kwargs: {
+            "ok": True,
+            "dispatch_jobs": kwargs["dispatch_jobs"],
+        },
+    )
+    monkeypatch.setattr(
+        coding_cli,
+        "LifecycleStore",
+        lambda root: LifecycleStore(root, group_gid=os.getegid()),
+    )
+    local = __import__("tgw.development.local_workflow", fromlist=["load_solution"])
+    monkeypatch.setattr(local, "load_solution", lambda _path: solution)
+
+    pp = coding_cli.lifecycle_start(coding_cli.PP_REF, config_path=tmp_path / "x")
+    todo = coding_cli.lifecycle_start(1915, config_path=tmp_path / "x")
+    assert pp["root_id"] == todo["root_id"]
+    assert pp["target"] == "1915"
+    assert pp["pp_alias"]["todo_id"] == 1915
+    assert pp["supervisor"] == "tgw-coding-lifecycle-supervisor.service"
+    assert pp["returns_immediately"] is True
+    monkeypatch.setattr(coding_cli.todo, "todo_list", lambda **_kwargs: [row, row])
+    with pytest.raises(coding_cli.CodingCLIError, match="ambiguous"):
+        coding_cli.lifecycle_start(coding_cli.PP_REF, config_path=tmp_path / "x")
+
+
+def test_resume_intent_is_durable_before_dispatch_and_retries_use_new_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     store = store_at(tmp_path / "journal")
     record = new(store)
     partial = advance(
         store,
         record["root_id"],
-        {"implementation": result_handler("implementation", outcome="resumable_partial")},
-    )
-    assert partial["state"] == "RESUMABLE_PARTIAL"
-    assert partial["state"] not in coding_lifecycle.TERMINAL
-    assert [item["root_id"] for item in store.records()] == [record["root_id"]]
-    reopened = request_resume(
-        store,
-        record["root_id"],
-        receipt={
-            "root_id": record["root_id"],
-            "binding_hash": record["binding"]["binding_hash"],
-            "resume_of": "sha256:" + "3" * 64,
-        },
-    )
-    assert reopened["root_id"] == record["root_id"]
-    assert reopened["state"] == "WAITING"
-    resumed = advance(
-        store,
-        record["root_id"],
         {
-            "implementation": result_handler("implementation"),
-            "controller": result_handler("controller", outcome="waiting"),
-        },
-    )
-    assert resumed["stage"] == "controller"
-
-
-def test_context_outage_never_waives_retry_and_later_publication_completes(
-    tmp_path: Path,
-):
-    store = store_at(tmp_path / "journal")
-    record = new(store)
-    online = False
-
-    def handler(stage):
-        def run(current):
-            if stage == "terminal_publication" and not online:
-                return stage_result(
-                    current,
-                    stage,
-                    "publication_unavailable",
-                    reason="Context offline",
-                )
-            if stage == "operator_readback":
-                readback = current["operator"]["readback"]
-                if readback is None:
-                    return stage_result(
-                        current, stage, "waiting", reason="operator pending"
-                    )
-                return stage_result(current, stage, "satisfied", receipt=readback)
-            return stage_result(
-                current, stage, "satisfied", receipt={"stage": stage}
+            "implementation": lambda current: stage_result(
+                current,
+                "implementation",
+                "resumable_partial",
+                reason="candidate interrupted",
             )
-
-        return run
-
-    handlers = {stage: handler(stage) for stage in STAGES}
-    first = advance(store, record["root_id"], handlers)
-    assert first["publication"]["pending"] is True
-    record_operator_readback(
-        store, record["root_id"], actor="operator", decision="accept"
+        },
     )
-    for expected_attempt in range(2, 7):
-        first = advance(store, record["root_id"], handlers)
-        assert first["publication"]["attempts"] == expected_attempt
-        assert first["publication"]["retry_available"] is True
-        assert first["state"] == "AWAITING_CONTEXT_PUBLICATION"
-    online = True
-    completed = advance(store, record["root_id"], handlers)
-    assert completed["state"] == "SUCCEEDED"
-    assert completed["publication"]["published"] is True
+    old_fence = job_binding(partial)
+    intent = {
+        "schema": "tgw-local-coding-lifecycle-resume-intent/v1",
+        "root_id": record["root_id"],
+        "binding_hash": record["binding"]["binding_hash"],
+        "todo_id": 1915,
+        "resume_of": "sha256:" + "3" * 64,
+        "resume_fingerprint": "sha256:" + "4" * 64,
+        "worktree": record["binding"]["worktree"],
+        "source_commit": record["binding"]["source_commit"],
+        "source_tree": record["binding"]["source_tree"],
+    }
+    reopened = request_resume(store, record["root_id"], receipt=intent)
+    new_fence = job_binding(reopened)
+    assert reopened["state"] == "WAITING"
+    assert new_fence != old_fence
+    assert request_resume(store, record["root_id"], receipt=intent) == reopened
+
+    rows = [
+        {
+            "job_id": "old",
+            "queue_name": "codex-implement",
+            "payload_json": {
+                "coding_lifecycle": old_fence,
+                "plan_binding": record["binding"]["plan_todo_binding"],
+            },
+        },
+        {
+            "job_id": "new",
+            "queue_name": "codex-implement",
+            "payload_json": {
+                "coding_lifecycle": new_fence,
+                "plan_binding": record["binding"]["plan_todo_binding"],
+            },
+        },
+    ]
+    monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: rows)
+    assert [
+        row["job_id"]
+        for row in coding_cli._bound_jobs(reopened, "codex-implement")
+    ] == ["new"]
 
 
-def test_operator_readback_is_not_acceptance_and_rejection_is_explicit(
+def test_resume_recovers_worker_completed_crash_boundary_with_new_fenced_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+    partial_receipt = {
+        "state": "RESUMABLE_PARTIAL",
+        "resume_of": "sha256:" + "3" * 64,
+        "fingerprint": "sha256:" + "4" * 64,
+    }
+    record["state"] = "RESUMABLE_PARTIAL"
+    record["stage"] = "candidate"
+    record["stages"]["candidate"] = {
+        "outcome": "resumable_partial",
+        "idempotency_key": coding_lifecycle.stage_idempotency_key(
+            record, "candidate"
+        ),
+        "receipt": partial_receipt,
+        "receipt_hash": digest(partial_receipt),
+    }
+    record["failure"] = {
+        "stage": "candidate",
+        "reason": "resume worker not yet reconciled",
+    }
+    record = store.put(record)
+    config = {
+        "postgres_dsn": "test",
+        "coding": {"lifecycle_root": str(store.root)},
+    }
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: config)
+    monkeypatch.setattr(
+        coding_cli,
+        "LifecycleStore",
+        lambda _root: LifecycleStore(store.root, group_gid=os.getegid()),
+    )
+    monkeypatch.setattr(
+        coding_cli.todo,
+        "todo_get",
+        lambda _identifier: {"id": 1915, "agent": "codex"},
+    )
+    monkeypatch.setattr(
+        coding_cli,
+        "exclusive_worktree_lease",
+        lambda _worktree: nullcontext(),
+    )
+    closed = {
+        "state": "CLOSED_CANDIDATE",
+        "source": {"head": "e" * 40, "tree": "f" * 40},
+    }
+    monkeypatch.setattr(coding_cli, "classify", lambda *_args: closed)
+    resumed = coding_cli.resume(1915, config_path=tmp_path / "coding.json")
+    reopened = store.get(record["root_id"])
+    assert resumed["coding_state"] == closed
+    assert reopened["resume_intent"]["resume_of"] == partial_receipt["resume_of"]
+    assert reopened["resume_intent"]["resume_fingerprint"] == partial_receipt[
+        "fingerprint"
+    ]
+
+    captured = []
+    item = {
+        "id": 1915,
+        "agent": "codex",
+        "body": "bounded",
+        "priority": 1,
+        "done_at": None,
+    }
+    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda _identifier: item)
+    monkeypatch.setattr(
+        coding_cli,
+        "bind_command",
+        lambda _args: {"binding": record["binding"]["plan_todo_binding"]},
+    )
+    monkeypatch.setattr(
+        coding_cli,
+        "source_tree",
+        lambda *_args: record["binding"]["source_tree"],
+    )
+    monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
+
+    def dispatch(config_value, *, todo_ids):
+        captured.append((config_value, todo_ids))
+        return coding_cli.TickResult(dispatched=1)
+
+    monkeypatch.setattr(coding_cli, "tick", dispatch)
+    launched = coding_cli.start(
+        1915,
+        config_path=tmp_path / "coding.json",
+        source_commit=record["binding"]["source_commit"],
+        resume_only=True,
+        lifecycle_job_binding=job_binding(reopened),
+        lifecycle_stage="implementation",
+    )
+    assert launched["foreman"]["dispatched"] == 1
+    assert captured[0][0].lifecycle_rebind == {1915: "codex-implement"}
+    assert captured[0][1] == {1915}
+
+
+def test_review_runner_and_both_receipt_boundaries_require_semantic_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    worktree = tmp_path / "worktree"
+    subprocess.run(["git", "init", "-q", worktree], check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "review@example.invalid"],
+        cwd=worktree,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Review Test"], cwd=worktree, check=True
+    )
+    (worktree / "pyproject.toml").write_text(
+        "[project]\nname='review'\nversion='1'\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-qm", "candidate"], cwd=worktree, check=True)
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=worktree, text=True
+    ).strip()
+    store = store_at(tmp_path / "journal")
+    record = new(store, worktree)
+    payload = review_result(record, commit=commit, tree=tree)
+    payload["job_id"] = "review-job"
+    payload["todo_agent"] = "implementation-actor"
+
+    def passing_runner(*_args, **_kwargs):
+        return subprocess.CompletedProcess([], 0, "checked", "")
+
+    def semantic_backend(request, cwd):
+        assert cwd == worktree
+        assert request["output_contract"] == "tgw-code-review/v1"
+        assert request["review_context"]["task_spec"] == payload["task_spec"]
+        assert request["review_context"]["review_mode"] == "NON_ADMITTING_DIAGNOSTIC"
+        return {
+            "schema": "tgw-code-review/v1",
+            "verdict": "PASS",
+            "snapshot_hash": request["snapshot_hash"],
+            "summary": "ephemeral semantic review found no defects",
+            "findings": [],
+        }
+
+    monkeypatch.setattr(
+        "tgw.development.coding_review.pwd.getpwuid",
+        lambda _uid: type("Identity", (), {"pw_name": "review-actor"})(),
+    )
+    result = run_local_review(
+        payload,
+        worktree,
+        runner=passing_runner,
+        semantic_backend=semantic_backend,
+    )
+    artifact = validate_review_artifact(
+        result,
+        payload=payload,
+        worktree=worktree,
+        expected_job_id="review-job",
+    )
+    assert artifact["diagnostic_verdict"] == "PASS_NON_ADMITTING"
+    assert artifact["report"]["verdict"] == "PASS"
+    assert artifact["report"]["findings"] == []
+    assert artifact["execution"]["provider"] == "codex-ephemeral-read-only"
+    assert artifact["execution"]["independence"]["authority"] is False
+    assert artifact["checks"]
+    failed = run_local_review(
+        payload,
+        worktree,
+        runner=passing_runner,
+        semantic_backend=lambda request, _cwd: {
+            "schema": "tgw-code-review/v1",
+            "verdict": "FAIL",
+            "snapshot_hash": request["snapshot_hash"],
+            "summary": "semantic defect remains",
+            "findings": [
+                {
+                    "severity": "high",
+                    "path": "pyproject.toml",
+                    "line": 1,
+                    "message": "bounded task behavior is incomplete",
+                }
+            ],
+        },
+    )
+    assert failed["outcome"] == "failed"
+    assert failed["established_conditions"] == []
+    assert failed["artifacts"][0]["diagnostic_verdict"] == "FAIL"
+    with pytest.raises(ReviewRunnerError, match="success conditions"):
+        validate_review_artifact(
+            failed,
+            payload=payload,
+            worktree=worktree,
+            expected_job_id="review-job",
+        )
+    with pytest.raises(ReviewRunnerError, match="one report artifact"):
+        validate_review_artifact(
+            {**result, "artifacts": []},
+            payload=payload,
+            worktree=worktree,
+            expected_job_id="review-job",
+        )
+
+    candidate_receipt = {"commit": commit, "tree": tree}
+    record["effects"]["candidate"] = {
+        "receipt": candidate_receipt,
+        "receipt_hash": digest(candidate_receipt),
+    }
+    queue_result = review_result(record, commit=commit, tree=tree)
+    (worktree / "review-receipt.json").write_text(json.dumps(queue_result))
+    rows = [
+        {
+            "job_id": "review-job",
+            "queue_name": "claude-review",
+            "state": "succeeded",
+            "attempt_count": 1,
+            "payload_json": {**queue_result, "result": queue_result},
+        }
+    ]
+    monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: rows)
+    evidence = coding_cli._queue_evidence(
+        record,
+        stage="review",
+        queue_name="claude-review",
+        receipt_name="review-receipt.json",
+        dispatch=lambda: pytest.fail("exact completed review must be reused"),
+    )
+    assert evidence["outcome"] == "satisfied"
+    queue_result["artifacts"] = []
+    (worktree / "review-receipt.json").write_text(json.dumps(queue_result))
+    rows[0]["payload_json"]["result"] = queue_result
+    refused = coding_cli._queue_evidence(
+        record,
+        stage="review",
+        queue_name="claude-review",
+        receipt_name="review-receipt.json",
+        dispatch=lambda: None,
+    )
+    assert refused["outcome"] == "remediation"
+
+
+def test_root_request_rejects_forbidden_fields_and_is_idempotent_after_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "-q", repository], check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "root@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Root Effect Test"],
+        cwd=repository,
+        check=True,
+    )
+    (repository / "pyproject.toml").write_text(
+        "[project]\nname='root-effect'\nversion='1'\n"
+    )
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repository, check=True)
+    source = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+    ).strip()
+    source_tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True
+    ).strip()
+    (repository / "source.py").write_text("RESULT = 1915\n")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "candidate"], cwd=repository, check=True)
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True
+    ).strip()
+    store = store_at(tmp_path / "journal")
+    record = record_at_integration(
+        store,
+        repository,
+        source=source,
+        source_tree=source_tree,
+        commit=commit,
+        tree=tree,
+    )
+    paths = root_paths(tmp_path, store, repository)
+    request = build_request(record)
+    assert validate_request(request, store=store)[0] == request
+    with pytest.raises(RootEffectError, match="forbidden field"):
+        validate_request({**request, "argv": ["anything"]}, store=store)
+    stale = dict(request)
+    stale["candidate_tree"] = "9" * 40
+    stale_unsigned = {
+        key: item for key, item in stale.items() if key != "request_hash"
+    }
+    stale["request_hash"] = digest(stale_unsigned)
+    with pytest.raises(RootEffectError, match="differs from lifecycle"):
+        validate_request(stale, store=store)
+
+    request_file = coding_root_effect.request_path(paths, record["root_id"])
+    request_file.write_bytes(canonical({"schema": "invalid"}) + b"\n")
+    request_file.chmod(0o660)
+    assert coding_root_effect.consume_once(paths) == 0
+    refusal_file = coding_root_effect._refusal_path(paths, request_file)
+    assert coding_root_effect._refusal_applies(
+        paths, refusal_file, request_file
+    )
+    request_file.unlink()
+    coding_root_effect.ensure_request(paths, record)
+    assert not coding_root_effect._refusal_applies(
+        paths, refusal_file, request_file
+    )
+    observed_requests = []
+    monkeypatch.setattr(
+        coding_root_effect,
+        "process_request",
+        lambda _paths, exact, *, store: observed_requests.append(
+            (exact["request_hash"], store.root)
+        ),
+    )
+    assert coding_root_effect.consume_once(paths) == 1
+    assert observed_requests == [(request["request_hash"], store.root)]
+
+    from tgw import doctor_cli
+
+    monkeypatch.setattr(
+        doctor_cli,
+        "repair_workers",
+        lambda _paths, *, desired_commit: {
+            "schema": "doctor-workers",
+            "desired_commit": desired_commit,
+            "status": "PASS",
+        },
+    )
+    monkeypatch.setattr(
+        coding_root_effect,
+        "_runtime_canary",
+        lambda _paths, _root_id: {
+            "schema": "tgw-local-coding-disconnect-restart-canary/v1",
+            "disposable": True,
+            "canary_hash": "sha256:" + "8" * 64,
+        },
+    )
+    first_effects = coding_root_effect._default_effects(paths, request)
+    assert first_effects["selection"]["state"] == "completed"
+    recovered = process_request(paths, request, store=store)
+    replay = process_request(paths, request, store=store)
+    assert recovered == replay
+    assert recovered["status"] == "PASS"
+    assert recovered["candidate_commit"] == commit
+    assert recovered["technical_result_hash"].startswith("sha256:")
+    response_file = coding_root_effect.response_path(paths, record["root_id"])
+    assert response_file.stat().st_uid == paths.root_uid
+    assert stat.S_IMODE(response_file.stat().st_mode) == 0o640
+    response_file.chmod(0o660)
+    with pytest.raises(RootEffectError, match="ownership/type/mode"):
+        coding_root_effect.read_response(paths, request)
+    response_file.chmod(0o640)
+    assert (
+        paths.runtime_root / "releases" / commit / ".release-manifest.json"
+    ).is_file()
+
+
+def test_context_projection_is_terminal_bound_and_retry_state_is_cadenced(
+    tmp_path: Path,
+):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "pyproject.toml").write_text("[project]\n")
+    store = store_at(tmp_path / "journal")
+    record = record_at_integration(store, worktree)
+    materialization = {"schema": "materialization", "status": "PASS"}
+    live = {
+        "schema": "live",
+        "status": "PASS",
+        "technical_result_hash": "sha256:" + "9" * 64,
+    }
+    for stage, receipt in (
+        ("materialization", materialization),
+        ("live_verification", live),
+    ):
+        record["effects"][stage] = {
+            "receipt": receipt,
+            "receipt_hash": digest(receipt),
+            "idempotency_key": coding_lifecycle.stage_idempotency_key(record, stage),
+        }
+    record["stage"] = "terminal_publication"
+    record = store.put(record)
+    paths = root_paths(tmp_path, store, worktree)
+    request = ensure_projection_request(paths, record)
+    assert request == build_projection_request(record)
+    assert request["root_id"] == record["root_id"]
+
+    calls = []
+
+    def publisher(_paths, exact):
+        calls.append(exact["projection_hash"])
+        return {
+            "path": "/exact/context-receipt.json",
+            "file_sha256": "sha256:" + "5" * 64,
+            "receipt_sha256": "sha256:" + "6" * 64,
+            "task_file_sha256": "sha256:" + "7" * 64,
+        }
+
+    response = process_projection(paths, request, publisher=publisher, store=store)
+    assert response["status"] == "PUBLISHED"
+    assert response["result_hash"] == request["result_hash"]
+    assert response["context_task_file_sha256"] == "sha256:" + "7" * 64
+    assert process_projection(paths, request, publisher=publisher, store=store) == response
+    assert calls == [request["projection_hash"]]
+
+    retry_root = tmp_path / "retry"
+    retry_root.mkdir()
+    retry_paths = root_paths(retry_root, store, worktree)
+    coding_root_effect._defer_projection(retry_paths, request, "Context offline")
+    retry = coding_root_effect._projection_retry_path(retry_paths, record["root_id"])
+    before = retry.read_bytes()
+    before_mtime = retry.stat().st_mtime_ns
+    assert not coding_root_effect._projection_is_due(retry_paths, request)
+    assert retry.read_bytes() == before
+    assert retry.stat().st_mtime_ns == before_mtime
+
+    tampered = dict(request)
+    tampered["live_verification_receipt_hash"] = "sha256:" + "0" * 64
+    unsigned = {
+        key: item for key, item in tampered.items() if key != "projection_hash"
+    }
+    tampered["projection_hash"] = digest(unsigned)
+    with pytest.raises(RootEffectError, match="differs from lifecycle"):
+        coding_root_effect.validate_projection_request(tampered, store=store)
+
+
+def test_terminal_context_task_projection_is_single_cas_and_non_authoritative(
+    tmp_path: Path,
+):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    store = store_at(tmp_path / "journal")
+    record = record_at_integration(store, worktree)
+    for stage, receipt in (
+        ("materialization", {"schema": "materialization", "status": "PASS"}),
+        (
+            "live_verification",
+            {
+                "schema": "live",
+                "status": "PASS",
+                "technical_result_hash": "sha256:" + "9" * 64,
+            },
+        ),
+    ):
+        record["effects"][stage] = {
+            "receipt": receipt,
+            "receipt_hash": digest(receipt),
+            "idempotency_key": coding_lifecycle.stage_idempotency_key(record, stage),
+        }
+    record["stage"] = "terminal_publication"
+    record = store.put(record)
+    request = build_projection_request(record)
+    task_path = tmp_path / "current-task.json"
+    task = {
+        "schema": "tgw-current-task/v1",
+        "id": "bounded-task",
+        "updated_at": "2026-08-24T00:00:00+00:00",
+        "plan": {"approved_commit": record["binding"]["plan_commit"]},
+        "implementation": {
+            "development_source": {
+                "commit": record["binding"]["source_commit"],
+                "next_leaf": "workflow.condition-derived-convergence@1",
+            },
+            "coding_workflow": {
+                "commit": record["binding"]["source_commit"]
+            },
+        },
+    }
+    task_path.write_text(json.dumps(task, sort_keys=True) + "\n")
+    paths = replace(root_paths(tmp_path, store, worktree), context_task=task_path)
+
+    first = coding_root_effect._project_terminal_task(paths, request)
+    projected_bytes = task_path.read_bytes()
+    projected = json.loads(projected_bytes)
+    second = coding_root_effect._project_terminal_task(paths, request)
+
+    assert first == second
+    assert task_path.read_bytes() == projected_bytes
+    assert projected["plan"] == task["plan"]
+    assert projected["id"] == task["id"]
+    implementation = projected["implementation"]
+    assert (
+        implementation["development_source"]["commit"]
+        == request["candidate_commit"]
+    )
+    assert (
+        implementation["coding_workflow"]["commit"]
+        == request["candidate_commit"]
+    )
+    terminal = implementation["coding_lifecycle_result"]
+    assert terminal["result_hash"] == request["result_hash"]
+    assert terminal["operator_acceptance"] == "PENDING"
+
+
+def test_context_outage_does_not_block_technical_completion_or_rewrite_early(
     tmp_path: Path,
 ):
     store = store_at(tmp_path / "journal")
     record = new(store)
-    handlers = {
-        stage: result_handler(stage)
-        for stage in STAGES
-        if stage != "operator_readback"
-    }
-    handlers["operator_readback"] = result_handler(
-        "operator_readback", outcome="waiting"
-    )
-    waiting = advance(store, record["root_id"], handlers)
-    read = record_operator_readback(
-        store, waiting["root_id"], actor="operator", decision=None
-    )
-    assert read["operator_acceptance"] == "PENDING"
-    rejected = record_operator_readback(
-        store, waiting["root_id"], actor="operator", decision="reject"
-    )
-    assert rejected["operator_acceptance"] == "REJECTED"
+    for stage in STAGES[:-2]:
+        receipt = {"schema": "prior", "status": "PASS", "stage": stage}
+        record["effects"][stage] = {
+            "receipt": receipt,
+            "receipt_hash": digest(receipt),
+            "idempotency_key": coding_lifecycle.stage_idempotency_key(record, stage),
+        }
+        record["stages"][stage] = stage_result(
+            record, stage, "satisfied", receipt=receipt
+        )
+    record["stage"] = "terminal_publication"
+    record["state"] = "WAITING"
+    record = store.put(record)
+    attempts = []
 
+    def unavailable(current):
+        attempts.append(current["root_id"])
+        return stage_result(
+            current,
+            "terminal_publication",
+            "publication_unavailable",
+            reason="Context unavailable",
+        )
 
-def test_tampered_or_private_journal_fails_closed(tmp_path: Path):
-    store = store_at(tmp_path / "journal")
-    record = new(store)
-    path = store.path(record["root_id"])
-    path.write_text(path.read_text().replace("QUEUED", "SUCCEEDED"))
-    path.chmod(0o660)
-    with pytest.raises(LifecycleError, match="hash/schema"):
-        store.get(record["root_id"])
-    path.chmod(0o600)
-    with pytest.raises(LifecycleError, match="ownership/mode"):
-        store.get(record["root_id"])
+    def notify(current):
+        return stage_result(
+            current,
+            "operator_notification",
+            "satisfied",
+            receipt={
+                "schema": "notification",
+                "root_id": current["root_id"],
+                "operator_acceptance": "PENDING",
+            },
+        )
 
-
-def test_stage_claim_requires_exact_idempotency_and_receipt(tmp_path: Path):
-    store = store_at(tmp_path / "journal")
-    record = new(store)
-    missing = advance(
+    completed = advance(
         store,
         record["root_id"],
         {
-            "implementation": lambda current: {
-                "outcome": "satisfied",
-                "idempotency_key": coding_lifecycle.stage_idempotency_key(
-                    current, "implementation"
-                ),
-            }
+            "terminal_publication": unavailable,
+            "operator_notification": notify,
         },
     )
-    assert missing["state"] == "REMEDIATION_REQUIRED"
-    assert "without evidence" in missing["failure"]["reason"]
+    assert completed["state"] == "TECHNICALLY_COMPLETE"
+    assert completed["publication"]["pending"] is True
+    assert completed["operator_acceptance"] == "PENDING"
+    path = store.path(record["root_id"])
+    before = path.read_bytes()
+    mtime = path.stat().st_mtime_ns
+    assert (
+        advance(
+            store,
+            record["root_id"],
+            {"terminal_publication": unavailable},
+        )
+        == completed
+    )
+    assert attempts == [record["root_id"]]
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == mtime
+
+
+def test_operator_readback_never_mints_acceptance_and_cli_has_no_decision_tools(
+    tmp_path: Path,
+):
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+    notification = {"schema": "notification", "root_id": record["root_id"]}
+    record["operator"]["notification"] = {
+        "receipt": notification,
+        "receipt_hash": digest(notification),
+    }
+    store.put(record)
+    read = record_operator_readback(store, record["root_id"], actor="operator")
+    assert read["operator_acceptance"] == "PENDING"
+    assert read["operator"]["acceptance"] == "PENDING"
+    parser = coding_cli.parser()
+    for forbidden in ("accept", "reject"):
+        with pytest.raises(SystemExit):
+            parser.parse_args([forbidden, record["root_id"]])
+    from tgw import coding_mcp_server
+
+    assert not hasattr(coding_mcp_server, "tgw_coding_operator_readback")
+
+
+def test_managed_supervisor_canary_uses_two_real_disposable_subprocesses(
+    tmp_path: Path,
+):
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+    worktree = Path(record["binding"]["worktree"])
+    paths = root_paths(tmp_path, store, worktree)
+    runtime = paths.runtime_root / "current"
+    runtime.parent.mkdir(parents=True)
+    runtime.symlink_to(Path.cwd(), target_is_directory=True)
+    config = {
+        "schema": "tgw-local-coding-workflow/v1",
+        "postgres_dsn": "test",
+        "coding": {
+            "lifecycle_root": str(store.root),
+            "root_effect_root": str(paths.request_root),
+            "doctor_receipt_root": str(tmp_path / "doctor"),
+            "runtime_root": str(paths.runtime_root),
+            "repository_root": str(worktree),
+            "worktree_root": str(tmp_path / "worktrees"),
+            "commands": {"claude-review": ["/fixed/reviewer"]},
+            "allowed_runners": ["/fixed/reviewer"],
+            "lifecycle_stages": coding_lifecycle.TYPED_STAGE_IMPLEMENTATIONS,
+        },
+    }
+    paths.coding_config.write_text(json.dumps(config))
+    result = coding_root_effect._runtime_canary(paths, record["root_id"])
+    assert result["disposable"] is True
+    assert [item["phase"] for item in result["phases"]] == [
+        "disconnect",
+        "restart",
+    ]
+    assert all(item["returncode"] == 0 for item in result["phases"])
+    assert all(
+        item["root_id"] == record["root_id"]
+        and item["journal_sha256"].startswith("sha256:")
+        for item in result["phases"]
+    )
+
+
+def test_installed_config_and_services_are_exact_and_forbid_broad_effects():
+    from tgw import doctor_cli
+
+    value = load_config(Path("config/tgw-coding-local.json"))
+    assert value["coding"]["lifecycle_stages"] == (
+        coding_lifecycle.TYPED_STAGE_IMPLEMENTATIONS
+    )
+    assert value["coding"]["commands"]["claude-review"] == [
+        "/opt/TGW/.venvs/controller/bin/tgw-local-independent-review-runner"
+    ]
+    assert "lifecycle_commands" not in value["coding"]
+    managed = (
+        "tgw-claude-review-worker.service",
+        "tgw-coding-lifecycle-supervisor.service",
+        "tgw-coding-root-effect.service",
+    )
+    assert set(managed) <= set(doctor_cli._ACTIVE_CODING_UNITS)
+    assert set(doctor_cli._CODING_SUPPORT_ROOT_KEYS) == {
+        "preservation_archive_root",
+        "runner_state_root",
+        "lifecycle_root",
+        "root_effect_root",
+    }
+    assert doctor_cli._UNIT_ARGV[managed[1]][-1] == "--managed"
+    assert doctor_cli._UNIT_ARGV[managed[2]][2:4] == (
+        "tgw.development.coding_root_effect",
+        "--config",
+    )
+    for name in managed:
+        body = (Path("systemd") / name).read_text().lower()
+        assert "[install]" in body
+        assert "type=simple" in body
+        if name == "tgw-claude-review-worker.service":
+            assert "tgw_codex_review_bin=/home/codex/.local/bin/codex" in body
+            assert "tgw_codex_review_auth=/home/codex/.codex/auth.json" in body
+            assert "privatenetwork=true" not in body
+        for forbidden in ("ssh ", "tgw-prod", "approval", "admission", "remote"):
+            assert forbidden not in body
+
+
+def test_generic_lifecycle_command_configuration_is_rejected(tmp_path: Path):
+    value = json.loads(Path("config/tgw-coding-local.json").read_text())
+    value["coding"]["lifecycle_commands"] = {"review": ["/bin/sh"]}
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(value))
+    with pytest.raises(LocalCodingWorkflowError, match="generic.*forbidden"):
+        load_config(path)
+
+
+def test_status_and_log_are_consolidated_without_acceptance_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+    config = {"postgres_dsn": "test", "coding": {"lifecycle_root": str(store.root)}}
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: config)
+    monkeypatch.setattr(coding_cli, "load_config", lambda _path: config)
+    monkeypatch.setattr(
+        coding_cli,
+        "LifecycleStore",
+        lambda _root: LifecycleStore(store.root, group_gid=os.getegid()),
+    )
+    monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: [])
+    status = coding_cli.consolidated_status(
+        record["root_id"], config_path=tmp_path / "config"
+    )
+    assert status["root_id"] == record["root_id"]
+    assert status["operator_acceptance"] == "PENDING"
+    monkeypatch.setattr(
+        coding_cli.state_machine,
+        "get_job",
+        lambda job_id: {
+            "job_id": job_id,
+            "queue_name": "claude-review",
+            "state": "succeeded",
+            "payload_json": {"result": {"status": "PASS"}},
+        },
+    )
+    logged = coding_cli.job_log("review-job", config_path=tmp_path / "config")
+    assert logged["job_id"] == "review-job"
+    assert logged["payload_json"]["result"]["status"] == "PASS"
 
 
 def test_worker_job_binding_rejects_substitution(tmp_path: Path):
@@ -302,378 +1205,3 @@ def test_worker_job_binding_rejects_substitution(tmp_path: Path):
         validate_job_binding_payload(
             stale, plan_binding=record["binding"]["plan_todo_binding"]
         )
-
-
-def test_queue_stage_ignores_historical_todo_success_and_binds_exact_receipt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    store = store_at(tmp_path / "journal")
-    record = new(store, worktree)
-    fence = job_binding(record)
-    receipt = {
-        "status": "PASS",
-        "outcome": "satisfied",
-        "treatment_id": "codex-implement",
-        "plan_binding": record["binding"]["plan_todo_binding"],
-        "coding_lifecycle": fence,
-    }
-    (worktree / "implementation-receipt.json").write_text(json.dumps(receipt))
-    rows = [
-        {
-            "job_id": "historical",
-            "queue_name": "codex-implement",
-            "state": "succeeded",
-            "payload_json": {"todo_id": 1915, "result": {"status": "PASS"}},
-        },
-        {
-            "job_id": "exact",
-            "queue_name": "codex-implement",
-            "state": "succeeded",
-            "attempt_count": 1,
-            "payload_json": {
-                "todo_id": 1915,
-                "plan_binding": record["binding"]["plan_todo_binding"],
-                "coding_lifecycle": fence,
-                "result": receipt,
-            },
-        },
-    ]
-    monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: rows)
-    result = coding_cli._queue_evidence(
-        record,
-        stage="implementation",
-        queue_name="codex-implement",
-        receipt_name="implementation-receipt.json",
-        dispatch=lambda: pytest.fail("exact row must be reused"),
-    )
-    assert result["outcome"] == "satisfied"
-    assert result["job_ids"] == ["exact"]
-    assert result["receipt"]["job_id"] == "exact"
-
-
-def test_exact_independent_review_failure_stops_without_approval(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    store = store_at(tmp_path / "journal")
-    record = new(store)
-    fence = job_binding(record)
-    rows = [
-        {
-            "job_id": "review-failed",
-            "queue_name": "claude-review",
-            "state": "dead_letter",
-            "payload_json": {
-                "todo_id": 1915,
-                "plan_binding": record["binding"]["plan_todo_binding"],
-                "coding_lifecycle": fence,
-            },
-        }
-    ]
-    monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: rows)
-    result = coding_cli._queue_evidence(
-        record,
-        stage="review",
-        queue_name="claude-review",
-        receipt_name="review-receipt.json",
-        dispatch=lambda: pytest.fail("terminal exact review must not redispatch"),
-    )
-    assert result["outcome"] == "failed"
-    assert result["job_ids"] == ["review-failed"]
-
-
-def test_lifecycle_start_binds_before_detached_dispatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    journal = tmp_path / "journal"
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    plan = plan_binding(worktree)
-    config = {
-        "postgres_dsn": "test",
-        "coding": {"lifecycle_root": str(journal)},
-    }
-    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: config)
-    monkeypatch.setattr(
-        coding_cli,
-        "_pp_runtime_binding",
-        lambda *_args: {
-            "selected_commit": "c" * 40,
-            "selected_tree": "d" * 40,
-        },
-    )
-    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda _identifier: {"id": 1915})
-    monkeypatch.setattr(coding_cli, "_plan_binding_for_todo", lambda _identifier: ({}, plan))
-    calls = []
-
-    def fake_start(*_args, **kwargs):
-        calls.append(kwargs)
-        return {"ok": True}
-
-    monkeypatch.setattr(coding_cli, "start", fake_start)
-    monkeypatch.setattr(
-        coding_cli,
-        "LifecycleStore",
-        lambda root: LifecycleStore(root, group_gid=os.getegid()),
-    )
-    monkeypatch.setattr(coding_lifecycle, "spawn", lambda *_args, **_kwargs: 4321)
-    local = __import__("tgw.development.local_workflow", fromlist=["load_solution"])
-    monkeypatch.setattr(
-        local,
-        "load_solution",
-        lambda _path: {
-            "plan_commit": "a" * 40,
-            "solution_hash": "sha256:" + "b" * 64,
-        },
-    )
-    result = coding_cli.lifecycle_start(1915, config_path=tmp_path / "config")
-    assert result["returns_immediately"] is True
-    assert result["supervisor_pid"] == 4321
-    assert calls[0]["dispatch_jobs"] is False
-    assert calls[0]["source_commit"] == "c" * 40
-
-
-def test_run_supervisor_reconstructs_after_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    store = store_at(tmp_path / "journal")
-    record = new(store)
-    states = ["WAITING", "SUCCEEDED"]
-
-    def fake_supervise(identity, *, config_path):
-        assert identity == record["root_id"]
-        value = store.get(identity)
-        value["state"] = states.pop(0)
-        return store.put(value)
-
-    monkeypatch.setattr(coding_cli, "supervise", fake_supervise)
-    local = __import__("tgw.development.local_workflow", fromlist=["load_config"])
-    monkeypatch.setattr(
-        local,
-        "load_config",
-        lambda _path: {"coding": {"lifecycle_root": str(store.root)}},
-    )
-    monkeypatch.setattr(
-        coding_lifecycle,
-        "LifecycleStore",
-        lambda root: LifecycleStore(root, group_gid=os.getegid()),
-    )
-    completed = coding_lifecycle.run_supervisor(
-        record["root_id"], config_path=tmp_path / "config", poll_interval=0.01
-    )
-    assert completed["state"] == "SUCCEEDED"
-    assert states == []
-
-
-def test_spawn_is_detached_and_needs_no_client(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
-    observed = {}
-
-    class Process:
-        pid = 8123
-
-    def fake_popen(argv, **kwargs):
-        observed["argv"] = argv
-        observed.update(kwargs)
-        return Process()
-
-    monkeypatch.setattr(coding_lifecycle.subprocess, "Popen", fake_popen)
-    pid = coding_lifecycle.spawn(
-        "coding:" + "1" * 64, config_path=tmp_path / "config.json"
-    )
-    assert pid == 8123
-    assert observed["start_new_session"] is True
-    assert observed["close_fds"] is True
-    assert observed["stdin"] is coding_lifecycle.subprocess.DEVNULL
-    assert observed["stdout"] is coding_lifecycle.subprocess.DEVNULL
-    assert observed["stderr"] is coding_lifecycle.subprocess.DEVNULL
-
-
-def test_installed_config_has_only_complete_typed_lifecycle_registry():
-    value = load_config(Path("config/tgw-coding-local.json"))
-    assert value["coding"]["lifecycle_stages"] == (
-        coding_lifecycle.TYPED_STAGE_IMPLEMENTATIONS
-    )
-    assert "lifecycle_commands" not in value["coding"]
-
-
-def test_generic_lifecycle_command_configuration_is_rejected(tmp_path: Path):
-    value = json.loads(Path("config/tgw-coding-local.json").read_text())
-    value["coding"]["lifecycle_commands"] = {"review": ["/bin/sh"]}
-    path = tmp_path / "config.json"
-    path.write_text(json.dumps(value))
-    with pytest.raises(LocalCodingWorkflowError, match="generic.*forbidden"):
-        load_config(path)
-
-
-def test_cli_lifecycle_error_is_consolidated_json(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
-    monkeypatch.setattr(
-        coding_cli,
-        "consolidated_status",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            LifecycleError("journal stale")
-        ),
-    )
-    args = coding_cli.parser().parse_args(
-        ["status", "coding:" + "1" * 64]
-    )
-    assert coding_cli.run(args) == 1
-    result = json.loads(capsys.readouterr().out)
-    assert result == {
-        "schema": "tgw-local-coding-error/v1",
-        "ok": False,
-        "operation": "status",
-        "target": "coding:" + "1" * 64,
-        "error": "journal stale",
-        "error_type": "LifecycleError",
-    }
-
-
-def test_real_supervise_typed_handlers_complete_exact_mocked_surfaces(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    worktree = tmp_path / "worktree"
-    repository = tmp_path / "repository"
-    receipts = tmp_path / "doctor-receipts"
-    for path in (worktree, repository, receipts):
-        path.mkdir()
-    store = store_at(tmp_path / "journal")
-    record = new(store, worktree)
-    candidate_commit = "e" * 40
-    candidate_tree = "f" * 40
-    rows = []
-    config = {
-        "postgres_dsn": "test",
-        "coding": {
-            "lifecycle_root": str(store.root),
-            "repository_root": str(repository),
-            "doctor_receipt_root": str(receipts),
-            "commands": {"claude-review": ["/typed/review"]},
-            "allowed_runners": ["/typed/review"],
-        },
-    }
-    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: config)
-    monkeypatch.setattr(
-        coding_cli,
-        "LifecycleStore",
-        lambda root: LifecycleStore(root, group_gid=os.getegid()),
-    )
-    monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: list(rows))
-    monkeypatch.setattr(
-        coding_cli,
-        "_plan_binding_for_todo",
-        lambda _identifier: ({"agent": "codex"}, record["binding"]["plan_todo_binding"]),
-    )
-    monkeypatch.setattr(
-        coding_cli,
-        "classify",
-        lambda *_args, **_kwargs: {
-            "state": "CLOSED_CANDIDATE",
-            "source": {"head": candidate_commit, "tree": candidate_tree},
-        },
-    )
-    monkeypatch.setattr(
-        coding_cli,
-        "validate_implementation_lineage",
-        lambda *_args, **_kwargs: {"attempt_hash": "sha256:" + "4" * 64},
-    )
-
-    def add_job(queue_name, receipt_name, extra=None):
-        current = store.get(record["root_id"])
-        fence = job_binding(current)
-        value = {
-            "status": "PASS",
-            "outcome": "satisfied",
-            "treatment_id": queue_name,
-            "plan_binding": current["binding"]["plan_todo_binding"],
-            "coding_lifecycle": fence,
-            "artifacts": [],
-            **(extra or {}),
-        }
-        (worktree / receipt_name).write_text(json.dumps(value))
-        rows.append(
-            {
-                "job_id": f"job-{queue_name}",
-                "queue_name": queue_name,
-                "state": "succeeded",
-                "attempt_count": 1,
-                "payload_json": {
-                    "todo_id": 1915,
-                    "plan_binding": current["binding"]["plan_todo_binding"],
-                    "coding_lifecycle": fence,
-                    "result": value,
-                },
-            }
-        )
-
-    def fake_start(*_args, **kwargs):
-        if kwargs["lifecycle_stage"] == "implementation":
-            add_job("codex-implement", "implementation-receipt.json")
-        else:
-            add_job(
-                "controller-verify",
-                "controller-harness-receipt.json",
-                {"implementation_attempt_hash": "sha256:" + "4" * 64},
-            )
-        return {"ok": True}
-
-    monkeypatch.setattr(coding_cli, "start", fake_start)
-
-    def fake_tick(*_args, **_kwargs):
-        current = store.get(record["root_id"])
-        candidate = current["effects"]["candidate"]["receipt"]
-        candidate_fence = coding_lifecycle.candidate_job_binding(
-            job_binding(current),
-            commit=candidate["commit"],
-            tree=candidate["tree"],
-        )
-        add_job(
-            "claude-review",
-            "review-receipt.json",
-            {"coding_candidate": candidate_fence},
-        )
-        return coding_cli.TickResult(dispatched=1)
-
-    monkeypatch.setattr(coding_cli, "tick", fake_tick)
-    local = __import__("tgw.development.local_workflow", fromlist=["_git"])
-
-    def fake_git(_repository, *args):
-        if args == ("rev-parse", "HEAD"):
-            return candidate_commit
-        if args == ("rev-parse", "HEAD^{tree}"):
-            return candidate_tree
-        if args == ("status", "--porcelain=v1"):
-            return ""
-        raise AssertionError(args)
-
-    monkeypatch.setattr(local, "_git", fake_git)
-    monkeypatch.setattr(
-        coding_cli,
-        "_doctor_receipt",
-        lambda _root, *, operation, predicate: {
-            "path": f"/{operation}.json",
-            "file_sha256": "sha256:" + "5" * 64,
-            "receipt_sha256": "sha256:" + "6" * 64,
-            "receipt": {"operation": operation},
-        },
-    )
-
-    waiting = coding_cli.supervise(
-        record["root_id"], config_path=tmp_path / "config"
-    )
-    assert waiting["stage"] == "operator_readback"
-    assert waiting["state"] == "WAITING"
-    assert set(waiting["effects"]) == set(STAGES) - {"operator_readback"}
-    record_operator_readback(
-        store, record["root_id"], actor="operator", decision="accept"
-    )
-    completed = coding_cli.supervise(
-        record["root_id"], config_path=tmp_path / "config"
-    )
-    assert completed["state"] == "SUCCEEDED"
-    assert set(completed["effects"]) == set(STAGES)
-    assert completed["effects"]["review"]["receipt"]["job_id"] == "job-claude-review"

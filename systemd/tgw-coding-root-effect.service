@@ -1,0 +1,25 @@
+[Unit]
+Description=TGW fixed local coding root-effect consumer
+After=postgresql.service
+Requires=postgresql.service
+ConditionPathExists=/opt/TGW/tgw-lib/config/tgw-coding-local.json
+ConditionPathExists=/opt/TGW/tgw-lib/coding-runtime/current/src/tgw/development/coding_root_effect.py
+
+[Service]
+Type=simple
+User=root
+Group=tgw-coders
+UMask=0002
+WorkingDirectory=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+Environment=HOME=/root
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=GIT_OPTIONAL_LOCKS=0
+Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src
+ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.development.coding_root_effect --config /opt/TGW/tgw-lib/config/tgw-coding-local.json
+Restart=always
+RestartSec=5s
+PrivateTmp=true
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

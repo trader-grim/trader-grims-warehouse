@@ -91,7 +91,7 @@ def load_config(path: Path | str = DEFAULT_CONFIG) -> dict[str, Any]:
             raise LocalCodingWorkflowError(
                 "coding lifecycle requires the complete typed stage registry"
             )
-        for name in ("doctor_receipt_root", "runtime_root"):
+        for name in ("doctor_receipt_root", "runtime_root", "root_effect_root"):
             value_path = coding.get(name)
             if not isinstance(value_path, str) or not Path(value_path).is_absolute():
                 raise LocalCodingWorkflowError(
@@ -288,16 +288,13 @@ def foreman_command(args: argparse.Namespace) -> dict[str, Any]:
         ),
         limit=args.limit,
     )
-    # The already-recurring local Foreman is also the host-restart bootstrap.
-    # This does not dispatch work itself: each child must win its root's
-    # supervisor lock and reconstructs exclusively from durable records.
-    recovered: list[dict[str, Any]] = []
-    if lifecycle is not None and lifecycle_store is not None:
-        recovered = lifecycle.spawn_pending(
-            lifecycle_store,
-            config_path=args.config,
-        )
-    return {**dataclasses.asdict(result), "lifecycle_supervisors": recovered}
+    # Lifecycle recovery belongs to the continuously managed supervisor unit.
+    # Foreman remains one bounded queue-reconciliation tick and never detaches
+    # children from this Type=oneshot process.
+    return {
+        **dataclasses.asdict(result),
+        "lifecycle_supervisor": "tgw-coding-lifecycle-supervisor.service",
+    }
 
 
 def worker_command(args: argparse.Namespace) -> None:

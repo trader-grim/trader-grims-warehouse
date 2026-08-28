@@ -16,17 +16,15 @@ import json
 import os
 import re
 import stat
-import subprocess
-import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 SCHEMA = "tgw-local-coding-lifecycle/v2"
 BINDING_SCHEMA = "tgw-local-coding-lifecycle-binding/v2"
-JOB_BINDING_SCHEMA = "tgw-local-coding-lifecycle-job-binding/v1"
+JOB_BINDING_SCHEMA = "tgw-local-coding-lifecycle-job-binding/v2"
 STAGES = (
     "implementation",
     "controller",
@@ -37,7 +35,6 @@ STAGES = (
     "live_verification",
     "terminal_publication",
     "operator_notification",
-    "operator_readback",
 )
 TYPED_STAGE_IMPLEMENTATIONS = {
     "implementation": "coding-queue:codex-implement/v1",
@@ -49,9 +46,10 @@ TYPED_STAGE_IMPLEMENTATIONS = {
     "live_verification": "doctor-receipt:runtime/v1",
     "terminal_publication": "current-task-receipt:context/v1",
     "operator_notification": "lifecycle-journal:notification/v1",
-    "operator_readback": "lifecycle-journal:explicit-readback/v1",
 }
-TERMINAL = frozenset({"SUCCEEDED", "FAILED", "REMEDIATION_REQUIRED"})
+TERMINAL = frozenset(
+    {"TECHNICALLY_COMPLETE", "SUCCEEDED", "FAILED", "REMEDIATION_REQUIRED"}
+)
 FAILURE_OUTCOMES = frozenset({"failed", "remediation", "resumable_partial"})
 BOUNDARIES = {
     "ssh": False,
@@ -203,6 +201,9 @@ def job_binding(record: Mapping[str, Any]) -> dict[str, Any]:
         "execution_root_identity": binding["execution_root_identity"],
         "card_idempotency_key": binding["card_idempotency_key"],
         "closure_hash": binding["closure_hash"],
+        "resume_intent_hash": record.get("resume_intent", {}).get(
+            "resume_intent_hash"
+        ),
     }
     return {**unsigned, "job_binding_hash": _hash(unsigned)}
 
@@ -238,6 +239,7 @@ def validate_job_binding_payload(
             "execution_root_identity",
             "card_idempotency_key",
             "closure_hash",
+            "resume_intent_hash",
             "job_binding_hash",
         }
         or result.get("schema") != JOB_BINDING_SCHEMA
@@ -249,6 +251,10 @@ def validate_job_binding_payload(
         != plan_binding.get("execution_root", {}).get("identity_hash")
         or result.get("card_idempotency_key") != plan_binding.get("idempotency_key")
         or result.get("closure_hash") != plan_binding.get("closure_hash")
+        or (
+            result.get("resume_intent_hash") is not None
+            and _SHA256.fullmatch(str(result.get("resume_intent_hash"))) is None
+        )
     ):
         raise LifecycleError("coding job lifecycle binding is malformed or stale")
     return result
@@ -312,7 +318,7 @@ class LifecycleStore:
             )
             try:
                 info = os.fstat(descriptor)
-                if info.st_uid in {0, os.geteuid()}:
+                if info.st_uid == os.geteuid():
                     os.fchown(descriptor, -1, self._gid())
                     os.fchmod(descriptor, 0o2770)
                     info = os.fstat(descriptor)
@@ -411,10 +417,11 @@ class LifecycleStore:
         self._prepare_root()
         path = self.root / (identity.removeprefix("coding:") + suffix)
         flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+        descriptor = -1
         try:
             descriptor = os.open(path, flags, 0o660)
             info = os.fstat(descriptor)
-            if info.st_uid in {0, os.geteuid()}:
+            if info.st_uid == os.geteuid():
                 os.fchown(descriptor, -1, self._gid())
                 os.fchmod(descriptor, 0o660)
                 info = os.fstat(descriptor)
@@ -427,9 +434,12 @@ class LifecycleStore:
                 raise LifecycleError("coding lifecycle lock ownership/mode is unsafe")
             return os.fdopen(descriptor, "a+")
         except LifecycleError:
-            os.close(descriptor)
+            if descriptor >= 0:
+                os.close(descriptor)
             raise
         except OSError as exc:
+            if descriptor >= 0:
+                os.close(descriptor)
             raise LifecycleError("coding lifecycle lock is unavailable") from exc
 
     def locked(self, identity: str):
@@ -522,6 +532,7 @@ def create(store: LifecycleStore, *, target: int | str,
                     "pending": False,
                     "published": False,
                     "retry_available": True,
+                    "next_retry_at": None,
                 },
                 "operator": {
                     "notification": None,
@@ -677,25 +688,33 @@ def _next_stage(record: dict[str, Any], stage: str) -> None:
         record["stage"] = STAGES[index]
         record["state"] = "RUNNING"
         return
-    acceptance = record["operator"]["acceptance"]
-    if acceptance == "REJECTED":
-        record["state"] = "REMEDIATION_REQUIRED"
-        record["failure"] = {
-            "stage": "operator_readback",
-            "reason": "operator rejected the exact candidate",
-        }
-    elif acceptance != "ACCEPTED":
-        record["state"] = "AWAITING_OPERATOR_ACCEPTANCE"
-    elif record["publication"].get("published") is not True:
-        record["state"] = "AWAITING_CONTEXT_PUBLICATION"
-    else:
-        record["state"] = "SUCCEEDED"
+    # Technical completion is truthful even when Context is unavailable and
+    # no authenticated operator-acceptance source exists.  Acceptance remains
+    # an independent PENDING projection; ordinary coding identities cannot
+    # manufacture it.
+    record["state"] = "TECHNICALLY_COMPLETE"
+
+
+def _publication_due(record: Mapping[str, Any], *, now: datetime | None = None) -> bool:
+    value = record.get("publication", {}).get("next_retry_at")
+    if value is None:
+        return True
+    try:
+        due = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise LifecycleError("terminal publication retry time is invalid") from exc
+    observed = now or datetime.now(timezone.utc)
+    if due.tzinfo is None or due.utcoffset() is None:
+        raise LifecycleError("terminal publication retry time is not timezone-aware")
+    return observed >= due
 
 
 def _publication_unavailable(
     record: dict[str, Any], result: Mapping[str, Any]
 ) -> None:
     attempts = int(record["publication"].get("attempts", 0)) + 1
+    delay = min(900, 30 * (2 ** min(attempts - 1, 5)))
+    retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
     record["publication"].update(
         {
             "attempted": True,
@@ -704,6 +723,7 @@ def _publication_unavailable(
             "published": False,
             "last_error": result.get("reason", "Context unavailable"),
             "retry_available": True,
+            "next_retry_at": retry_at.isoformat(),
         }
     )
     record["stages"]["terminal_publication"] = {
@@ -717,6 +737,8 @@ def _retry_publication(
     record: dict[str, Any], handlers: Mapping[str, StageHandler]
 ) -> None:
     if record["publication"].get("pending") is not True:
+        return
+    if not _publication_due(record):
         return
     handler = handlers.get("terminal_publication")
     if handler is None:
@@ -739,15 +761,9 @@ def _retry_publication(
             "published": True,
             "retry_available": False,
             "receipt_hash": result["receipt_hash"],
+            "next_retry_at": None,
         }
     )
-    if (
-        record.get("stage") == STAGES[-1]
-        and record.get("stages", {}).get(STAGES[-1], {}).get("outcome")
-        == "satisfied"
-        and record["operator"]["acceptance"] == "ACCEPTED"
-    ):
-        record["state"] = "SUCCEEDED"
 
 
 def advance(
@@ -762,19 +778,45 @@ def advance(
         record = store.get(identity)
         if record is None:
             raise LifecycleError("coding lifecycle does not exist")
+        original = _canonical(record)
         if record["state"] in TERMINAL:
+            if record.get("publication", {}).get("pending") and _publication_due(
+                record
+            ):
+                try:
+                    _retry_publication(record, handlers)
+                except LifecycleError as exc:
+                    _publication_unavailable(
+                        record,
+                        {
+                            "outcome": "publication_unavailable",
+                            "idempotency_key": stage_idempotency_key(
+                                record, "terminal_publication"
+                            ),
+                            "reason": str(exc),
+                        },
+                    )
+            if _canonical(record) == original:
+                return record
+            record["updated_at"] = _now()
+            return store.put(record)
+        if record["state"] == "RESUMABLE_PARTIAL":
             return record
-        if record["state"] == "RESUMABLE_PARTIAL" and not record.get(
-            "resume_requested"
-        ):
-            return record
-        record.pop("resume_requested", None)
         publication_retried = False
-        if record["publication"].get("pending"):
+        if record["publication"].get("pending") and _publication_due(record):
             try:
                 _retry_publication(record, handlers)
             except LifecycleError as exc:
-                record["publication"]["last_error"] = str(exc)
+                _publication_unavailable(
+                    record,
+                    {
+                        "outcome": "publication_unavailable",
+                        "idempotency_key": stage_idempotency_key(
+                            record, "terminal_publication"
+                        ),
+                        "reason": str(exc),
+                    },
+                )
             publication_retried = True
         while record["state"] not in TERMINAL:
             stage = record["stage"]
@@ -783,11 +825,7 @@ def advance(
             prior = record["stages"].get(stage)
             if isinstance(prior, dict) and prior.get("outcome") == "satisfied":
                 _next_stage(record, stage)
-                if record["state"] in {
-                    "AWAITING_OPERATOR_ACCEPTANCE",
-                    "AWAITING_CONTEXT_PUBLICATION",
-                    "SUCCEEDED",
-                }:
+                if record["state"] in TERMINAL:
                     break
                 continue
             if stage == "terminal_publication" and isinstance(prior, dict) and prior.get(
@@ -869,6 +907,7 @@ def advance(
                         "published": True,
                         "retry_available": False,
                         "receipt_hash": result["receipt_hash"],
+                        "next_retry_at": None,
                     }
                 )
             if stage == "operator_notification":
@@ -877,14 +916,15 @@ def advance(
                     "receipt_hash": result["receipt_hash"],
                 }
             _next_stage(record, stage)
-            if record["state"] in {
-                "AWAITING_OPERATOR_ACCEPTANCE",
-                "AWAITING_CONTEXT_PUBLICATION",
-                "SUCCEEDED",
-            }:
+            if record["state"] in TERMINAL:
                 break
         if publication_retried and record["publication"].get("pending"):
             record["publication"]["retry_available"] = True
+        candidate = {key: value for key, value in record.items() if key != "record_hash"}
+        before = json.loads(original)
+        before.pop("record_hash", None)
+        if candidate == before:
+            return record
         record["updated_at"] = _now()
         return store.put(record)
     finally:
@@ -894,25 +934,62 @@ def advance(
 def request_resume(
     store: LifecycleStore, identity: str, *, receipt: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Reopen the same partial lifecycle after exact ``tgw coding resume``."""
+    """Journal the exact resume intent before any queue dispatch can occur."""
 
     lock = store.locked(identity)
     try:
         record = store.get(identity)
         if record is None:
             raise LifecycleError("coding lifecycle does not exist")
+        if record.get("resume_intent") is not None:
+            return record
         if record["state"] != "RESUMABLE_PARTIAL":
             raise LifecycleError("coding lifecycle is not RESUMABLE_PARTIAL")
         value = dict(receipt)
-        if value.get("root_id") != identity or value.get("binding_hash") != record[
-            "binding"
-        ]["binding_hash"]:
+        required = {
+            "schema",
+            "root_id",
+            "binding_hash",
+            "todo_id",
+            "resume_of",
+            "resume_fingerprint",
+            "worktree",
+            "source_commit",
+            "source_tree",
+        }
+        if (
+            set(value) != required
+            or value.get("schema") != "tgw-local-coding-lifecycle-resume-intent/v1"
+            or value.get("root_id") != identity
+            or value.get("binding_hash") != record["binding"]["binding_hash"]
+            or value.get("todo_id") != int(record["target"])
+            or value.get("worktree") != record["binding"]["worktree"]
+            or value.get("source_commit") != record["binding"]["source_commit"]
+            or value.get("source_tree") != record["binding"]["source_tree"]
+            or _SHA256.fullmatch(str(value.get("resume_of", ""))) is None
+            or _SHA256.fullmatch(str(value.get("resume_fingerprint", ""))) is None
+        ):
             raise LifecycleError("coding lifecycle resume receipt binding mismatch")
-        record["resume_requested"] = {
-            "receipt": value,
-            "receipt_hash": _hash(value),
+        archived = {
+            "stages": record.get("stages", {}),
+            "effects": record.get("effects", {}),
+            "job_ids": record.get("job_ids", []),
+        }
+        record.setdefault("resume_history", []).append(
+            {**archived, "history_hash": _hash(archived)}
+        )
+        intent = {
+            **value,
             "requested_at": _now(),
         }
+        record["resume_intent"] = {
+            **intent,
+            "resume_intent_hash": _hash(intent),
+        }
+        record["stages"] = {}
+        record["effects"] = {}
+        record["job_ids"] = []
+        record["stage"] = "implementation"
         record["state"] = "WAITING"
         record.pop("failure", None)
         record["updated_at"] = _now()
@@ -926,12 +1003,8 @@ def record_operator_readback(
     identity: str,
     *,
     actor: str,
-    decision: str | None = None,
 ) -> dict[str, Any]:
-    """Record explicit notification readback and optional accept/reject decision."""
-
-    if decision not in {None, "accept", "reject"}:
-        raise LifecycleError("operator decision must be accept or reject")
+    """Record readback only; this ordinary surface never records acceptance."""
     if not isinstance(actor, str) or not actor:
         raise LifecycleError("operator readback actor is required")
     lock = store.locked(identity)
@@ -944,80 +1017,23 @@ def record_operator_readback(
             raise LifecycleError("operator notification has not been published")
         existing = record["operator"].get("readback")
         if isinstance(existing, Mapping):
-            old_decision = existing.get("decision")
-            if (
-                old_decision is not None
-                and old_decision != decision
-                and decision is not None
-            ):
-                raise LifecycleError("operator readback decision already differs")
-            if decision is None or old_decision == decision:
-                return record
+            return record
         unsigned = {
             "schema": "tgw-local-coding-operator-readback/v1",
             "root_id": identity,
             "binding_hash": record["binding"]["binding_hash"],
             "notification_receipt_hash": notification["receipt_hash"],
             "actor": actor,
-            "decision": decision,
             "observed_at": _now(),
         }
         readback = {**unsigned, "readback_hash": _hash(unsigned)}
         record["operator"]["readback"] = readback
-        if decision == "accept":
-            record["operator"]["acceptance"] = "ACCEPTED"
-        elif decision == "reject":
-            record["operator"]["acceptance"] = "REJECTED"
-        else:
-            record["operator"]["acceptance"] = "PENDING"
-        record["operator_acceptance"] = record["operator"]["acceptance"]
-        if record.get("stage") == STAGES[-1]:
-            record["state"] = "WAITING"
+        record["operator"]["acceptance"] = "PENDING"
+        record["operator_acceptance"] = "PENDING"
         record["updated_at"] = _now()
         return store.put(record)
     finally:
         lock.close()
-
-
-def spawn(identity: str, *, config_path: Path | str) -> int:
-    """Detach a recovery-capable local supervisor from the requesting client."""
-
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "tgw.development.coding_lifecycle",
-            "--resume",
-            identity,
-            "--config",
-            str(config_path),
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-    )
-    return process.pid
-
-
-def spawn_pending(
-    store: LifecycleStore, *, config_path: Path | str
-) -> list[dict[str, Any]]:
-    """Reconstruct supervision after Foreman/process/host restart."""
-
-    result = []
-    for record in store.records():
-        if record["state"] in TERMINAL:
-            continue
-        result.append(
-            {
-                "root_id": record["root_id"],
-                "pid": spawn(record["root_id"], config_path=config_path),
-            }
-        )
-    return result
 
 
 def run_supervisor(
@@ -1046,14 +1062,74 @@ def run_supervisor(
         owner.close()
 
 
+def run_managed_supervisor(
+    *,
+    config_path: Path | str,
+    poll_interval: float = 2.0,
+    once: bool = False,
+) -> list[dict[str, Any]]:
+    """Continuously reconstruct every lifecycle from journals after restart.
+
+    One systemd-managed process owns this loop.  It creates no child process,
+    does not rely on the Foreman timer's cgroup, and treats an unchanged poll as
+    observational so journals are not replaced/fsynced on a cadence.
+    """
+
+    from tgw.coding_cli import supervise
+    from tgw.development.local_workflow import load_config
+
+    config = load_config(config_path)
+    lifecycle_root = Path(config["coding"]["lifecycle_root"])
+    canary_gid = os.environ.get("TGW_CODING_DISPOSABLE_CANARY_GID")
+    group_gid = None
+    if canary_gid is not None:
+        temporary_root = Path(tempfile.gettempdir()).resolve()
+        try:
+            lifecycle_root.resolve().relative_to(temporary_root)
+        except ValueError as exc:
+            raise LifecycleError(
+                "disposable canary group override is outside the temp root"
+            ) from exc
+        if not once or not canary_gid.isdigit():
+            raise LifecycleError("disposable canary group override is invalid")
+        group_gid = int(canary_gid)
+    store = (
+        LifecycleStore(lifecycle_root)
+        if group_gid is None
+        else LifecycleStore(lifecycle_root, group_gid=group_gid)
+    )
+    observed: list[dict[str, Any]] = []
+    while True:
+        observed = []
+        for record in store.records():
+            pending_projection = record.get("publication", {}).get("pending") is True
+            if record["state"] in TERMINAL and not (
+                pending_projection and _publication_due(record)
+            ):
+                continue
+            result = supervise(record["root_id"], config_path=Path(config_path))
+            observed.append(
+                {"root_id": result["root_id"], "state": result["state"]}
+            )
+        if once:
+            return observed
+        time.sleep(max(0.05, poll_interval))
+
+
 def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume", required=True)
+    selected = parser.add_mutually_exclusive_group(required=True)
+    selected.add_argument("--resume")
+    selected.add_argument("--managed", action="store_true")
     parser.add_argument("--config", required=True)
+    parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    run_supervisor(args.resume, config_path=Path(args.config))
+    if args.managed:
+        run_managed_supervisor(config_path=Path(args.config), once=args.once)
+    else:
+        run_supervisor(args.resume, config_path=Path(args.config))
     return 0
 
 

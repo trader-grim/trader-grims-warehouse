@@ -65,10 +65,10 @@ _LEGACY_STATUS = coding_cli.status
 
 @mcp.tool()
 def tgw_coding_start(todo_id: int | str, source_commit: str = "") -> str:
-    """Create/reuse one detached durable Plan-bound coding lifecycle.
+    """Create/reuse one durable Plan-bound coding lifecycle.
 
-    The call returns after the root and supervisor are durable; the caller is
-    not required for subsequent stage or restart recovery.
+    The call returns after the root is durable; the continuously managed local
+    supervisor owns subsequent stage and host-restart recovery.
     """
     return _result(
         "start",
@@ -135,28 +135,6 @@ def tgw_coding_stop(job_id: str) -> str:
         "stop",
         coding_cli.stop,
         job_id,
-        config_path=_config_path(),
-    )
-
-
-@mcp.tool()
-def tgw_coding_operator_readback(root_id: str, decision: str = "") -> str:
-    """Durably record explicit readback and optional accept/reject decision."""
-
-    normalized = decision or None
-    if normalized not in {None, "accept", "reject"}:
-        return json.dumps({
-            "schema": "tgw-local-coding-mcp-error/v1",
-            "ok": False,
-            "operation": "operator-readback",
-            "error": "decision must be accept, reject, or empty",
-            "error_type": "ValueError",
-        }, sort_keys=True)
-    return _result(
-        "operator-readback",
-        coding_cli.operator_action,
-        root_id,
-        decision=normalized,
         config_path=_config_path(),
     )
 

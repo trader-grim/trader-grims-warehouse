@@ -1268,6 +1268,15 @@ def test_configured_worker_passes_exact_worktree_lease_to_runner(tmp_path, monke
 
 def test_automatic_worker_controller_path_passes_exact_closed_candidate(tmp_path, monkeypatch):
     from tgw.development.worktree_lease import exclusive_worktree_lease
+    from tgw.workers import coding
+
+    monkeypatch.setattr(
+        coding.grp,
+        "getgrnam",
+        lambda _name: type(
+            "TestGroup", (), {"gr_gid": os.getegid(), "gr_mem": ["codex"]}
+        )(),
+    )
 
     worktree = tmp_path / "worktree"
     _git_worktree(worktree)
@@ -1300,6 +1309,7 @@ def test_automatic_worker_controller_path_passes_exact_closed_candidate(tmp_path
         {"coding": {
             "commands": {"controller-verify": [sys.executable, "-m", "tgw.workers.controller_verify"]},
             "allowed_runners": [sys.executable],
+            "runner_state_root": str(tmp_path.parent / "runner-control"),
             "timeout_s": 60,
         }},
     )

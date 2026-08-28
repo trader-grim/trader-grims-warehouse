@@ -53,6 +53,12 @@ _CONTEXT_COLD_PROBE_LOCK = threading.RLock()
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 _CODING_RUNTIME_GROUP = "tgw-coders"
+_CODING_SUPPORT_ROOT_KEYS = (
+    "preservation_archive_root",
+    "runner_state_root",
+    "lifecycle_root",
+    "root_effect_root",
+)
 _CONTEXT_SNAPSHOT_MODE = 0o444
 _CONTEXT_PREFLIGHT_SNAPSHOT_MODE = 0o400
 _FORBIDDEN_CODING_DEPENDENCIES = (
@@ -66,7 +72,10 @@ _FORBIDDEN_CODING_DEPENDENCIES = (
 )
 _ACTIVE_CODING_UNITS = (
     "tgw-codex-implement-worker.service",
+    "tgw-claude-review-worker.service",
     "tgw-controller-verify-worker.service",
+    "tgw-coding-lifecycle-supervisor.service",
+    "tgw-coding-root-effect.service",
     "tgw-coding-local-foreman.timer",
 )
 _CODING_UNITS = (*_ACTIVE_CODING_UNITS, "tgw-coding-local-foreman.service")
@@ -118,6 +127,27 @@ _UNIT_ARGV = {
         "worker",
         "--queue",
         "controller-verify",
+    ),
+    "tgw-claude-review-worker.service": (
+        *_LOCAL_WORKFLOW_ARGV,
+        "worker",
+        "--queue",
+        "claude-review",
+    ),
+    "tgw-coding-lifecycle-supervisor.service": (
+        "/opt/TGW/.venvs/controller/bin/python3",
+        "-m",
+        "tgw.development.coding_lifecycle",
+        "--config",
+        "/opt/TGW/tgw-lib/config/tgw-coding-local.json",
+        "--managed",
+    ),
+    "tgw-coding-root-effect.service": (
+        "/opt/TGW/.venvs/controller/bin/python3",
+        "-m",
+        "tgw.development.coding_root_effect",
+        "--config",
+        "/opt/TGW/tgw-lib/config/tgw-coding-local.json",
     ),
     "tgw-coding-local-foreman.service": (*_LOCAL_WORKFLOW_ARGV, "foreman"),
 }
@@ -2801,7 +2831,23 @@ def _verify_release_tree(paths: DoctorPaths, desired: str, release: Path) -> dic
         mode, _kind, object_id = fields
         expected[relative] = (mode, object_id)
 
-    actual = {str(path.relative_to(release)) for path in release.rglob("*") if path.is_file() or path.is_symlink()}
+    release_manifest = release / ".release-manifest.json"
+    if release_manifest.exists():
+        try:
+            from tgw.release_installer import verify as verify_release_manifest
+
+            manifest_verification = verify_release_manifest(paths.runtime_root, desired)
+        except Exception as exc:
+            raise DoctorError(f"release materializer manifest is invalid: {exc}") from exc
+    else:
+        manifest_verification = None
+    materializer_metadata = {".release-manifest.json", ".runtime-manifest.json"}
+    actual = {
+        str(path.relative_to(release))
+        for path in release.rglob("*")
+        if (path.is_file() or path.is_symlink())
+        and str(path.relative_to(release)) not in materializer_metadata
+    }
     unsafe_paths: list[str] = []
     for path in release.rglob("*"):
         observed = path.stat(follow_symlinks=False)
@@ -2878,6 +2924,7 @@ def _verify_release_tree(paths: DoctorPaths, desired: str, release: Path) -> dic
         "tree": tree,
         "file_count": len(expected),
         "manifest_source": "git-ls-tree",
+        "release_materializer": manifest_verification,
         "trusted_owners": list(paths.trusted_release_owners),
     }
 
@@ -6101,9 +6148,24 @@ def _unit_destination_exact(paths: DoctorPaths, destination: Path, source: Path)
     )
 
 
-def repair_workers(paths: DoctorPaths) -> dict[str, Any]:
+def repair_workers(
+    paths: DoctorPaths, *, desired_commit: str | None = None
+) -> dict[str, Any]:
     _require_root()
-    desired, release, _task = _desired_runtime(paths)
+    if desired_commit is None:
+        desired, release, _task = _desired_runtime(paths)
+    else:
+        if _COMMIT.fullmatch(desired_commit) is None:
+            raise DoctorError("lifecycle worker repair commit is invalid")
+        desired = desired_commit
+        release = paths.runtime_root / "releases" / desired
+        head, tree, status = _source_identity(paths)
+        if status or head != desired or tree != _git(
+            paths.repository, "rev-parse", f"{desired}^{{tree}}"
+        ):
+            raise DoctorError(
+                "lifecycle worker repair requires the exact clean canonical candidate"
+            )
     _verify_release_tree(paths, desired, release)
     before = check_units(paths)
     installed: list[str] = []
@@ -7342,12 +7404,12 @@ def _coding_support_roots(paths: DoctorPaths, group_gid: int) -> dict[str, dict[
     coding = _coding_config(paths).get("coding", {})
     result: dict[str, dict[str, Any]] = {}
     worktree_device = paths.worktrees.stat(follow_symlinks=False).st_dev
-    configured = [coding.get(key) for key in ("preservation_archive_root", "runner_state_root")]
+    configured = [coding.get(key) for key in _CODING_SUPPORT_ROOT_KEYS]
     invalid_configuration = any(not isinstance(raw, str) or not raw.strip() or not Path(raw).is_absolute() for raw in configured)
-    duplicate = not invalid_configuration and len({str(Path(raw)) for raw in configured}) != 2
-    for key, raw in zip(("preservation_archive_root", "runner_state_root"), configured, strict=True):
+    duplicate = not invalid_configuration and len({str(Path(raw)) for raw in configured}) != len(_CODING_SUPPORT_ROOT_KEYS)
+    for key, raw in zip(_CODING_SUPPORT_ROOT_KEYS, configured, strict=True):
         if invalid_configuration or duplicate:
-            result[key] = {"path": str(raw or ""), "exact": False, "reason": "both distinct non-empty absolute support roots are required"}
+            result[key] = {"path": str(raw or ""), "exact": False, "reason": "all distinct non-empty absolute support roots are required"}
             continue
         path = Path(str(raw))
         exact = False
@@ -7357,11 +7419,19 @@ def _coding_support_roots(paths: DoctorPaths, group_gid: int) -> dict[str, dict[
             resolved = path.resolve(strict=True)
             owner = pwd.getpwuid(observed.st_uid)
             group = grp.getgrgid(group_gid)
-            owner_ok = observed.st_uid == 0 or owner.pw_gid == group_gid or owner.pw_name in group.gr_mem
+            root_effect = key == "root_effect_root"
+            owner_ok = (
+                observed.st_uid == 0
+                if root_effect
+                else observed.st_uid == 0
+                or owner.pw_gid == group_gid
+                or owner.pw_name in group.gr_mem
+            )
+            expected_mode = 0o3770 if root_effect else 0o2770
             exact = (path.is_absolute() and resolved == path and not path.is_symlink()
                      and stat.S_ISDIR(observed.st_mode) and observed.st_dev == worktree_device
                      and observed.st_gid == group_gid and owner_ok
-                     and stat.S_IMODE(observed.st_mode) == 0o2770
+                     and stat.S_IMODE(observed.st_mode) == expected_mode
                      and not resolved.is_relative_to(paths.worktrees.resolve(strict=True)))
             if not exact:
                 reason = "owner/group/mode/type/symlink/filesystem boundary differs"
@@ -7374,6 +7444,8 @@ def _coding_support_roots(paths: DoctorPaths, group_gid: int) -> dict[str, dict[
 def _provision_support_root(
     path: Path, *, group_gid: int, worktree_device: int,
     journal: list[dict[str, Any]],
+    target_uid: int | None = None,
+    target_mode: int = 0o2770,
 ) -> bool:
     """Provision one absolute root using only no-follow directory descriptors."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -7417,8 +7489,12 @@ def _provision_support_root(
                     ) != (bound.st_dev, bound.st_ino):
                         raise DoctorError("staged support directory changed before bind")
                     creation["descriptor"] = os.dup(child)
-                    os.fchown(child, -1, group_gid)
-                    os.fchmod(child, 0o2770)
+                    os.fchown(
+                        child,
+                        target_uid if final and target_uid is not None else -1,
+                        group_gid,
+                    )
+                    os.fchmod(child, target_mode if final else 0o2770)
                     os.fsync(child)
                     _support_root_checkpoint("bind-to-publish")
                     _rename_noreplace_at(parent, staging, parent, component)
@@ -7438,8 +7514,8 @@ def _provision_support_root(
         _verify_bound_directory(path, parent)
         if not target_created:
             journal.append({"kind": "metadata", "descriptor": os.dup(parent), "before": observed})
-        os.fchown(parent, -1, group_gid)
-        os.fchmod(parent, 0o2770)
+        os.fchown(parent, -1 if target_uid is None else target_uid, group_gid)
+        os.fchmod(parent, target_mode)
         os.fsync(parent)
         _verify_bound_directory(path, parent)
         return target_created
@@ -7471,21 +7547,23 @@ def _provision_coding_support_roots(
 ) -> list[str]:
     coding = _coding_config(paths).get("coding", {})
     changed: list[str] = []
-    configured = [coding.get(key) for key in ("preservation_archive_root", "runner_state_root")]
+    configured = [coding.get(key) for key in _CODING_SUPPORT_ROOT_KEYS]
     if (any(not isinstance(raw, str) or not raw.strip() or not Path(raw).is_absolute() for raw in configured)
-            or len({str(Path(raw)) for raw in configured}) != 2):
-        raise DoctorError("both distinct non-empty absolute coding support roots are required")
+            or len({str(Path(raw)) for raw in configured}) != len(_CODING_SUPPORT_ROOT_KEYS)):
+        raise DoctorError("all distinct non-empty absolute coding support roots are required")
     if journal is None:
         raise DoctorError("coding support-root provisioning requires a rollback journal")
     worktrees = paths.worktrees.resolve(strict=True)
     worktree_device = paths.worktrees.stat(follow_symlinks=False).st_dev
-    for key, raw in zip(("preservation_archive_root", "runner_state_root"), configured, strict=True):
+    for key, raw in zip(_CODING_SUPPORT_ROOT_KEYS, configured, strict=True):
         path = Path(str(raw))
         if not path.is_absolute() or path == Path(path.anchor) or path.is_relative_to(worktrees):
             raise DoctorError(f"coding {key} is not an absolute outside-worktree path")
         try:
             created = _provision_support_root(
                 path, group_gid=group_gid, worktree_device=worktree_device, journal=journal,
+                target_uid=0 if key == "root_effect_root" else None,
+                target_mode=0o3770 if key == "root_effect_root" else 0o2770,
             )
         except OSError as exc:
             raise DoctorError(f"coding {key} cannot be provisioned safely: {exc}") from exc

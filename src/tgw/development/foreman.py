@@ -826,6 +826,16 @@ def tick(
                     commit=candidate["head"],
                     tree=candidate["tree"],
                 )
+                if not chosen.todo.body.strip():
+                    raise ValueError(
+                        "independent review requires the bounded Todo task"
+                    )
+                payload_extra["task_spec"] = {
+                    "schema": "coding-task/v1",
+                    "todo_id": chosen.todo.todo_id,
+                    "agent": chosen.todo.agent,
+                    "body": chosen.todo.body,
+                }
             disposition = chosen.disposition
             if disposition.treatment_id == "codex-implement":
                 if not chosen.todo.body.strip():
