@@ -1691,6 +1691,239 @@ def test_context_staged_probe_pins_launcher_before_privilege_drop(
         os.close(descriptor)
 
 
+def test_context_staged_probe_launcher_close_failure_is_not_retried_and_preserves_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = tmp_path / "launcher"
+    launcher.write_text("#!/usr/bin/python3\n", encoding="utf-8")
+    launcher.chmod(0o555)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    snapshot.chmod(0o400)
+    target = SimpleNamespace(pw_name="codex", pw_uid=1004, pw_gid=1004)
+    coding_group = SimpleNamespace(gr_name="tgw-coders", gr_gid=983)
+    subreaper = {"value": 0}
+    launcher_fd: int | None = None
+    close_calls = 0
+    real_close = doctor_cli.os.close
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        doctor_cli.pwd, "getpwuid", lambda _uid: SimpleNamespace(pw_name="root")
+    )
+    monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _actor: target)
+    monkeypatch.setattr(doctor_cli.grp, "getgrnam", lambda _group: coding_group)
+    monkeypatch.setattr(doctor_cli.grp, "getgrgid", lambda _gid: coding_group)
+    monkeypatch.setattr(doctor_cli.os, "getgrouplist", lambda *_args: [1004, 983])
+    monkeypatch.setattr(
+        doctor_cli, "_linux_child_subreaper", lambda: subreaper["value"]
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_set_linux_child_subreaper",
+        lambda value: subreaper.__setitem__("value", value),
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_restore_linux_child_subreaper",
+        lambda value: subreaper.__setitem__("value", value),
+    )
+
+    def popen(command, **_kwargs):
+        nonlocal launcher_fd
+        launcher_fd = int(command[0].rsplit("/", 1)[-1])
+        raise RuntimeError("distinct spawn failure")
+
+    def close(descriptor: int) -> None:
+        nonlocal close_calls
+        if descriptor == launcher_fd:
+            close_calls += 1
+            real_close(descriptor)
+            raise OSError("distinct launcher close failure after release")
+        real_close(descriptor)
+
+    monkeypatch.setattr(doctor_cli.subprocess, "Popen", popen)
+    monkeypatch.setattr(doctor_cli.os, "close", close)
+    snapshot_descriptor = os.open(snapshot, os.O_RDONLY)
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            doctor_cli._probe_context_stdio(
+                launcher,
+                "codex",
+                {},
+                staged_snapshot_descriptor=snapshot_descriptor,
+                staged_snapshot_uid=os.getuid(),
+                staged_snapshot_gid=os.getgid(),
+            )
+        assert "distinct spawn failure" in str(caught.value)
+        assert "distinct launcher close failure after release" in str(caught.value)
+        assert close_calls == 1
+        assert launcher_fd is not None
+        with pytest.raises(OSError):
+            os.fstat(launcher_fd)
+    finally:
+        real_close(snapshot_descriptor)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="real privilege drop requires root")
+def test_context_staged_probe_executes_shebang_below_root_only_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    actor = "codex"
+    target = pwd.getpwnam(actor)
+    coding_gid = grp.getgrnam("tgw-coders").gr_gid
+    expected = {
+        "plan_commit": "a" * 40,
+        "source_commit": "b" * 40,
+        "source_tree": "c" * 40,
+        "snapshot_sha256": "sha256:" + "d" * 64,
+        "active_capability": "context-probe-test@1",
+        "active_treatment": "establish:context-probe-test@1",
+        "task": {"durable_history": []},
+    }
+    status = {
+        "ok": True,
+        "actor": actor,
+        "generation_status": {"state": "CURRENT"},
+        "current_context": dict(expected),
+    }
+    task = {
+        "actor": actor,
+        "receiver": actor,
+        "plan": {"approved_commit": expected["plan_commit"]},
+        "implementation": {
+            "development_source": {"commit": expected["source_commit"]}
+        },
+        "context": dict(expected),
+        "durable_history": [],
+    }
+    schema_fields = {
+        "tgw_context_status": (),
+        "tgw_context_current_task": (),
+        "tgw_context_bundle": ("task", "limit"),
+        "tgw_context_code_graph": ("operation", "query", "limit"),
+        "tgw_context_plan_graph": ("task", "receiver", "operation", "limit"),
+        "tgw_context_plan_source": (
+            "path",
+            "start_line",
+            "max_lines",
+            "authority",
+        ),
+        "tgw_context_onboarding": ("actor",),
+        "tgw_context_runbooks": (
+            "query",
+            "path",
+            "start_line",
+            "max_lines",
+            "limit",
+            "authority",
+        ),
+    }
+    tools = []
+    for name, fields in schema_fields.items():
+        schema = {
+            "type": "object",
+            "properties": {
+                field: {
+                    "type": "integer"
+                    if field in {"limit", "start_line", "max_lines"}
+                    else "string"
+                }
+                for field in fields
+            },
+        }
+        if name in {
+            "tgw_context_plan_graph",
+            "tgw_context_plan_source",
+            "tgw_context_onboarding",
+        }:
+            schema["required"] = [fields[0]]
+        tools.append(
+            {
+                "name": name,
+                "description": "read only",
+                "inputSchema": schema,
+                "outputSchema": {
+                    "properties": {"result": {"title": "Result", "type": "string"}},
+                    "required": ["result"],
+                    "title": f"{name}Output",
+                    "type": "object",
+                },
+            }
+        )
+    responses = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "serverInfo": {"name": "fixture", "version": "1"},
+            },
+        },
+        {"jsonrpc": "2.0", "id": 2, "result": {"tools": tools}},
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": {
+                "isError": False,
+                "content": [{"type": "text", "text": json.dumps(status)}],
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "result": {
+                "isError": False,
+                "content": [{"type": "text", "text": json.dumps(task)}],
+            },
+        },
+    ]
+    tmp_path.chmod(0o700)
+    launcher = tmp_path / "root-only-launcher"
+    launcher.write_text(
+        "#!/usr/bin/python3\n"
+        "import json,os,sys\n"
+        f"assert os.geteuid()=={target.pw_uid}\n"
+        f"assert os.getegid()=={target.pw_gid}\n"
+        f"assert os.getgroups()==[{coding_gid}]\n"
+        f"responses={responses!r}\n"
+        "for line in sys.stdin:\n"
+        " request=json.loads(line); request_id=request.get('id')\n"
+        " if request_id is not None: print(json.dumps(responses[request_id-1]),flush=True)\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o555)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    snapshot.chmod(0o400)
+    launcher_descriptors: list[int] = []
+    real_open = doctor_cli.os.open
+
+    def recording_open(path, *args, **kwargs):
+        descriptor = real_open(path, *args, **kwargs)
+        if Path(path) == launcher:
+            launcher_descriptors.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(doctor_cli.os, "open", recording_open)
+    snapshot_descriptor = real_open(snapshot, os.O_RDONLY)
+    try:
+        result = doctor_cli._probe_context_stdio(
+            launcher,
+            actor,
+            expected,
+            staged_snapshot_descriptor=snapshot_descriptor,
+        )
+        assert result["actor"] == actor
+        assert result["generation"] == "CURRENT"
+        assert len(launcher_descriptors) == 1
+        with pytest.raises(OSError):
+            os.fstat(launcher_descriptors[0])
+    finally:
+        os.close(snapshot_descriptor)
+
+
 @pytest.mark.skipif(os.geteuid() != 0, reason="real privilege drop requires root")
 def test_context_staged_probe_identity_traverses_real_selected_launcher_path() -> None:
     actor = "codex"

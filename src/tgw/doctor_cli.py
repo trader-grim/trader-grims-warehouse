@@ -1285,11 +1285,19 @@ def _probe_context_stdio_process(
                 raise DoctorError(
                     "Context staged cold preflight launcher identity differs"
                 )
-        except Exception:
+        except Exception as primary_failure:
             if staged_launcher_descriptor is not None:
-                os.close(staged_launcher_descriptor)
+                descriptor_to_close = staged_launcher_descriptor
                 staged_launcher_descriptor = None
-            raise
+                try:
+                    os.close(descriptor_to_close)
+                except Exception as cleanup_failure:
+                    raise _preserve_primary_with_cleanup_failure(
+                        primary_failure,
+                        cleanup_failure,
+                        resource="staged Context launcher descriptor",
+                    ).with_traceback(primary_failure.__traceback__)
+            raise primary_failure.with_traceback(primary_failure.__traceback__)
         command = [f"/proc/self/fd/{staged_launcher_descriptor}"]
         pass_fds = (staged_snapshot_descriptor, staged_launcher_descriptor)
 
@@ -1315,6 +1323,7 @@ def _probe_context_stdio_process(
     pending = bytearray()
     responses: dict[int, dict[str, Any]] = {}
     leader_returncode: int | None = None
+    primary_failure: Exception | None = None
     deadline = time.monotonic() + timeout
     work_deadline = deadline - min(0.5, max(0.1, timeout * 0.25))
 
@@ -1482,8 +1491,9 @@ def _probe_context_stdio_process(
             bufsize=0,
         )
         if staged_launcher_descriptor is not None:
-            os.close(staged_launcher_descriptor)
+            descriptor_to_close = staged_launcher_descriptor
             staged_launcher_descriptor = None
+            os.close(descriptor_to_close)
         assert process.stdin is not None
         assert process.stdout is not None
         assert process.stderr is not None
@@ -1521,11 +1531,15 @@ def _probe_context_stdio_process(
                 if stdin_open and set(responses) == {1, 2, 3, 4}:
                     process.stdin.close()
                     stdin_open = False
+    except Exception as exc:
+        primary_failure = exc
     finally:
         cleanup_failures: list[Exception] = []
         if staged_launcher_descriptor is not None:
+            descriptor_to_close = staged_launcher_descriptor
+            staged_launcher_descriptor = None
             try:
-                os.close(staged_launcher_descriptor)
+                os.close(descriptor_to_close)
             except Exception as exc:
                 cleanup_failures.append(exc)
         try:
@@ -1538,10 +1552,21 @@ def _probe_context_stdio_process(
             except Exception as exc:
                 cleanup_failures.append(exc)
         if cleanup_failures:
+            cleanup_failure = DoctorError(
+                "; ".join(str(item) for item in cleanup_failures)
+            )
+            if primary_failure is not None:
+                raise _preserve_primary_with_cleanup_failure(
+                    primary_failure,
+                    cleanup_failure,
+                    resource="installed Context MCP cold probe",
+                ).with_traceback(primary_failure.__traceback__)
             raise DoctorError(
                 "installed Context MCP cold probe cleanup failed: "
                 + "; ".join(str(item) for item in cleanup_failures)
             ) from cleanup_failures[0]
+    if primary_failure is not None:
+        raise primary_failure.with_traceback(primary_failure.__traceback__)
     if leader_returncode:
         detail = stderr.decode(errors="replace").strip()
         raise DoctorError(
