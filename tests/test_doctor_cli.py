@@ -1660,6 +1660,7 @@ def test_context_staged_probe_pins_launcher_before_privilege_drop(
         observed["command"] = command
         observed["pass_fds"] = kwargs["pass_fds"]
         observed["preexec_fn"] = kwargs["preexec_fn"]
+        observed["cwd"] = kwargs["cwd"]
         launcher_fd = int(command[0].rsplit("/", 1)[-1])
         observed["launcher_fd"] = launcher_fd
         assert os.pread(launcher_fd, 2, 0) == b"#!"
@@ -1685,6 +1686,7 @@ def test_context_staged_probe_pins_launcher_before_privilege_drop(
             observed["launcher_fd"],
         )
         assert callable(observed["preexec_fn"])
+        assert observed["cwd"] == "/"
         with pytest.raises(OSError):
             os.fstat(observed["launcher_fd"])
     finally:
@@ -1884,9 +1886,11 @@ def test_context_staged_probe_executes_shebang_below_root_only_parent(
     launcher.write_text(
         "#!/usr/bin/python3\n"
         "import json,os,sys\n"
+        "from pathlib import Path\n"
         f"assert os.geteuid()=={target.pw_uid}\n"
         f"assert os.getegid()=={target.pw_gid}\n"
         f"assert os.getgroups()==[{coding_gid}]\n"
+        "assert not Path('.env').is_file()\n"
         f"responses={responses!r}\n"
         "for line in sys.stdin:\n"
         " request=json.loads(line); request_id=request.get('id')\n"

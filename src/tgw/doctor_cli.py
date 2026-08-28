@@ -1484,6 +1484,7 @@ def _probe_context_stdio_process(
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            cwd="/",
             env=environment,
             pass_fds=pass_fds,
             preexec_fn=child_setup,
