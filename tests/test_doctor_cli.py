@@ -132,6 +132,16 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         "systemd/tgw-controller-verify-worker.service": "[Service]\nExecStart=/bin/true\n",
         "systemd/tgw-coding-lifecycle-supervisor.service": "[Service]\nExecStart=/bin/true\n",
         "systemd/tgw-coding-root-effect.service": "[Service]\nExecStart=/bin/true\n",
+        "systemd/tgw-coding-runtime-restart.path": "[Path]\nPathChanged=/tmp/restart-request\n",
+        "systemd/tgw-coding-runtime-restart.service": (
+            "[Service]\nType=oneshot\n"
+            "ExecStart=/bin/systemctl try-restart "
+            "tgw-codex-implement-worker.service "
+            "tgw-claude-review-worker.service "
+            "tgw-controller-verify-worker.service "
+            "tgw-coding-lifecycle-supervisor.service "
+            "tgw-coding-root-effect.service\n"
+        ),
         "systemd/tgw-coding-local-foreman.timer": "[Timer]\nOnBootSec=1s\n",
         "systemd/tgw-coding-local-foreman.service": "[Service]\nType=oneshot\nExecStart=/bin/true\n",
         "scripts/tgw_context_debian_stdio.py": (f"#!/bin/sh\n# runtime snapshot: {snapshot_fixture_path}\nexit 0\n"),
@@ -1918,10 +1928,14 @@ def test_unix_git_repair_recurses_into_configured_linked_worktrees(tmp_path: Pat
         worktrees=worktrees,
         coding_config=tmp_path / "coding.json",
         receipts=tmp_path / "receipts",
+        coding_root_effect_uid=os.geteuid(),
+        runtime_root=tmp_path / "support/runtime",
     )
     _write_json(paths.coding_config, {"schema": "tgw-local-coding-workflow/v1", "coding": {
         "preservation_archive_root": str(tmp_path / "support/archive"),
         "runner_state_root": str(tmp_path / "support/runner"),
+        "lifecycle_root": str(tmp_path / "support/lifecycle"),
+        "root_effect_root": str(tmp_path / "support/root-effect"),
     }})
     reports = iter(({"state": "FAIL"}, {"state": "PASS"}))
 
@@ -1959,10 +1973,14 @@ def _unix_repair_transaction_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyP
         worktrees=worktrees,
         coding_config=tmp_path / "coding.json",
         receipts=tmp_path / "receipts",
+        coding_root_effect_uid=os.geteuid(),
+        runtime_root=tmp_path / "support/runtime",
     )
     _write_json(paths.coding_config, {"schema": "tgw-local-coding-workflow/v1", "coding": {
         "preservation_archive_root": str(tmp_path / "support/archive"),
         "runner_state_root": str(tmp_path / "support/runner"),
+        "lifecycle_root": str(tmp_path / "support/lifecycle"),
+        "root_effect_root": str(tmp_path / "support/root-effect"),
     }})
     reports = iter(({"state": "FAIL"}, {"state": "PASS"}))
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)

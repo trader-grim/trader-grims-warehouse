@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch for a selected TGW local coding runtime
+ConditionPathIsDirectory=/opt/TGW/var/tgw-coders/coding-root-effects
+
+[Path]
+PathChanged=/opt/TGW/var/tgw-coders/coding-root-effects/.restart-request
+Unit=tgw-coding-runtime-restart.service
+
+[Install]
+WantedBy=multi-user.target

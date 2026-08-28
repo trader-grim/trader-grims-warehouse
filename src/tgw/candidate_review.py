@@ -73,6 +73,9 @@ def generate_review_packet(
 ) -> dict[str, Any]:
     """Generate an executable packet or an exact provider-selection HOLD."""
 
+    identity = candidate_identity(manifest)
+    if not snapshot_ref.startswith("file:") or not _SHA256.fullmatch(snapshot_hash):
+        raise CandidateReviewError("candidate review snapshot binding is invalid")
     selection = select_provider(
         registry,
         health,
@@ -82,54 +85,6 @@ def generate_review_packet(
         independent_from=independent_from,
     )
     executable = selection["status"] == "SELECTED"
-    return build_executable_review_packet(
-        manifest,
-        snapshot_ref=snapshot_ref,
-        snapshot_hash=snapshot_hash,
-        selected_provider=selection.get("selected_provider"),
-        receiver_profile=selection.get("receiver_profile"),
-        runner_argv=selection.get("runner_argv", []),
-        hold=(
-            None
-            if executable
-            else {
-                "code": "REVIEW_PROVIDER_UNAVAILABLE",
-                "considered": selection["considered"],
-            }
-        ),
-    )
-
-
-def build_executable_review_packet(
-    manifest: Mapping[str, Any],
-    *,
-    snapshot_ref: str,
-    snapshot_hash: str,
-    selected_provider: str | None,
-    receiver_profile: Mapping[str, Any] | None,
-    runner_argv: Sequence[str],
-    hold: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build the existing provider-neutral packet from an already bound selection.
-
-    Protected local-review preparation uses the same packet contract after
-    Doctor has pinned the provider identity.  Provider selection and request
-    execution remain separate; this helper only performs the common immutable
-    packet construction.
-    """
-
-    identity = candidate_identity(manifest)
-    if not snapshot_ref.startswith("file:") or not _SHA256.fullmatch(snapshot_hash):
-        raise CandidateReviewError("candidate review snapshot binding is invalid")
-    executable = hold is None
-    if executable and (
-        not isinstance(selected_provider, str)
-        or not selected_provider
-        or not isinstance(receiver_profile, Mapping)
-        or not runner_argv
-        or not all(isinstance(item, str) for item in runner_argv)
-    ):
-        raise CandidateReviewError("candidate review provider binding is invalid")
     unsigned = {
         "schema": PACKET_SCHEMA,
         "status": "EXECUTABLE" if executable else "HOLD",
@@ -152,10 +107,12 @@ def build_executable_review_packet(
             "source_mutation": "forbidden",
             "authority_broadening": "forbidden",
         },
-        "selected_provider": selected_provider,
-        "receiver_profile": dict(receiver_profile) if receiver_profile else None,
-        "runner_argv": list(runner_argv),
-        "hold": dict(hold) if hold is not None else None,
+        "selected_provider": selection.get("selected_provider"),
+        "receiver_profile": selection.get("receiver_profile"),
+        "runner_argv": selection.get("runner_argv", []),
+        "hold": None
+        if executable
+        else {"code": "REVIEW_PROVIDER_UNAVAILABLE", "considered": selection["considered"]},
     }
     return {**unsigned, "packet_hash": _hash(unsigned)}
 

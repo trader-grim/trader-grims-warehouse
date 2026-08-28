@@ -1,10 +1,10 @@
-"""Fixed-schema root consumer for local coding materialization and verification.
+"""Fixed-schema local materializer for the Unix-user coding workflow.
 
 Ordinary ``tgw-coders`` publish one self-hashed request derived from the
-read-only lifecycle journal.  This root service accepts no command, provider,
-approval, admission, or remote-effect fields.  Every step is reconstructed
-from the candidate and the source-defined Doctor/release primitives, and each
-step is replay-safe after a process or host restart.
+read-only lifecycle journal. The consumer runs as the ordinary ``db`` account,
+never as root, and accepts no command, provider, approval, admission, or remote
+effect fields. It can only materialize and select the local development
+runtime. A static systemd path unit performs the fixed worker restart.
 """
 
 from __future__ import annotations
@@ -25,20 +25,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from tgw.candidate_receipt_sink import (
-    CandidateReceiptSinkError,
-    PinnedCandidateEvidenceDescriptor,
-    PinnedGitReceiptSink,
-    validate_receipt_sink_descriptor,
-    verify_governed_execution_bundle,
-)
-from tgw.development.coding_lifecycle import LifecycleError, LifecycleStore, job_binding
-from tgw.development.coding_review import (
-    DEFAULT_PROTECTED_REVIEW_CONFIG,
-    load_protected_review_config,
-    validate_review_artifact,
-)
-from tgw.development.coding_review_protection import prepare_governed_request
+from tgw.development.coding_lifecycle import LifecycleError, LifecycleStore
+from tgw.development.coding_review import validate_review_artifact
+from tgw.protected_git import protected_git_command, protected_git_environment
 from tgw.release_installer import (
     _select as select_fixed_local,  # the fixed CAS primitive; never admission
 )
@@ -50,8 +39,6 @@ RESPONSE_SCHEMA = "tgw-local-coding-root-effect-response/v1"
 STATE_SCHEMA = "tgw-local-coding-root-effect-state/v1"
 PROJECTION_SCHEMA = "tgw-local-coding-context-projection-request/v1"
 PROJECTION_RESPONSE_SCHEMA = "tgw-local-coding-context-projection-response/v1"
-PREPARATION_SCHEMA = "tgw-local-coding-review-preparation-request/v1"
-PREPARATION_RESPONSE_SCHEMA = "tgw-local-coding-review-preparation-response/v1"
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _ROOT = re.compile(r"coding:[0-9a-f]{64}\Z")
@@ -76,10 +63,6 @@ class RootEffectError(RuntimeError):
     """A root request or its persisted effect state is unsafe."""
 
 
-class ProtectedReviewEvidenceError(RootEffectError):
-    """Protected governed-review evidence is absent or does not bind."""
-
-
 @dataclass(frozen=True)
 class RootEffectPaths:
     request_root: Path
@@ -87,12 +70,11 @@ class RootEffectPaths:
     repository: Path
     runtime_root: Path
     coding_config: Path
-    protected_review_config: Path = DEFAULT_PROTECTED_REVIEW_CONFIG
     context_task: Path = Path(
         "/opt/TGW/tgw-lib/context-input/current-task.json"
     )
     group_gid: int | None = None
-    root_uid: int = 0
+    root_uid: int = os.geteuid()
 
     @classmethod
     def from_config(cls, path: Path | str) -> "RootEffectPaths":
@@ -106,8 +88,6 @@ class RootEffectPaths:
             repository=Path(coding["repository_root"]),
             runtime_root=Path(coding["runtime_root"]),
             coding_config=Path(path),
-            # Candidate source cannot redirect the root-side review trust root.
-            protected_review_config=DEFAULT_PROTECTED_REVIEW_CONFIG,
         )
 
 
@@ -260,180 +240,6 @@ def _group_gid(paths: RootEffectPaths) -> int:
         raise RootEffectError("tgw-coders group is unavailable") from exc
 
 
-def verify_protected_review_evidence(
-    paths: RootEffectPaths,
-    request: Mapping[str, Any],
-    record: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Verify exact independent-review evidence outside coding-group state.
-
-    Lifecycle documents and root-effect requests are ordinary-user triggers.
-    This protected, independently pinned governed receipt is the only review
-    evidence the privileged consumer accepts before candidate bytes are used.
-    """
-
-    from tgw.context_generation_status import (
-        ContextGenerationStatusError,
-        _protected_directory,
-        _protected_json,
-    )
-
-    try:
-        configuration = load_protected_review_config(
-            paths.protected_review_config,
-            candidate_repository=paths.repository,
-            trusted_uid=paths.root_uid,
-        )
-        published = configuration["execution_evidence_pin_source"]
-        _protected_directory(
-            published.parent,
-            "coding protected-review execution evidence publication parent",
-            paths.root_uid,
-        )
-        published_value = _protected_json(
-            published,
-            "coding protected-review execution evidence publication",
-            paths.root_uid,
-        )
-        validate_receipt_sink_descriptor(published_value)
-        execution_config = configuration["execution_evidence_sink_config"]
-        try:
-            installed_execution = _protected_json(
-                execution_config,
-                "coding protected-review execution evidence binding",
-                paths.root_uid,
-            )
-        except ContextGenerationStatusError:
-            installed_execution = None
-        if installed_execution != published_value:
-            if os.geteuid() != paths.root_uid:
-                raise ProtectedReviewEvidenceError(
-                    "protected execution evidence binding requires root refresh"
-                )
-            from tgw.development.coding_review_protection import _atomic_root_json
-
-            _atomic_root_json(execution_config, published_value, mode=0o400)
-        protected_values: dict[str, dict[str, Any]] = {}
-        for name in (
-            "candidate_evidence_descriptor_config",
-            "execution_evidence_sink_config",
-        ):
-            configured = configuration[name]
-            _protected_directory(
-                configured.parent,
-                f"coding protected-review {name} parent",
-                paths.root_uid,
-            )
-            protected_values[name] = _protected_json(
-                configured,
-                f"coding protected-review {name}",
-                paths.root_uid,
-            )
-        descriptor = PinnedCandidateEvidenceDescriptor(
-            protected_values["candidate_evidence_descriptor_config"],
-            candidate_repository=paths.repository,
-        )
-        execution_sink = PinnedGitReceiptSink(
-            protected_values["execution_evidence_sink_config"],
-            candidate_repository=paths.repository,
-        )
-        verified = verify_governed_execution_bundle(
-            execution_sink,
-            candidate_evidence_descriptor=descriptor,
-            source_commit=str(request["candidate_commit"]),
-            source_tree=str(request["candidate_tree"]),
-            plan_commit=str(request["plan_commit"]),
-            role="independent-review",
-        )
-    except (
-        CandidateReceiptSinkError,
-        ContextGenerationStatusError,
-        OSError,
-        ReviewRunnerError,
-        ValueError,
-    ) as exc:
-        raise ProtectedReviewEvidenceError(
-            "exact protected governed independent-review evidence is unavailable"
-        ) from exc
-
-    role_receipt = verified["role_receipt"]
-    governed_receipt = verified["receipt"]
-    card = verified["card"]
-    card_bindings = card.get("bindings")
-    if (
-        not isinstance(card_bindings, Mapping)
-        or card.get("role") != "independent-review"
-        or card.get("plan_commit") != request.get("plan_commit")
-        or card.get("solution_id") != request.get("solution_hash")
-        or descriptor.w06_plan_materialization_pin.get("plan_source", {}).get(
-            "commit"
-        )
-        != request.get("plan_commit")
-    ):
-        raise ProtectedReviewEvidenceError(
-            "protected governed review Plan/card binding is incomplete"
-        )
-    execution_artifacts = [
-        artifact
-        for artifact in role_receipt.get("artifacts", [])
-        if isinstance(artifact, Mapping)
-        and artifact.get("kind") == "governed_review_execution"
-        and set(artifact) == {"kind", "execution_hash"}
-    ]
-    if (
-        len(execution_artifacts) != 1
-        or _SHA256.fullmatch(
-            str(execution_artifacts[0].get("execution_hash", ""))
-        )
-        is None
-    ):
-        raise ProtectedReviewEvidenceError(
-            "protected governed review execution identity is incomplete"
-        )
-
-    review_receipt = (
-        record.get("effects", {}).get("review", {}).get("receipt", {})
-    )
-    review_result = review_receipt.get("result")
-    if not isinstance(review_result, Mapping):
-        raise ProtectedReviewEvidenceError(
-            "lifecycle governed-review projection is absent"
-        )
-    try:
-        projected = validate_review_artifact(
-            review_result,
-            payload=review_result,
-            worktree=Path(str(record.get("binding", {}).get("worktree", ""))),
-            expected_job_id=str(review_receipt.get("job_id", "")),
-        )["protected_review"]
-    except (OSError, ReviewRunnerError, ValueError) as exc:
-        raise ProtectedReviewEvidenceError(
-            "lifecycle governed-review projection is invalid"
-        ) from exc
-    if (
-        projected.get("execution_hash")
-        != execution_artifacts[0]["execution_hash"]
-        or projected.get("role_receipt_hash")
-        != role_receipt.get("receipt_hash")
-        or projected.get("governed_bundle_hash") != verified.get("bundle_hash")
-    ):
-        raise ProtectedReviewEvidenceError(
-            "lifecycle review projection differs from protected governed evidence"
-        )
-    unsigned = {
-        "schema": "tgw-local-coding-protected-review-evidence/v1",
-        "role": "independent-review",
-        "candidate_commit": request["candidate_commit"],
-        "candidate_tree": request["candidate_tree"],
-        "plan_commit": request["plan_commit"],
-        "governed_bundle_hash": verified["bundle_hash"],
-        "candidate_receipt_hash": governed_receipt["receipt_hash"],
-        "role_receipt_hash": role_receipt["receipt_hash"],
-        "execution_hash": execution_artifacts[0]["execution_hash"],
-    }
-    return {**unsigned, "protected_review_hash": _hash(unsigned)}
-
-
 def _safe_root(root: Path, *, group_gid: int, root_uid: int = 0) -> None:
     if not root.exists():
         raise RootEffectError("root effect directory has not been provisioned by Doctor")
@@ -498,229 +304,6 @@ def response_path(paths: RootEffectPaths, root_id: str) -> Path:
     if _ROOT.fullmatch(root_id) is None:
         raise RootEffectError("root effect identity is invalid")
     return paths.request_root / f"{root_id.removeprefix('coding:')}.response.json"
-
-
-def preparation_path(paths: RootEffectPaths, root_id: str) -> Path:
-    if _ROOT.fullmatch(root_id) is None:
-        raise RootEffectError("review preparation identity is invalid")
-    return paths.request_root / (
-        f"{root_id.removeprefix('coding:')}.review-preparation-request.json"
-    )
-
-
-def preparation_response_path(paths: RootEffectPaths, root_id: str) -> Path:
-    if _ROOT.fullmatch(root_id) is None:
-        raise RootEffectError("review preparation identity is invalid")
-    return paths.request_root / (
-        f"{root_id.removeprefix('coding:')}.review-preparation-response.json"
-    )
-
-
-def build_review_preparation_request(
-    record: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Build an ordinary trigger containing no protected path or result field."""
-
-    binding = record.get("binding", {})
-    candidate = record.get("effects", {}).get("candidate", {}).get("receipt", {})
-    lifecycle = job_binding(record)
-    unsigned = {
-        "schema": PREPARATION_SCHEMA,
-        "root_id": record.get("root_id"),
-        "binding_hash": binding.get("binding_hash"),
-        "job_binding_hash": lifecycle.get("job_binding_hash"),
-        "card_idempotency_key": binding.get("card_idempotency_key"),
-        "plan_commit": binding.get("plan_commit"),
-        "solution_hash": binding.get("solution_hash"),
-        "closure_hash": binding.get("closure_hash"),
-        "candidate_commit": candidate.get("commit"),
-        "candidate_tree": candidate.get("tree"),
-        "candidate_receipt_hash": _stage_hash(record, "candidate"),
-    }
-    _assert_no_forbidden(unsigned)
-    return {**unsigned, "preparation_hash": _hash(unsigned)}
-
-
-def validate_review_preparation_request(
-    value: object, *, store: LifecycleStore
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    if not isinstance(value, Mapping):
-        raise RootEffectError("review preparation request is not an object")
-    request = dict(value)
-    _assert_no_forbidden(request)
-    required = {
-        "schema",
-        "root_id",
-        "binding_hash",
-        "job_binding_hash",
-        "card_idempotency_key",
-        "plan_commit",
-        "solution_hash",
-        "closure_hash",
-        "candidate_commit",
-        "candidate_tree",
-        "candidate_receipt_hash",
-        "preparation_hash",
-    }
-    unsigned = {
-        key: item for key, item in request.items() if key != "preparation_hash"
-    }
-    if (
-        set(request) != required
-        or request.get("schema") != PREPARATION_SCHEMA
-        or request.get("preparation_hash") != _hash(unsigned)
-        or _ROOT.fullmatch(str(request.get("root_id", ""))) is None
-        or any(
-            _COMMIT.fullmatch(str(request.get(field, ""))) is None
-            for field in ("plan_commit", "candidate_commit", "candidate_tree")
-        )
-        or any(
-            _SHA256.fullmatch(str(request.get(field, ""))) is None
-            for field in (
-                "binding_hash",
-                "job_binding_hash",
-                "card_idempotency_key",
-                "solution_hash",
-                "closure_hash",
-                "candidate_receipt_hash",
-            )
-        )
-    ):
-        raise RootEffectError("review preparation request schema/hash is invalid")
-    record = store.get(str(request["root_id"]))
-    if record is None or build_review_preparation_request(record) != request:
-        raise RootEffectError("review preparation differs from lifecycle candidate")
-    return request, record
-
-
-def ensure_review_preparation_request(
-    paths: RootEffectPaths, record: Mapping[str, Any]
-) -> dict[str, Any]:
-    request = build_review_preparation_request(record)
-    _atomic(
-        preparation_path(paths, str(request["root_id"])),
-        request,
-        replace=False,
-        group_gid=_group_gid(paths),
-        directory_uid=paths.root_uid,
-    )
-    return request
-
-
-def read_review_preparation_response(
-    paths: RootEffectPaths, request: Mapping[str, Any]
-) -> dict[str, Any] | None:
-    value = _root_document_or_absent(
-        paths, preparation_response_path(paths, str(request["root_id"]))
-    )
-    if value is None:
-        return None
-    unsigned = {key: item for key, item in value.items() if key != "response_hash"}
-    try:
-        expires = datetime.fromisoformat(
-            str(value.get("expires_at", "")).replace("Z", "+00:00")
-        )
-    except ValueError as exc:
-        raise RootEffectError("review preparation response time is invalid") from exc
-    if (
-        value.get("schema") != PREPARATION_RESPONSE_SCHEMA
-        or value.get("status") != "PREPARED"
-        or value.get("root_id") != request.get("root_id")
-        or value.get("binding_hash") != request.get("binding_hash")
-        or value.get("preparation_hash") != request.get("preparation_hash")
-        or value.get("candidate_commit") != request.get("candidate_commit")
-        or value.get("candidate_tree") != request.get("candidate_tree")
-        or value.get("plan_commit") != request.get("plan_commit")
-        or value.get("response_hash") != _hash(unsigned)
-        or any(
-            _SHA256.fullmatch(str(value.get(field, ""))) is None
-            for field in ("request_sha256", "snapshot_hash", "card_hash", "packet_hash")
-        )
-        or expires.tzinfo is None
-        or expires.utcoffset() is None
-    ):
-        raise RootEffectError("review preparation response binding is invalid")
-    if datetime.now(timezone.utc) + timedelta(seconds=30) >= expires:
-        return None
-    return value
-
-
-def process_review_preparation(
-    paths: RootEffectPaths,
-    value: object,
-    *,
-    store: LifecycleStore | None = None,
-    preparer: Callable[..., Mapping[str, Any]] = prepare_governed_request,
-) -> dict[str, Any]:
-    journal = store or LifecycleStore(
-        paths.lifecycle_root, group_gid=_group_gid(paths)
-    )
-    request, _record = validate_review_preparation_request(value, store=journal)
-    prior = read_review_preparation_response(paths, request)
-    if prior is not None:
-        return prior
-    configuration = load_protected_review_config(
-        paths.protected_review_config,
-        candidate_repository=paths.repository,
-        trusted_uid=paths.root_uid,
-    )
-    prepared = dict(
-        preparer(
-            repository=paths.repository,
-            candidate_commit=str(request["candidate_commit"]),
-            candidate_tree=str(request["candidate_tree"]),
-            plan_commit=str(request["plan_commit"]),
-            solution_hash=str(request["solution_hash"]),
-            closure_hash=str(request["closure_hash"]),
-            profile_path=configuration["request_profile_config"],
-            candidate_descriptor_path=configuration[
-                "candidate_evidence_descriptor_config"
-            ],
-            request_root=configuration["request_root"],
-            snapshot_root=configuration["snapshot_root"],
-            resource_registry_root=configuration["resource_registry_root"],
-            broker_grant_root=configuration["broker_grant_root"],
-            credential_paths={
-                "context": configuration["context_credential_config"],
-                "evidence": configuration["evidence_credential_config"],
-                "resource": configuration["resource_credential_config"],
-                "broker": configuration["broker_credential_config"],
-            },
-            trusted_uid=paths.root_uid,
-        )
-    )
-    if set(prepared) != {
-        "request_path",
-        "request_sha256",
-        "snapshot",
-        "snapshot_hash",
-        "expires_at",
-        "card_hash",
-        "packet_hash",
-    }:
-        raise RootEffectError("protected review preparer returned incomplete evidence")
-    unsigned = {
-        "schema": PREPARATION_RESPONSE_SCHEMA,
-        "status": "PREPARED",
-        "root_id": request["root_id"],
-        "binding_hash": request["binding_hash"],
-        "preparation_hash": request["preparation_hash"],
-        "candidate_commit": request["candidate_commit"],
-        "candidate_tree": request["candidate_tree"],
-        "plan_commit": request["plan_commit"],
-        **prepared,
-    }
-    response = {**unsigned, "response_hash": _hash(unsigned)}
-    _atomic(
-        preparation_response_path(paths, str(request["root_id"])),
-        response,
-        replace=True,
-        group_gid=_group_gid(paths),
-        mode=0o640,
-        owner_uid=paths.root_uid,
-        directory_uid=paths.root_uid,
-    )
-    return response
 
 
 def projection_path(paths: RootEffectPaths, root_id: str) -> Path:
@@ -943,8 +526,6 @@ def read_response(
     ):
         raise RootEffectError("root effect response binding is invalid")
     for key in (
-        "protected_review_receipt_hash",
-        "governed_review_bundle_hash",
         "materialization_receipt_hash",
         "selection_receipt_hash",
         "workers_receipt_hash",
@@ -958,11 +539,12 @@ def read_response(
 
 def _git(paths: RootEffectPaths, *args: str) -> str:
     result = subprocess.run(
-        ["git", "-c", f"safe.directory={paths.repository.resolve()}", *args],
+        protected_git_command(paths.repository, *args),
         cwd=paths.repository,
         check=False,
         text=True,
         capture_output=True,
+        env=dict(protected_git_environment()),
     )
     if result.returncode:
         raise RootEffectError(result.stderr[-300:] or "root effect Git probe failed")
@@ -970,13 +552,10 @@ def _git(paths: RootEffectPaths, *args: str) -> str:
 
 
 def _write_state(paths: RootEffectPaths, request: Mapping[str, Any], stage: str) -> None:
-    request_identity = request.get("request_hash", request.get("preparation_hash"))
-    if _SHA256.fullmatch(str(request_identity or "")) is None:
-        raise RootEffectError("root effect state request identity is invalid")
     unsigned = {
         "schema": STATE_SCHEMA,
         "root_id": request["root_id"],
-        "request_hash": request_identity,
+        "request_hash": request["request_hash"],
         "stage": stage,
     }
     path = paths.request_root / f"{str(request['root_id']).removeprefix('coding:')}.state.json"
@@ -1085,51 +664,6 @@ def _runtime_canary(paths: RootEffectPaths, root_id: str) -> dict[str, Any]:
 def _default_effects(
     paths: RootEffectPaths, request: Mapping[str, Any]
 ) -> dict[str, Any]:
-    protected_review = request.get("_protected_review")
-    if (
-        not isinstance(protected_review, Mapping)
-        or set(protected_review)
-        != {
-            "schema",
-            "role",
-            "candidate_commit",
-            "candidate_tree",
-            "plan_commit",
-            "governed_bundle_hash",
-            "candidate_receipt_hash",
-            "role_receipt_hash",
-            "execution_hash",
-            "protected_review_hash",
-        }
-        or protected_review.get("schema")
-        != "tgw-local-coding-protected-review-evidence/v1"
-        or protected_review.get("role") != "independent-review"
-        or protected_review.get("candidate_commit")
-        != request.get("candidate_commit")
-        or protected_review.get("candidate_tree") != request.get("candidate_tree")
-        or protected_review.get("plan_commit") != request.get("plan_commit")
-        or any(
-            _SHA256.fullmatch(str(protected_review.get(field, ""))) is None
-            for field in (
-                "governed_bundle_hash",
-                "candidate_receipt_hash",
-                "role_receipt_hash",
-                "execution_hash",
-                "protected_review_hash",
-            )
-        )
-        or protected_review.get("protected_review_hash")
-        != _hash(
-            {
-                key: value
-                for key, value in protected_review.items()
-                if key != "protected_review_hash"
-            }
-        )
-    ):
-        raise RootEffectError(
-            "root effect requires exact protected governed-review evidence"
-        )
     if (
         _git(paths, "status", "--porcelain=v1")
         or _git(paths, "rev-parse", "HEAD") != request["candidate_commit"]
@@ -1152,19 +686,18 @@ def _default_effects(
         temporary = Path(raw_temporary)
         try:
             completed = subprocess.run(
-                [
-                    "git",
-                    "-c",
-                    f"safe.directory={paths.repository.resolve()}",
+                protected_git_command(
+                    paths.repository,
                     "archive",
                     "--format=tar",
                     f"--output={temporary}",
                     str(request["candidate_commit"]),
-                ],
+                ),
                 cwd=paths.repository,
                 check=False,
                 text=True,
                 capture_output=True,
+                env=dict(protected_git_environment()),
             )
             if completed.returncode:
                 raise RootEffectError(
@@ -1212,12 +745,7 @@ def _default_effects(
             or selection.get("evidence_identity")
             != {
                 "request_hash": request["request_hash"],
-                "protected_review_hash": protected_review[
-                    "protected_review_hash"
-                ],
-                "governed_bundle_hash": protected_review[
-                    "governed_bundle_hash"
-                ],
+                "review_receipt_hash": request["review_receipt_hash"],
             }
         ):
             raise RootEffectError("selected lifecycle runtime receipt differs")
@@ -1237,27 +765,17 @@ def _default_effects(
             ),
             evidence_identity={
                 "request_hash": request["request_hash"],
-                "protected_review_hash": protected_review[
-                    "protected_review_hash"
-                ],
-                "governed_bundle_hash": protected_review[
-                    "governed_bundle_hash"
-                ],
+                "review_receipt_hash": request["review_receipt_hash"],
             },
         )
     _write_state(paths, request, "selected")
 
-    from tgw import doctor_cli
-
-    doctor_paths = doctor_cli.DoctorPaths(
-        repository=paths.repository,
-        coding_config=paths.coding_config,
-        runtime_root=paths.runtime_root,
-    )
-    workers = doctor_cli.repair_workers(
-        doctor_paths, desired_commit=str(request["candidate_commit"])
-    )
-    _write_state(paths, request, "workers-restarted")
+    workers = {
+        "schema": "tgw-local-coding-static-restart-request/v1",
+        "mechanism": "tgw-coding-runtime-restart.path",
+        "candidate_commit": request["candidate_commit"],
+        "privileged_candidate_code": False,
+    }
     canary = _runtime_canary(paths, str(request["root_id"]))
     _write_state(paths, request, "verified")
     return {
@@ -1273,10 +791,6 @@ def process_request(
     request_value: object,
     *,
     effects: Callable[[RootEffectPaths, Mapping[str, Any]], Mapping[str, Any]] = _default_effects,
-    review_verifier: Callable[
-        [RootEffectPaths, Mapping[str, Any], Mapping[str, Any]],
-        Mapping[str, Any],
-    ] = verify_protected_review_evidence,
     store: LifecycleStore | None = None,
 ) -> dict[str, Any]:
     """Execute or recover one exact request and publish one immutable response."""
@@ -1284,21 +798,15 @@ def process_request(
     journal = store or LifecycleStore(
         paths.lifecycle_root, group_gid=_group_gid(paths)
     )
-    request, record = validate_request(request_value, store=journal)
+    request, _record = validate_request(request_value, store=journal)
     prior = read_response(paths, request)
     if prior is not None:
         return prior
-    protected_review = dict(review_verifier(paths, request, record))
-    result = dict(
-        effects(paths, {**request, "_protected_review": protected_review})
-    )
+    result = dict(effects(paths, request))
     required = {"materialization", "selection", "workers", "live_verification"}
     if set(result) != required or not all(isinstance(result[key], Mapping) for key in required):
         raise RootEffectError("root effect state machine returned incomplete evidence")
-    result_with_review = {**result, "protected_review": protected_review}
-    hashes = {
-        key: _hash(result_with_review[key]) for key in sorted(result_with_review)
-    }
+    hashes = {key: _hash(result[key]) for key in sorted(result)}
     technical_unsigned = {
         "schema": "tgw-local-coding-technical-result/v1",
         "root_id": request["root_id"],
@@ -1317,21 +825,29 @@ def process_request(
         "request_hash": request["request_hash"],
         "candidate_commit": request["candidate_commit"],
         "candidate_tree": request["candidate_tree"],
-        "protected_review_receipt_hash": hashes["protected_review"],
-        "governed_review_bundle_hash": protected_review[
-            "governed_bundle_hash"
-        ],
         "materialization_receipt_hash": hashes["materialization"],
         "selection_receipt_hash": hashes["selection"],
         "workers_receipt_hash": hashes["workers"],
         "live_verification_receipt_hash": hashes["live_verification"],
         "technical_result_hash": technical_hash,
-        "receipts": result_with_review,
+        "receipts": result,
     }
     response = {**unsigned, "response_hash": _hash(unsigned)}
     _atomic(
         response_path(paths, str(request["root_id"])),
         response,
+        replace=True,
+        group_gid=_group_gid(paths),
+        mode=0o640,
+        owner_uid=paths.root_uid,
+        directory_uid=paths.root_uid,
+    )
+    _atomic(
+        paths.request_root / ".restart-request",
+        {
+            "schema": "tgw-local-coding-static-restart-request/v1",
+            "candidate_commit": request["candidate_commit"],
+        },
         replace=True,
         group_gid=_group_gid(paths),
         mode=0o640,
@@ -1687,41 +1203,7 @@ def consume_once(paths: RootEffectPaths) -> int:
     )
     store = LifecycleStore(paths.lifecycle_root, group_gid=_group_gid(paths))
     processed = 0
-    for path in sorted(
-        paths.request_root.glob("*.review-preparation-request.json")
-    ):
-        refusal = _refusal_path(paths, path)
-        if _refusal_applies(paths, refusal, path):
-            continue
-        try:
-            value = _load_exact(
-                path,
-                expected_gid=_group_gid(paths),
-                expected_mode=0o660,
-            )
-            request, _record = validate_review_preparation_request(
-                value, store=store
-            )
-        except (LifecycleError, RootEffectError, OSError, ValueError) as exc:
-            _refuse_invalid_file(paths, path, str(exc))
-            continue
-        try:
-            if read_review_preparation_response(paths, request) is None:
-                process_review_preparation(paths, request, store=store)
-                processed += 1
-        except (
-            KeyError,
-            LifecycleError,
-            RootEffectError,
-            OSError,
-            ReviewRunnerError,
-            TypeError,
-            ValueError,
-        ):
-            _write_state(paths, request, "protected-review-preparation-held")
     for path in sorted(paths.request_root.glob("*.request.json")):
-        if path.name.endswith(".review-preparation-request.json"):
-            continue
         refusal = _refusal_path(paths, path)
         if _refusal_applies(paths, refusal, path):
             continue
@@ -1737,15 +1219,8 @@ def consume_once(paths: RootEffectPaths) -> int:
             continue
         if read_response(paths, request) is not None:
             continue
-        try:
-            process_request(paths, request, store=store)
-        except ProtectedReviewEvidenceError:
-            # A valid ordinary-user trigger is not review authority. Missing,
-            # stale, or mismatched protected evidence remains safely retryable
-            # and cannot prevent other exact lifecycle requests from advancing.
-            _write_state(paths, request, "protected-review-held")
-        else:
-            processed += 1
+        process_request(paths, request, store=store)
+        processed += 1
     for path in sorted(paths.request_root.glob("*.projection-request.json")):
         refusal = _refusal_path(paths, path)
         if _refusal_applies(paths, refusal, path):

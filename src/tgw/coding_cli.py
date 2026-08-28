@@ -1110,36 +1110,6 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
         )
 
     def review(record: dict[str, Any]) -> dict[str, Any]:
-        from tgw.development.coding_root_effect import (
-            RootEffectPaths,
-            ensure_review_preparation_request,
-            read_review_preparation_response,
-        )
-
-        coding = config["coding"]
-        preparation_paths = RootEffectPaths(
-            request_root=Path(coding["root_effect_root"]),
-            lifecycle_root=Path(coding["lifecycle_root"]),
-            repository=Path(coding["repository_root"]),
-            runtime_root=Path(coding["runtime_root"]),
-            coding_config=Path(config_path),
-        )
-        preparation_request = ensure_review_preparation_request(
-            preparation_paths, record
-        )
-        preparation = read_review_preparation_response(
-            preparation_paths, preparation_request
-        )
-        if preparation is None:
-            return _stage(
-                record,
-                "review",
-                "waiting",
-                reason=(
-                    "awaiting automatic root preparation of the exact protected "
-                    "governed-review request"
-                ),
-            )
         command = config["coding"].get("commands", {}).get("claude-review")
         allowed = config["coding"].get("allowed_runners", [])
         if (

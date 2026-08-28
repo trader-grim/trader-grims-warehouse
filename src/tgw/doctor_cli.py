@@ -42,6 +42,12 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 import psycopg2
 import psycopg2.extras
 
+from tgw.protected_git import (
+    GIT_EXECUTABLE,
+    protected_git_command,
+    protected_git_environment,
+)
+
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _LOOSE_OBJECT_DIRECTORY = re.compile(r"[0-9a-f]{2}\Z")
 _LOOSE_OBJECT_NAME = re.compile(r"[0-9a-f]{38}\Z")
@@ -76,9 +82,14 @@ _ACTIVE_CODING_UNITS = (
     "tgw-controller-verify-worker.service",
     "tgw-coding-lifecycle-supervisor.service",
     "tgw-coding-root-effect.service",
+    "tgw-coding-runtime-restart.path",
     "tgw-coding-local-foreman.timer",
 )
-_CODING_UNITS = (*_ACTIVE_CODING_UNITS, "tgw-coding-local-foreman.service")
+_CODING_UNITS = (
+    *_ACTIVE_CODING_UNITS,
+    "tgw-coding-local-foreman.service",
+    "tgw-coding-runtime-restart.service",
+)
 _PLAN_RENDER_UNIT = "tgw-plan-render-local.service"
 _PLAN_RENDER_DIRECTORY_MODE = 0o2770
 _SYSTEMD_UNIT_ROOTS = (
@@ -149,6 +160,15 @@ _UNIT_ARGV = {
         "--config",
         "/opt/TGW/tgw-lib/config/tgw-coding-local.json",
     ),
+    "tgw-coding-runtime-restart.service": (
+        "/bin/systemctl",
+        "try-restart",
+        "tgw-codex-implement-worker.service",
+        "tgw-claude-review-worker.service",
+        "tgw-controller-verify-worker.service",
+        "tgw-coding-lifecycle-supervisor.service",
+        "tgw-coding-root-effect.service",
+    ),
     "tgw-coding-local-foreman.service": (*_LOCAL_WORKFLOW_ARGV, "foreman"),
 }
 _UNIT_ARGV[_PLAN_RENDER_UNIT] = (
@@ -186,10 +206,6 @@ class DoctorPaths:
     repository: Path = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
     worktrees: Path = Path("/opt/TGW/var/worktrees")
     coding_config: Path = Path("/opt/TGW/tgw-lib/config/tgw-coding-local.json")
-    protected_review_root: Path = Path("/var/lib/tgw/coding-protected-review")
-    protected_review_onboarding: Path = Path(
-        "/etc/tgw/coding-protected-review-onboarding.json"
-    )
     plan_render_config: Path = Path("/opt/TGW/tgw-lib/config/tgw-plan-render-local.json")
     plan_render_root: Path = Path("/opt/TGW/var/plan-render")
     plan_render_log_root: Path = Path("/opt/TGW/var/plan-render/log")
@@ -225,7 +241,7 @@ class DoctorPaths:
     context_install_uid: int = 0
     context_install_gid: int = 0
     context_launcher_mode: int = 0o555
-    coding_root_effect_uid: int = 0
+    coding_root_effect_uid: int | None = None
     systemd_unit_roots: tuple[Path, ...] = _SYSTEMD_UNIT_ROOTS
     archive_discovery_roots: tuple[Path, ...] = _ARCHIVE_DISCOVERY_ROOTS
     archive_discovery_max_depth: int = _ARCHIVE_DISCOVERY_MAX_DEPTH
@@ -340,9 +356,14 @@ def _run(
 
 
 def _git(repository: Path, *args: str) -> str:
-    result = _run(
-        ["git", "-c", f"safe.directory={repository.resolve()}", *args],
+    result = subprocess.run(
+        protected_git_command(repository, *args),
         cwd=repository,
+        env=dict(protected_git_environment()),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     if result.returncode:
         raise DoctorError(result.stderr.strip() or "Git command failed")
@@ -2128,8 +2149,9 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         errors: list[str] = []
         if exists:
             result = _run(
-                ["git", "-c", f"safe.directory={location}", "status", "--short"],
+                protected_git_command(location, "status", "--short"),
                 cwd=location,
+                env=protected_git_environment(),
             )
             if result.returncode:
                 errors.append(result.stderr.strip() or "cannot inspect worktree status")
@@ -2137,31 +2159,29 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
                 dirty = bool(result.stdout.strip())
         if _COMMIT.fullmatch(head):
             merged = _run(
-                [
-                    "git",
-                    "-c",
-                    f"safe.directory={repository}",
+                protected_git_command(
+                    repository,
                     "merge-base",
                     "--is-ancestor",
                     head,
                     canonical_head,
-                ],
+                ),
                 cwd=repository,
+                env=protected_git_environment(),
             )
             if merged.returncode in (0, 1):
                 merged_into_canonical = merged.returncode == 0
             else:
                 errors.append(merged.stderr.strip() or "cannot compare worktree ancestry")
             count = _run(
-                [
-                    "git",
-                    "-c",
-                    f"safe.directory={repository}",
+                protected_git_command(
+                    repository,
                     "rev-list",
                     "--count",
                     f"{canonical_head}..{head}",
-                ],
+                ),
                 cwd=repository,
+                env=protected_git_environment(),
             )
             if count.returncode:
                 errors.append(count.stderr.strip() or "cannot count unique commits")
@@ -2508,8 +2528,20 @@ def _loaded_exec_identity(raw: str) -> tuple[str, tuple[str, ...]]:
     return executable, argv
 
 
-def _unit_definition(paths: DoctorPaths, unit: str, state: Mapping[str, str]) -> dict[str, Any]:
-    desired, release, _task = _desired_runtime(paths)
+def _unit_definition(
+    paths: DoctorPaths,
+    unit: str,
+    state: Mapping[str, str],
+    *,
+    desired_commit: str | None = None,
+) -> dict[str, Any]:
+    if desired_commit is None:
+        desired, release, _task = _desired_runtime(paths)
+    else:
+        if _COMMIT.fullmatch(desired_commit) is None:
+            raise DoctorError("coding unit commit override is invalid")
+        desired = desired_commit
+        release = paths.runtime_root / "releases" / desired
     source = release / "systemd" / unit
     fragment_text = state.get("FragmentPath", "")
     fragment = Path(fragment_text) if fragment_text else None
@@ -2598,13 +2630,17 @@ def _plan_render_process_runtime_identity(
     return evidence
 
 
-def check_units(paths: DoctorPaths) -> dict[str, Any]:
+def check_units(
+    paths: DoctorPaths, *, desired_commit: str | None = None
+) -> dict[str, Any]:
     repair = "sudo -n tgw doctor repair workers"
     try:
         observed = {}
         for unit in _CODING_UNITS:
             state = _unit_state(unit)
-            state["definition"] = _unit_definition(paths, unit, state)
+            state["definition"] = _unit_definition(
+                paths, unit, state, desired_commit=desired_commit
+            )
             observed[unit] = state
         unhealthy = [
             unit
@@ -2684,7 +2720,7 @@ def _directory_identity(path: Path, *, uid: int, gid: int, mode: int) -> dict[st
             "mode": None,
             "exact": False,
         }
-    except (DoctorError, KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+    except (DoctorError, OSError, ValueError) as exc:
         return {
             **expected,
             "kind": "unsafe",
@@ -2807,20 +2843,28 @@ def _verify_release_tree(paths: DoctorPaths, desired: str, release: Path) -> dic
     if release.is_symlink() or release.resolve(strict=True).parent != releases_root:
         raise DoctorError("release path escapes the immutable releases directory")
     release_before = release.stat(follow_symlinks=False)
-    if release_before.st_uid not in paths.trusted_release_owners or release_before.st_mode & 0o022 or not stat.S_ISDIR(release_before.st_mode):
+    materializer_uid = (
+        pwd.getpwnam("db").pw_uid
+        if paths.coding_root_effect_uid is None
+        else paths.coding_root_effect_uid
+    )
+    release_owners = {*paths.trusted_release_owners, materializer_uid}
+    if release_before.st_uid not in release_owners or release_before.st_mode & 0o022 or not stat.S_ISDIR(release_before.st_mode):
         raise DoctorError("release root ownership or permissions are not immutable")
-    result = _run(
-        [
-            "git",
-            "-c",
-            f"safe.directory={paths.repository.resolve()}",
+    result = subprocess.run(
+        protected_git_command(
+            paths.repository,
             "ls-tree",
             "-r",
             "-z",
             "--full-tree",
             desired,
-        ],
+        ),
         cwd=paths.repository,
+        env=dict(protected_git_environment()),
+        check=False,
+        capture_output=True,
+        text=True,
         timeout=30,
     )
     if result.returncode:
@@ -2857,7 +2901,7 @@ def _verify_release_tree(paths: DoctorPaths, desired: str, release: Path) -> dic
     for path in release.rglob("*"):
         observed = path.stat(follow_symlinks=False)
         relative = str(path.relative_to(release))
-        if observed.st_uid not in paths.trusted_release_owners:
+        if observed.st_uid not in release_owners:
             unsafe_paths.append(relative + ":owner")
         if not stat.S_ISLNK(observed.st_mode) and observed.st_mode & 0o022:
             unsafe_paths.append(relative + ":writable")
@@ -2930,7 +2974,7 @@ def _verify_release_tree(paths: DoctorPaths, desired: str, release: Path) -> dic
         "file_count": len(expected),
         "manifest_source": "git-ls-tree",
         "release_materializer": manifest_verification,
-        "trusted_owners": list(paths.trusted_release_owners),
+        "trusted_owners": sorted(release_owners),
     }
 
 
@@ -3140,7 +3184,6 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         check_context_launcher(paths),
         check_context_processes(paths),
         check_unix_access(paths),
-        check_protected_review(paths),
         check_worktrees(paths),
         check_database(paths),
         check_units(paths),
@@ -3176,181 +3219,6 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
             "plan_intent_mutation": False,
         },
     }
-
-
-def _protected_review_paths(paths: DoctorPaths) -> dict[str, Path]:
-    root = paths.protected_review_root
-    return {
-        "root": root,
-        "config": root / "config.json",
-        "requests": root / "requests",
-        "snapshots": root / "snapshots",
-        "resources": root / "registered-resources",
-        "grants": root / "broker-grants",
-        "consumed_grants": root / "broker-grants" / "consumed",
-        "credentials": root / "credentials",
-        "context_credential": root / "credentials" / "context.json",
-        "evidence_credential": root / "credentials" / "evidence.json",
-        "resource_credential": root / "credentials" / "resource.json",
-        "broker_credential": root / "credentials" / "broker.json",
-        "profile": root / "request-profile.json",
-        "candidate": root / "candidate-evidence-descriptor.json",
-        "execution": root / "execution-evidence-sink.json",
-        "published": root / "execution-evidence-published.json",
-    }
-
-
-def _protected_review_surface(
-    path: Path, *, directory: bool, mode: int, include_hash: bool = True,
-) -> dict[str, Any]:
-    observed = path.stat(follow_symlinks=False)
-    expected_kind = stat.S_ISDIR if directory else stat.S_ISREG
-    if (
-        path.is_symlink()
-        or not expected_kind(observed.st_mode)
-        or observed.st_uid != 0
-        or observed.st_gid != 0
-        or stat.S_IMODE(observed.st_mode) != mode
-        or (not directory and observed.st_nlink != 1)
-    ):
-        raise DoctorError(f"protected-review surface identity differs: {path}")
-    return {
-        "path": str(path),
-        "uid": observed.st_uid,
-        "gid": observed.st_gid,
-        "mode": stat.S_IMODE(observed.st_mode),
-        "device": observed.st_dev,
-        "inode": observed.st_ino,
-        **({} if directory or not include_hash else {"sha256": _file_hash(path)}),
-    }
-
-
-def check_protected_review(paths: DoctorPaths) -> dict[str, Any]:
-    """Diagnose the fixed root-owned local governed-review wiring."""
-
-    repair_command = "sudo -n tgw doctor repair protected-review"
-    try:
-        selected = _protected_review_paths(paths)
-        evidence = {
-            "root": _protected_review_surface(
-                selected["root"], directory=True, mode=0o755
-            ),
-            "requests": _protected_review_surface(
-                selected["requests"], directory=True, mode=0o755
-            ),
-            "snapshots": _protected_review_surface(
-                selected["snapshots"], directory=True, mode=0o755
-            ),
-            "resources": _protected_review_surface(
-                selected["resources"], directory=True, mode=0o755
-            ),
-            "grants": _protected_review_surface(
-                selected["grants"], directory=True, mode=0o755
-            ),
-            "consumed_grants": _protected_review_surface(
-                selected["consumed_grants"], directory=True, mode=0o700
-            ),
-            "credentials": _protected_review_surface(
-                selected["credentials"], directory=True, mode=0o700
-            ),
-            "config": _protected_review_surface(
-                selected["config"], directory=False, mode=0o444
-            ),
-            "profile": _protected_review_surface(
-                selected["profile"], directory=False, mode=0o400
-            ),
-            "candidate": _protected_review_surface(
-                selected["candidate"], directory=False, mode=0o400
-            ),
-            "execution": _protected_review_surface(
-                selected["execution"], directory=False, mode=0o400
-            ),
-            "published": _protected_review_surface(
-                selected["published"], directory=False, mode=0o400
-            ),
-            **{
-                name: _protected_review_surface(
-                    selected[name], directory=False, mode=0o400,
-                    include_hash=False,
-                )
-                for name in (
-                    "context_credential", "evidence_credential",
-                    "resource_credential", "broker_credential",
-                )
-            },
-        }
-        from tgw.candidate_receipt_sink import (
-            PinnedCandidateEvidenceDescriptor,
-            PinnedGitReceiptSink,
-        )
-        from tgw.context_generation_status import _protected_json
-        from tgw.development.coding_review import load_protected_review_config
-        from tgw.development.coding_review_protection import (
-            load_profile,
-            load_service_credential,
-        )
-
-        configuration = load_protected_review_config(
-            selected["config"],
-            candidate_repository=paths.repository,
-            trusted_uid=0,
-        )
-        expected = {
-            "request_root": selected["requests"].resolve(),
-            "snapshot_root": selected["snapshots"].resolve(),
-            "request_profile_config": selected["profile"].resolve(),
-            "candidate_evidence_descriptor_config": selected["candidate"].resolve(),
-            "execution_evidence_sink_config": selected["execution"].resolve(),
-            "execution_evidence_pin_source": selected["published"].resolve(),
-            "resource_registry_root": selected["resources"].resolve(),
-            "broker_grant_root": selected["grants"].resolve(),
-            "context_credential_config": selected["context_credential"].resolve(),
-            "evidence_credential_config": selected["evidence_credential"].resolve(),
-            "resource_credential_config": selected["resource_credential"].resolve(),
-            "broker_credential_config": selected["broker_credential"].resolve(),
-        }
-        if configuration != expected:
-            raise DoctorError("protected-review fixed paths differ")
-        profile = load_profile(selected["profile"], trusted_uid=0)
-        for purpose in ("context", "evidence", "resource", "broker"):
-            load_service_credential(
-                selected[f"{purpose}_credential"], purpose=purpose,
-                generation=profile["credential_generations"][purpose],
-                trusted_uid=0,
-            )
-        evidence["credential_wiring"] = {
-            "context_environment": "TGW_REVIEW_CONTEXT_CREDENTIAL_FILE",
-            "evidence_environment": "TGW_REVIEW_EVIDENCE_CREDENTIAL_FILE",
-            "delivery": "systemd-load-credential",
-            "values_reported": False,
-        }
-        candidate = _protected_json(
-            selected["candidate"], "protected-review candidate binding", 0
-        )
-        execution = _protected_json(
-            selected["execution"], "protected-review execution binding", 0
-        )
-        published = _protected_json(
-            selected["published"], "protected-review published binding", 0
-        )
-        PinnedCandidateEvidenceDescriptor(
-            candidate, candidate_repository=paths.repository
-        )
-        PinnedGitReceiptSink(execution, candidate_repository=paths.repository)
-        PinnedGitReceiptSink(published, candidate_repository=paths.repository)
-    except (DoctorError, OSError, ValueError) as exc:
-        return _check(
-            "coding.protected-review",
-            "FAIL",
-            str(exc),
-            repair=repair_command,
-        )
-    return _check(
-        "coding.protected-review",
-        "PASS",
-        "fixed /var/lib protected-review wiring is root-owned and read-only",
-        evidence=evidence,
-    )
 
 
 def _require_root() -> None:
@@ -4713,12 +4581,27 @@ def _open_preservation_file(
 def _git_at_descriptor(descriptor: int, *arguments: str) -> str:
     location = f"/proc/self/fd/{descriptor}"
     result = subprocess.run(
-        ["git", "-c", f"safe.directory={location}", "-C", location, *arguments],
+        [
+            GIT_EXECUTABLE,
+            "--no-replace-objects",
+            "-c",
+            f"safe.directory={location}",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-C",
+            location,
+            *arguments,
+        ],
         check=False,
         capture_output=True,
         text=True,
         timeout=30,
         pass_fds=(descriptor,),
+        env=dict(protected_git_environment()),
     )
     if result.returncode:
         raise DoctorError(result.stderr.strip() or "descriptor-bound Git identity failed")
@@ -6348,7 +6231,7 @@ def repair_workers(
                 "lifecycle worker repair requires the exact clean canonical candidate"
             )
     _verify_release_tree(paths, desired, release)
-    before = check_units(paths)
+    before = check_units(paths, desired_commit=desired)
     installed: list[str] = []
     for unit in _CODING_UNITS:
         source = release / "systemd" / unit
@@ -6373,7 +6256,9 @@ def repair_workers(
     actions: list[str] = []
     for unit in _ACTIVE_CODING_UNITS:
         state = _unit_state(unit)
-        definition = _unit_definition(paths, unit, state)
+        definition = _unit_definition(
+            paths, unit, state, desired_commit=desired
+        )
         if not definition["exact"]:
             raise DoctorError(f"installed coding unit is not exact: {unit}")
         operation = "restart" if unit in installed else "start"
@@ -6386,7 +6271,7 @@ def repair_workers(
         if result.returncode:
             raise DoctorError(result.stderr.strip() or f"failed to {operation} {unit}")
         actions.append(f"{operation}:{unit}")
-    after = check_units(paths)
+    after = check_units(paths, desired_commit=desired)
     if after["state"] != "PASS":
         raise DoctorError("local coding units remain unhealthy after repair")
     receipt = _receipt(paths, "workers", before, after)
@@ -6545,196 +6430,6 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
         "storage_started_receipt": storage_started_receipt,
         "storage_receipt": storage_receipt,
         "receipt": _receipt(paths, "plan-render-worker", before, after),
-    }
-
-
-def _protected_onboarding(paths: DoctorPaths) -> dict[str, Any]:
-    surface = _surface_snapshot(paths.protected_review_onboarding)
-    if (
-        surface.get("kind") != "file"
-        or surface.get("uid") != 0
-        or surface.get("gid") != 0
-        or int(surface.get("mode", 0)) & 0o077
-    ):
-        raise DoctorError(
-            "protected-review onboarding input is not root:root read-only data"
-        )
-    try:
-        value = json.loads(surface["raw"])
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise DoctorError("protected-review onboarding input is invalid JSON") from exc
-    required = {
-        "schema",
-        "request_profile",
-        "candidate_evidence_descriptor_config",
-        "execution_evidence_sink_config",
-        "execution_evidence_pin_source_config",
-        "credentials",
-    }
-    if (
-        not isinstance(value, dict)
-        or set(value) != required
-        or value.get("schema")
-        != "tgw-local-coding-protected-review-onboarding/v2"
-        or not all(
-            isinstance(value.get(name), dict)
-            for name in required - {"schema"}
-        )
-    ):
-        raise DoctorError("protected-review onboarding contract is invalid")
-    credentials = value["credentials"]
-    if set(credentials) != {"context", "evidence", "resource", "broker"}:
-        raise DoctorError("protected-review credential coverage is invalid")
-    for purpose, credential in credentials.items():
-        if (
-            set(credential) != {"schema", "purpose", "generation", "bearer"}
-            or credential.get("schema") != "tgw-protected-service-credential/v1"
-            or credential.get("purpose") != purpose
-            or not isinstance(credential.get("generation"), str)
-            or not credential["generation"]
-            or not isinstance(credential.get("bearer"), str)
-            or len(credential["bearer"]) < 32
-            or any(character.isspace() for character in credential["bearer"])
-        ):
-            raise DoctorError(f"protected-review {purpose} credential is invalid")
-    return value
-
-
-def repair_protected_review(paths: DoctorPaths) -> dict[str, Any]:
-    """Provision or repair only the fixed root-owned review trust surfaces."""
-
-    _require_root()
-    selected = _protected_review_paths(paths)
-    onboarding = _protected_onboarding(paths)
-    from tgw.candidate_receipt_sink import (
-        PinnedCandidateEvidenceDescriptor,
-        PinnedGitReceiptSink,
-    )
-    from tgw.development.coding_review_protection import validate_profile
-
-    # Validate all external pins before changing even the first managed path.
-    profile = validate_profile(onboarding["request_profile"])
-    if profile["credential_generations"] != {
-        purpose: credential["generation"]
-        for purpose, credential in onboarding["credentials"].items()
-    }:
-        raise DoctorError("protected-review credential generations do not match the request profile")
-    PinnedCandidateEvidenceDescriptor(
-        onboarding["candidate_evidence_descriptor_config"],
-        candidate_repository=paths.repository,
-    )
-    PinnedGitReceiptSink(
-        onboarding["execution_evidence_sink_config"],
-        candidate_repository=paths.repository,
-    )
-    PinnedGitReceiptSink(
-        onboarding["execution_evidence_pin_source_config"],
-        candidate_repository=paths.repository,
-    )
-    live_config_root = Path("/opt/TGW/tgw-lib/config")
-
-    def live_config_identity() -> dict[str, Any]:
-        if not _lexists(live_config_root):
-            return {"kind": "missing"}
-        observed = live_config_root.stat(follow_symlinks=False)
-        return {
-            "kind": "directory" if stat.S_ISDIR(observed.st_mode) else "other",
-            "uid": observed.st_uid,
-            "gid": observed.st_gid,
-            "mode": stat.S_IMODE(observed.st_mode),
-            "device": observed.st_dev,
-            "inode": observed.st_ino,
-        }
-
-    live_config_before = live_config_identity()
-    before = check_protected_review(paths)
-    changed: list[str] = []
-    for path in (
-        selected["root"], selected["requests"], selected["snapshots"],
-        selected["resources"], selected["grants"],
-    ):
-        if _repair_managed_directory(path, uid=0, gid=0, mode=0o755):
-            changed.append(str(path))
-    for path in (selected["consumed_grants"], selected["credentials"]):
-        if _repair_managed_directory(path, uid=0, gid=0, mode=0o700):
-            changed.append(str(path))
-    config = {
-        "schema": "tgw-local-coding-protected-review/v2",
-        "request_root": str(selected["requests"]),
-        "snapshot_root": str(selected["snapshots"]),
-        "request_profile_config": str(selected["profile"]),
-        "candidate_evidence_descriptor_config": str(selected["candidate"]),
-        "execution_evidence_sink_config": str(selected["execution"]),
-        "execution_evidence_pin_source": str(selected["published"]),
-        "resource_registry_root": str(selected["resources"]),
-        "broker_grant_root": str(selected["grants"]),
-        "context_credential_config": str(selected["context_credential"]),
-        "evidence_credential_config": str(selected["evidence_credential"]),
-        "resource_credential_config": str(selected["resource_credential"]),
-        "broker_credential_config": str(selected["broker_credential"]),
-    }
-    desired = {
-        selected["config"]: (_json_bytes(config), 0o444),
-        selected["profile"]: (
-            _json_bytes(onboarding["request_profile"]),
-            0o400,
-        ),
-        selected["candidate"]: (
-            _json_bytes(onboarding["candidate_evidence_descriptor_config"]),
-            0o400,
-        ),
-        selected["execution"]: (
-            _json_bytes(onboarding["execution_evidence_sink_config"]),
-            0o400,
-        ),
-        selected["published"]: (
-            _json_bytes(onboarding["execution_evidence_pin_source_config"]),
-            0o400,
-        ),
-        **{
-            selected[f"{purpose}_credential"]: (
-                _json_bytes(onboarding["credentials"][purpose]), 0o400,
-            )
-            for purpose in ("context", "evidence", "resource", "broker")
-        },
-    }
-    for destination, (body, mode) in desired.items():
-        if destination.is_symlink() or (
-            destination.exists() and not destination.is_file()
-        ):
-            raise DoctorError(
-                f"refusing unsafe protected-review destination: {destination}"
-            )
-        exact = False
-        if destination.is_file():
-            observed = destination.stat(follow_symlinks=False)
-            exact = (
-                observed.st_uid == 0
-                and observed.st_gid == 0
-                and stat.S_IMODE(observed.st_mode) == mode
-                and observed.st_nlink == 1
-                and destination.read_bytes() == body
-            )
-        if not exact:
-            _atomic_bytes(destination, body, mode=mode, uid=0, gid=0)
-            changed.append(str(destination))
-    after = check_protected_review(paths)
-    if after["state"] != "PASS":
-        raise DoctorError("protected-review wiring remains incomplete after repair")
-    live_config_after = live_config_identity()
-    for field in ("kind", "uid", "gid", "mode", "device", "inode"):
-        if live_config_before.get(field) != live_config_after.get(field):
-            raise DoctorError(
-                "/opt/TGW/tgw-lib/config ownership or permissions changed"
-            )
-    receipt = _receipt(paths, "protected-review", before, after)
-    return {
-        "ok": True,
-        "operation": "protected-review",
-        "changed": bool(changed),
-        "changed_paths": changed,
-        "config_root_unchanged": True,
-        "receipt": receipt,
     }
 
 
@@ -7656,7 +7351,6 @@ _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
     "runtime": repair_runtime,
     "database": repair_database,
     "unix-git-access": repair_unix_git_access,
-    "protected-review": repair_protected_review,
     "workers": repair_workers,
     "plan-render-worker": repair_plan_render_worker,
     "obsolete-surfaces": repair_obsolete_surfaces,
@@ -7776,15 +7470,10 @@ def _coding_support_roots(paths: DoctorPaths, group_gid: int) -> dict[str, dict[
     coding = _coding_config(paths).get("coding", {})
     result: dict[str, dict[str, Any]] = {}
     worktree_device = paths.worktrees.stat(follow_symlinks=False).st_dev
-    keys = (
-        _CODING_SUPPORT_ROOT_KEYS
-        if any(coding.get(key) is not None for key in ("lifecycle_root", "root_effect_root"))
-        else _CODING_SUPPORT_ROOT_KEYS[:2]
-    )
-    configured = [coding.get(key) for key in keys]
+    configured = [coding.get(key) for key in _CODING_SUPPORT_ROOT_KEYS]
     invalid_configuration = any(not isinstance(raw, str) or not raw.strip() or not Path(raw).is_absolute() for raw in configured)
-    duplicate = not invalid_configuration and len({str(Path(raw)) for raw in configured}) != len(keys)
-    for key, raw in zip(keys, configured, strict=True):
+    duplicate = not invalid_configuration and len({str(Path(raw)) for raw in configured}) != len(_CODING_SUPPORT_ROOT_KEYS)
+    for key, raw in zip(_CODING_SUPPORT_ROOT_KEYS, configured, strict=True):
         if invalid_configuration or duplicate:
             result[key] = {"path": str(raw or ""), "exact": False, "reason": "all distinct non-empty absolute support roots are required"}
             continue
@@ -7796,15 +7485,20 @@ def _coding_support_roots(paths: DoctorPaths, group_gid: int) -> dict[str, dict[
             resolved = path.resolve(strict=True)
             owner = pwd.getpwuid(observed.st_uid)
             group = grp.getgrgid(group_gid)
-            root_effect = key == "root_effect_root"
+            db_managed = key == "root_effect_root"
+            db_uid = (
+                pwd.getpwnam("db").pw_uid
+                if paths.coding_root_effect_uid is None
+                else paths.coding_root_effect_uid
+            )
             owner_ok = (
-                observed.st_uid == paths.coding_root_effect_uid
-                if root_effect
+                observed.st_uid == db_uid
+                if db_managed
                 else observed.st_uid == 0
                 or owner.pw_gid == group_gid
                 or owner.pw_name in group.gr_mem
             )
-            expected_mode = 0o3770 if root_effect else 0o2770
+            expected_mode = 0o3770 if key == "root_effect_root" else 0o2770
             exact = (path.is_absolute() and resolved == path and not path.is_symlink()
                      and stat.S_ISDIR(observed.st_mode) and observed.st_dev == worktree_device
                      and observed.st_gid == group_gid and owner_ok
@@ -7924,37 +7618,52 @@ def _provision_coding_support_roots(
 ) -> list[str]:
     coding = _coding_config(paths).get("coding", {})
     changed: list[str] = []
-    keys = (
-        _CODING_SUPPORT_ROOT_KEYS
-        if any(coding.get(key) is not None for key in ("lifecycle_root", "root_effect_root"))
-        else _CODING_SUPPORT_ROOT_KEYS[:2]
-    )
-    configured = [coding.get(key) for key in keys]
+    configured = [coding.get(key) for key in _CODING_SUPPORT_ROOT_KEYS]
     if (any(not isinstance(raw, str) or not raw.strip() or not Path(raw).is_absolute() for raw in configured)
-            or len({str(Path(raw)) for raw in configured}) != len(keys)):
+            or len({str(Path(raw)) for raw in configured}) != len(_CODING_SUPPORT_ROOT_KEYS)):
         raise DoctorError("all distinct non-empty absolute coding support roots are required")
     if journal is None:
         raise DoctorError("coding support-root provisioning requires a rollback journal")
     worktrees = paths.worktrees.resolve(strict=True)
     worktree_device = paths.worktrees.stat(follow_symlinks=False).st_dev
-    for key, raw in zip(keys, configured, strict=True):
+    db_uid = (
+        pwd.getpwnam("db").pw_uid
+        if paths.coding_root_effect_uid is None
+        else paths.coding_root_effect_uid
+    )
+    for key, raw in zip(_CODING_SUPPORT_ROOT_KEYS, configured, strict=True):
         path = Path(str(raw))
         if not path.is_absolute() or path == Path(path.anchor) or path.is_relative_to(worktrees):
             raise DoctorError(f"coding {key} is not an absolute outside-worktree path")
         try:
             created = _provision_support_root(
                 path, group_gid=group_gid, worktree_device=worktree_device, journal=journal,
-                target_uid=(
-                    paths.coding_root_effect_uid
-                    if key == "root_effect_root"
-                    else None
-                ),
+                target_uid=db_uid if key == "root_effect_root" else None,
                 target_mode=0o3770 if key == "root_effect_root" else 0o2770,
             )
         except OSError as exc:
             raise DoctorError(f"coding {key} cannot be provisioned safely: {exc}") from exc
         if created:
             changed.append(str(path))
+    runtime_created = _provision_support_root(
+        paths.runtime_root,
+        group_gid=group_gid,
+        worktree_device=worktree_device,
+        journal=journal,
+        target_uid=db_uid,
+        target_mode=0o2750,
+    )
+    if runtime_created:
+        changed.append(str(paths.runtime_root))
+    for child_name in ("releases", "operations", "receipts", "refusals"):
+        child = paths.runtime_root / child_name
+        if _repair_managed_directory(
+            child,
+            uid=db_uid,
+            gid=group_gid,
+            mode=0o2750,
+        ):
+            changed.append(str(child))
     checked = _coding_support_roots(paths, group_gid)
     if not all(row["exact"] for row in checked.values()):
         raise DoctorError("protected coding support roots remain incomplete after repair")

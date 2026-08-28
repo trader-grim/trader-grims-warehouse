@@ -191,11 +191,27 @@ def runtime_manifest_identity(
 def _layout(root: Path) -> None:
     if root.is_symlink():
         raise ReleaseError("TGW root must not be a symlink")
+    root_created = not root.exists()
     root.mkdir(parents=True, exist_ok=True)
+    if root_created:
+        os.chmod(root, 0o750)
+    expected_uid = os.geteuid()
+    expected_gid = os.getegid()
     for name in ("releases", "operations", "receipts", "refusals"):
         path = root / name
+        created = not path.exists()
         path.mkdir(exist_ok=True)
-        if path.is_symlink() or not path.is_dir():
+        if created:
+            os.chmod(path, 0o750)
+    for path in (root, *(root / name for name in ("releases", "operations", "receipts", "refusals"))):
+        state = path.stat(follow_symlinks=False)
+        if (
+            path.is_symlink()
+            or not stat.S_ISDIR(state.st_mode)
+            or state.st_uid != expected_uid
+            or state.st_gid != expected_gid
+            or state.st_mode & 0o022
+        ):
             raise ReleaseError(f"unsafe release layout path: {path}")
 
 

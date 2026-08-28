@@ -1329,66 +1329,6 @@ def context_bundle(task: str, receiver: str = "codex", limit: int = 12) -> dict[
     return result
 
 
-def _review_context_broker_credential() -> str:
-    """Load the Context-to-broker master from direct or LoadCredential wiring."""
-
-    environment_name = "TGW_CONTEXT_BROKER_REQUEST_CREDENTIAL"
-    direct = os.environ.get(environment_name)
-    credential_path = os.environ.get(environment_name + "_FILE")
-    if direct and credential_path:
-        raise ContextError("governed review context broker credential wiring is ambiguous")
-    if direct:
-        if any(character.isspace() for character in direct):
-            raise ContextError("governed review context broker credential is invalid")
-        return direct
-    if not credential_path:
-        raise ContextError("governed review context broker credential is unavailable")
-    path = Path(credential_path)
-    try:
-        named = path.lstat()
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError as exc:
-        raise ContextError("governed review context broker credential is unavailable") from exc
-    try:
-        observed = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(observed.st_mode)
-            or stat.S_IMODE(observed.st_mode) & 0o077
-            or observed.st_nlink != 1
-            or not 2 <= observed.st_size <= 16 * 1024
-            or (named.st_dev, named.st_ino) != (observed.st_dev, observed.st_ino)
-        ):
-            raise ContextError("governed review context broker credential is unsafe")
-        raw = os.pread(descriptor, 16 * 1024 + 1, 0)
-        after = os.fstat(descriptor)
-        if len(raw) != observed.st_size or any(
-            getattr(after, field) != getattr(observed, field)
-            for field in (
-                "st_dev", "st_ino", "st_mode", "st_uid", "st_gid",
-                "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns",
-            )
-        ):
-            raise ContextError("governed review context broker credential changed while held")
-        value = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ContextError("governed review context broker credential is invalid") from exc
-    finally:
-        os.close(descriptor)
-    if (
-        not isinstance(value, Mapping)
-        or set(value) != {"schema", "purpose", "generation", "bearer"}
-        or value.get("schema") != "tgw-protected-service-credential/v1"
-        or value.get("purpose") != "broker"
-        or not isinstance(value.get("generation"), str)
-        or not value["generation"]
-        or not isinstance(value.get("bearer"), str)
-        or len(value["bearer"]) < 32
-        or any(character.isspace() for character in value["bearer"])
-    ):
-        raise ContextError("governed review context broker credential is invalid")
-    return str(value["bearer"])
-
-
 class HTTPReviewContextBrokerClient:
     """Call the privileged broker from the separately operated context service."""
 
@@ -1406,30 +1346,19 @@ class HTTPReviewContextBrokerClient:
             or parsed.path not in {"", "/"}
         ):
             raise ContextError("governed review context broker endpoint is invalid")
-        credential = _review_context_broker_credential()
+        credential = os.environ.get("TGW_CONTEXT_BROKER_REQUEST_CREDENTIAL", "")
+        if not credential or any(character.isspace() for character in credential):
+            raise ContextError("governed review context broker credential is unavailable")
         self.endpoint = endpoint.rstrip("/")
-        self.master_credential = credential
+        self.authorization = "Bearer " + credential
 
     def execute(self, request_value: Mapping[str, Any]) -> dict[str, Any]:
-        from tgw.governed_review_context_broker import derive_request_bearer
-
         raw = _canonical(request_value)
-        if len(self.master_credential) >= 32:
-            try:
-                request_bearer = derive_request_bearer(
-                    self.master_credential, request_value,
-                )
-            except ValueError as exc:
-                raise ContextError("governed review context broker credential is invalid") from exc
-        else:
-            # Compatibility for already-installed v2 static one-use grants. New
-            # v3 stores require a protected 32+ byte master and always derive.
-            request_bearer = self.master_credential
         request = Request(
             self.endpoint + "/v1/review-context", data=raw, method="POST",
             headers={
                 "Accept": "application/json", "Content-Type": "application/json",
-                "Authorization": "Bearer " + request_bearer,
+                "Authorization": self.authorization,
             },
         )
         try:
@@ -1448,13 +1377,15 @@ class HTTPReviewContextBrokerClient:
         return value
 
 
-def execute_governed_review_context_request(
+def _review_context_run(
     *, challenge: str, card_json: str, handoff_hash: str,
     resource_receipt_hash: str, skill_contract_hash: str,
     grant_json: str,
     broker_factory: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Execute the governed Context service's exact registered-resource path."""
+    """Fetch every review-card resource inside one authenticated service run."""
+
+    _per_call_guard()
     if re.fullmatch(r"[0-9a-f]{64}", challenge) is None:
         raise ContextError("governed review challenge is invalid")
     if not isinstance(card_json, str) or not card_json or len(card_json.encode()) > MAX_TEXT_BYTES:
@@ -1594,22 +1525,6 @@ def execute_governed_review_context_request(
         "resource_bundle_hash": service_bundle["bundle_hash"],
     }
     return receipt, visible_resources
-
-
-def _review_context_run(
-    *, challenge: str, card_json: str, handoff_hash: str,
-    resource_receipt_hash: str, skill_contract_hash: str,
-    grant_json: str, broker_factory: Any = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Guard ordinary Context bindings, then execute the governed service path."""
-
-    _per_call_guard()
-    return execute_governed_review_context_request(
-        challenge=challenge, card_json=card_json, handoff_hash=handoff_hash,
-        resource_receipt_hash=resource_receipt_hash,
-        skill_contract_hash=skill_contract_hash, grant_json=grant_json,
-        broker_factory=broker_factory,
-    )
 
 mcp = FastMCP(
     name="tgw-context",

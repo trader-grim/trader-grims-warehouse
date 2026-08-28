@@ -1374,12 +1374,8 @@ def _validate_evidence_sink_descriptor(
         value.get("schema") != "tgw-governed-review-evidence-sink-client/v1"
         or not isinstance(value.get("sink_ref"), str)
         or not value["sink_ref"]
-        or not (
-            parsed.scheme == "https" and parsed.hostname
-            or parsed.scheme == "http"
-            and parsed.hostname in {"127.0.0.1", "::1"}
-            and parsed.port is not None
-        )
+        or parsed.scheme != "https"
+        or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
         or parsed.query
@@ -1396,59 +1392,6 @@ def _validate_evidence_sink_descriptor(
     }:
         raise ReviewRunnerError("governed review evidence sink differs from the review card")
     return dict(value)
-
-
-def _service_credential(environment_name: str, *, purpose: str) -> str:
-    direct = os.environ.get(environment_name)
-    credential_path = os.environ.get(environment_name + "_FILE")
-    if direct and credential_path:
-        raise ReviewRunnerError(f"governed review {purpose} credential wiring is ambiguous")
-    if direct:
-        if len(direct) < 32 or any(character.isspace() for character in direct):
-            raise ReviewRunnerError(f"governed review {purpose} credential is invalid")
-        return direct
-    if not credential_path:
-        raise ReviewRunnerError(f"governed review {purpose} credential is unavailable")
-    path = Path(credential_path)
-    try:
-        named = path.lstat()
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError as exc:
-        raise ReviewRunnerError(f"governed review {purpose} credential is unavailable") from exc
-    try:
-        observed = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(observed.st_mode)
-            or stat.S_IMODE(observed.st_mode) & 0o077
-            or observed.st_nlink != 1
-            or not 2 <= observed.st_size <= 16 * 1024
-            or (named.st_dev, named.st_ino) != (observed.st_dev, observed.st_ino)
-        ):
-            raise ReviewRunnerError(f"governed review {purpose} credential is unsafe")
-        raw = os.pread(descriptor, 16 * 1024 + 1, 0)
-        if (
-            len(raw) != observed.st_size
-            or _stat_identity(os.fstat(descriptor)) != _stat_identity(observed)
-        ):
-            raise ReviewRunnerError(f"governed review {purpose} credential changed while held")
-        value = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ReviewRunnerError(f"governed review {purpose} credential is invalid") from exc
-    finally:
-        os.close(descriptor)
-    if (
-        not isinstance(value, Mapping)
-        or set(value) != {"schema", "purpose", "generation", "bearer"}
-        or value.get("schema") != "tgw-protected-service-credential/v1"
-        or value.get("purpose") != purpose
-        or not isinstance(value.get("generation"), str)
-        or not value["generation"]
-        or not isinstance(value.get("bearer"), str)
-        or len(value["bearer"]) < 32
-        or any(character.isspace() for character in value["bearer"])
-    ):
-        raise ReviewRunnerError(f"governed review {purpose} credential is invalid")
-    return str(value["bearer"])
 
 
 def _validate_card_context_service(
@@ -1780,7 +1723,9 @@ class HTTPReviewEvidenceSink:
         descriptor = _validate_evidence_sink_descriptor(descriptor)
         endpoint = descriptor["endpoint"]
         credential_env = descriptor["credential_env"]
-        credential = _service_credential(credential_env, purpose="evidence")
+        credential = os.environ.get(credential_env)
+        if not credential:
+            raise ReviewRunnerError("governed review evidence sink credential is unavailable")
         self.endpoint = endpoint.rstrip("/")
         self.timeout = float(descriptor["timeout_seconds"])
         self.authorization = "Bearer " + credential
@@ -1855,9 +1800,9 @@ class HTTPContextBundleClient:
 
     def __init__(self, descriptor: Mapping[str, Any]) -> None:
         descriptor = _validate_context_service(descriptor)
-        credential = _service_credential(
-            descriptor["credential_env"], purpose="context",
-        )
+        credential = os.environ.get(descriptor["credential_env"])
+        if not credential:
+            raise ReviewRunnerError("governed review context service credential is unavailable")
         self.endpoint = descriptor["endpoint"].rstrip("/")
         self.authorization = "Bearer " + credential
 

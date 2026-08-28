@@ -1,0 +1,10 @@
+[Unit]
+Description=Restart TGW unprivileged coding workers after runtime selection
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl try-restart tgw-codex-implement-worker.service tgw-claude-review-worker.service tgw-controller-verify-worker.service tgw-coding-lifecycle-supervisor.service tgw-coding-root-effect.service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict

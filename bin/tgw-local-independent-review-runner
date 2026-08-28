@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src
+exec /opt/TGW/.venvs/controller/bin/python3 -m tgw.development.coding_review "$@"

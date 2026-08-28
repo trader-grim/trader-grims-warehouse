@@ -1,5 +1,5 @@
 [Unit]
-Description=TGW fixed local coding root-effect consumer
+Description=TGW local coding runtime materializer (ordinary Unix account)
 After=postgresql.service
 Requires=postgresql.service
 ConditionPathExists=/opt/TGW/tgw-lib/config/tgw-coding-local.json
@@ -7,11 +7,12 @@ ConditionPathExists=/opt/TGW/tgw-lib/coding-runtime/current/src/tgw/development/
 
 [Service]
 Type=simple
-User=root
+User=db
 Group=tgw-coders
+SupplementaryGroups=tgw-coders
 UMask=0002
 WorkingDirectory=/opt/TGW/tgw-lib/src/trader-grims-warehouse
-Environment=HOME=/root
+Environment=HOME=/home/db
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=GIT_OPTIONAL_LOCKS=0
 Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src
@@ -20,8 +21,6 @@ Restart=always
 RestartSec=5s
 PrivateTmp=true
 ProtectHome=read-only
-MemoryMax=768M
-MemorySwapMax=0
 
 [Install]
 WantedBy=multi-user.target
