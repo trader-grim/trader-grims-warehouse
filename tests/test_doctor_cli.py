@@ -1620,6 +1620,77 @@ def test_context_staged_probe_child_identity_keeps_only_coding_group(
     assert calls == [("groups", [983]), ("gid", 1004), ("uid", 1004)]
 
 
+def test_context_staged_probe_pins_launcher_before_privilege_drop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = tmp_path / "launcher"
+    launcher.write_text("#!/usr/bin/python3\n", encoding="utf-8")
+    launcher.chmod(0o555)
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    snapshot.chmod(0o400)
+    target = SimpleNamespace(pw_name="codex", pw_uid=1004, pw_gid=1004)
+    coding_group = SimpleNamespace(gr_name="tgw-coders", gr_gid=983)
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        doctor_cli.pwd, "getpwuid", lambda _uid: SimpleNamespace(pw_name="root")
+    )
+    monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _actor: target)
+    monkeypatch.setattr(doctor_cli.grp, "getgrnam", lambda _group: coding_group)
+    monkeypatch.setattr(doctor_cli.grp, "getgrgid", lambda _gid: coding_group)
+    monkeypatch.setattr(doctor_cli.os, "getgrouplist", lambda *_args: [1004, 983])
+    subreaper = {"value": 0}
+    monkeypatch.setattr(
+        doctor_cli, "_linux_child_subreaper", lambda: subreaper["value"]
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_set_linux_child_subreaper",
+        lambda value: subreaper.__setitem__("value", value),
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_restore_linux_child_subreaper",
+        lambda value: subreaper.__setitem__("value", value),
+    )
+
+    def popen(command, **kwargs):
+        observed["command"] = command
+        observed["pass_fds"] = kwargs["pass_fds"]
+        observed["preexec_fn"] = kwargs["preexec_fn"]
+        launcher_fd = int(command[0].rsplit("/", 1)[-1])
+        observed["launcher_fd"] = launcher_fd
+        assert os.pread(launcher_fd, 2, 0) == b"#!"
+        raise RuntimeError("stop after spawn binding inspection")
+
+    monkeypatch.setattr(doctor_cli.subprocess, "Popen", popen)
+    descriptor = os.open(snapshot, os.O_RDONLY)
+    try:
+        with pytest.raises(RuntimeError, match="spawn binding inspection"):
+            doctor_cli._probe_context_stdio(
+                launcher,
+                "codex",
+                {},
+                staged_snapshot_descriptor=descriptor,
+                staged_snapshot_uid=os.getuid(),
+                staged_snapshot_gid=os.getgid(),
+            )
+        assert observed["command"] == [
+            f"/proc/self/fd/{observed['launcher_fd']}"
+        ]
+        assert observed["pass_fds"] == (
+            descriptor,
+            observed["launcher_fd"],
+        )
+        assert callable(observed["preexec_fn"])
+        with pytest.raises(OSError):
+            os.fstat(observed["launcher_fd"])
+    finally:
+        os.close(descriptor)
+
+
 @pytest.mark.skipif(os.geteuid() != 0, reason="real privilege drop requires root")
 def test_context_staged_probe_identity_traverses_real_selected_launcher_path() -> None:
     actor = "codex"

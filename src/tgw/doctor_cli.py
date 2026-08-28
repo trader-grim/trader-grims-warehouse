@@ -1224,6 +1224,7 @@ def _probe_context_stdio_process(
     command = [str(launcher)]
     pass_fds: tuple[int, ...] = ()
     child_setup = None
+    staged_launcher_descriptor: int | None = None
     if staged_snapshot_descriptor is not None:
         snapshot_state = os.fstat(staged_snapshot_descriptor)
         if (
@@ -1252,6 +1253,45 @@ def _probe_context_stdio_process(
             raise DoctorError(
                 "Context staged cold preflight actor is not a tgw-coders member"
             )
+
+        # The exact candidate is extracted beneath a root-only bootstrap
+        # directory.  Pin the already-validated launcher while privileged and
+        # execute that same open file after dropping to the ordinary harness
+        # user; no parent-directory traversal or mutable pathname is needed.
+        try:
+            staged_launcher_descriptor = os.open(
+                launcher, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+            )
+            launcher_state = os.fstat(staged_launcher_descriptor)
+            path_state = launcher.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISREG(launcher_state.st_mode)
+                or launcher_state.st_nlink != 1
+                or any(
+                    getattr(launcher_state, field) != getattr(path_state, field)
+                    for field in (
+                        "st_dev",
+                        "st_ino",
+                        "st_mode",
+                        "st_nlink",
+                        "st_uid",
+                        "st_gid",
+                        "st_size",
+                        "st_mtime_ns",
+                        "st_ctime_ns",
+                    )
+                )
+            ):
+                raise DoctorError(
+                    "Context staged cold preflight launcher identity differs"
+                )
+        except Exception:
+            if staged_launcher_descriptor is not None:
+                os.close(staged_launcher_descriptor)
+                staged_launcher_descriptor = None
+            raise
+        command = [f"/proc/self/fd/{staged_launcher_descriptor}"]
+        pass_fds = (staged_snapshot_descriptor, staged_launcher_descriptor)
 
         def child_setup() -> None:
             _drop_staged_probe_privileges(target, coding_group.gr_gid)
@@ -1441,6 +1481,9 @@ def _probe_context_stdio_process(
             start_new_session=True,
             bufsize=0,
         )
+        if staged_launcher_descriptor is not None:
+            os.close(staged_launcher_descriptor)
+            staged_launcher_descriptor = None
         assert process.stdin is not None
         assert process.stdout is not None
         assert process.stderr is not None
@@ -1480,6 +1523,11 @@ def _probe_context_stdio_process(
                     stdin_open = False
     finally:
         cleanup_failures: list[Exception] = []
+        if staged_launcher_descriptor is not None:
+            try:
+                os.close(staged_launcher_descriptor)
+            except Exception as exc:
+                cleanup_failures.append(exc)
         try:
             leader_returncode = stop_process_group()
         except Exception as exc:
