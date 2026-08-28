@@ -357,7 +357,7 @@ def parser() -> argparse.ArgumentParser:
     worker = commands.add_parser("worker", help="run one local coding queue worker")
     worker.add_argument(
         "--queue", required=True,
-        choices=("codex-implement", "controller-verify"),
+        choices=("codex-implement", "claude-review", "controller-verify"),
     )
     commands.add_parser("status", help="show the direct local workflow binding")
     return root

@@ -221,6 +221,7 @@ class DoctorPaths:
     context_install_uid: int = 0
     context_install_gid: int = 0
     context_launcher_mode: int = 0o555
+    coding_root_effect_uid: int = 0
     systemd_unit_roots: tuple[Path, ...] = _SYSTEMD_UNIT_ROOTS
     archive_discovery_roots: tuple[Path, ...] = _ARCHIVE_DISCOVERY_ROOTS
     archive_discovery_max_depth: int = _ARCHIVE_DISCOVERY_MAX_DEPTH
@@ -7404,10 +7405,15 @@ def _coding_support_roots(paths: DoctorPaths, group_gid: int) -> dict[str, dict[
     coding = _coding_config(paths).get("coding", {})
     result: dict[str, dict[str, Any]] = {}
     worktree_device = paths.worktrees.stat(follow_symlinks=False).st_dev
-    configured = [coding.get(key) for key in _CODING_SUPPORT_ROOT_KEYS]
+    keys = (
+        _CODING_SUPPORT_ROOT_KEYS
+        if any(coding.get(key) is not None for key in ("lifecycle_root", "root_effect_root"))
+        else _CODING_SUPPORT_ROOT_KEYS[:2]
+    )
+    configured = [coding.get(key) for key in keys]
     invalid_configuration = any(not isinstance(raw, str) or not raw.strip() or not Path(raw).is_absolute() for raw in configured)
-    duplicate = not invalid_configuration and len({str(Path(raw)) for raw in configured}) != len(_CODING_SUPPORT_ROOT_KEYS)
-    for key, raw in zip(_CODING_SUPPORT_ROOT_KEYS, configured, strict=True):
+    duplicate = not invalid_configuration and len({str(Path(raw)) for raw in configured}) != len(keys)
+    for key, raw in zip(keys, configured, strict=True):
         if invalid_configuration or duplicate:
             result[key] = {"path": str(raw or ""), "exact": False, "reason": "all distinct non-empty absolute support roots are required"}
             continue
@@ -7421,7 +7427,7 @@ def _coding_support_roots(paths: DoctorPaths, group_gid: int) -> dict[str, dict[
             group = grp.getgrgid(group_gid)
             root_effect = key == "root_effect_root"
             owner_ok = (
-                observed.st_uid == 0
+                observed.st_uid == paths.coding_root_effect_uid
                 if root_effect
                 else observed.st_uid == 0
                 or owner.pw_gid == group_gid
@@ -7547,22 +7553,31 @@ def _provision_coding_support_roots(
 ) -> list[str]:
     coding = _coding_config(paths).get("coding", {})
     changed: list[str] = []
-    configured = [coding.get(key) for key in _CODING_SUPPORT_ROOT_KEYS]
+    keys = (
+        _CODING_SUPPORT_ROOT_KEYS
+        if any(coding.get(key) is not None for key in ("lifecycle_root", "root_effect_root"))
+        else _CODING_SUPPORT_ROOT_KEYS[:2]
+    )
+    configured = [coding.get(key) for key in keys]
     if (any(not isinstance(raw, str) or not raw.strip() or not Path(raw).is_absolute() for raw in configured)
-            or len({str(Path(raw)) for raw in configured}) != len(_CODING_SUPPORT_ROOT_KEYS)):
+            or len({str(Path(raw)) for raw in configured}) != len(keys)):
         raise DoctorError("all distinct non-empty absolute coding support roots are required")
     if journal is None:
         raise DoctorError("coding support-root provisioning requires a rollback journal")
     worktrees = paths.worktrees.resolve(strict=True)
     worktree_device = paths.worktrees.stat(follow_symlinks=False).st_dev
-    for key, raw in zip(_CODING_SUPPORT_ROOT_KEYS, configured, strict=True):
+    for key, raw in zip(keys, configured, strict=True):
         path = Path(str(raw))
         if not path.is_absolute() or path == Path(path.anchor) or path.is_relative_to(worktrees):
             raise DoctorError(f"coding {key} is not an absolute outside-worktree path")
         try:
             created = _provision_support_root(
                 path, group_gid=group_gid, worktree_device=worktree_device, journal=journal,
-                target_uid=0 if key == "root_effect_root" else None,
+                target_uid=(
+                    paths.coding_root_effect_uid
+                    if key == "root_effect_root"
+                    else None
+                ),
                 target_mode=0o3770 if key == "root_effect_root" else 0o2770,
             )
         except OSError as exc:

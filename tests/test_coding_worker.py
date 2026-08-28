@@ -168,6 +168,52 @@ def test_coding_worker_lease_outlives_bounded_launcher_timeout(tmp_path):
     assert worker.lease_seconds == 2700
 
 
+def test_review_worker_holds_exact_worktree_lease_through_governed_review(
+    tmp_path,
+):
+    """A cooperating writer cannot acquire the reviewed worktree mid-use."""
+
+    from tgw.development.worktree_lease import (
+        WorktreeLeaseBusy,
+        exclusive_worktree_lease,
+    )
+
+    worktree = tmp_path / "review-worktree"
+    _git_worktree(worktree)
+    observed = []
+
+    def governed_projection(_treatment, _payload, exact_worktree):
+        assert exact_worktree == worktree
+        with pytest.raises(WorktreeLeaseBusy):
+            with exclusive_worktree_lease(worktree):
+                pytest.fail("concurrent writer acquired the review lease")
+        observed.append("held-through-review")
+        return {
+            "outcome": "satisfied",
+            "established_conditions": ["reviewed"],
+            "artifacts": [],
+        }
+
+    worker = _worker(
+        "claude-review",
+        tmp_path,
+        governed_projection,
+        repository_root=worktree,
+    )
+    worker.handle(
+        {
+            "payload_json": {
+                "treatment_id": "claude-review",
+                "graph_id": "review-graph",
+                "object_generation": "review-generation",
+                "worktree": str(worktree),
+                "object_id": str(worktree),
+            }
+        }
+    )
+    assert observed == ["held-through-review"]
+
+
 def test_git_identity_trusts_only_the_exact_validated_path(tmp_path, monkeypatch):
     path = tmp_path / "shared-worktree"
     path.mkdir()

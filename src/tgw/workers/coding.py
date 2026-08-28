@@ -669,8 +669,11 @@ class CodingWorker(QueueWorker):
                 raise HardFailure(str(exc)) from exc
 
         lineage_bound_treatment = (
-            treatment_id in {"codex-implement", "controller-verify"}
-            and payload.get("todo_id") is not None
+            treatment_id == "claude-review"
+            or (
+                treatment_id in {"codex-implement", "controller-verify"}
+                and payload.get("todo_id") is not None
+            )
         )
         if lineage_bound_treatment:
             with exclusive_worktree_lease(worktree) as descriptor:

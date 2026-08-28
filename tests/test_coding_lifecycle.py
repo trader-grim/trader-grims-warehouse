@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from tgw import coding_cli
-from tgw.development import coding_lifecycle, coding_root_effect
+from tgw.development import coding_lifecycle, coding_root_effect, local_workflow
 from tgw.development.coding_lifecycle import (
     STAGES,
     LifecycleError,
@@ -117,73 +117,39 @@ def review_result(
         "agent": "codex",
         "body": "Implement the exact bounded headless lifecycle card.",
     }
-    snapshot = digest(
-        {"schema": "tgw-local-review-snapshot/v1", "commit": commit, "tree": tree}
-    )
-    report = {
-        "schema": "tgw-code-review/v1",
-        "verdict": "PASS",
-        "snapshot_hash": snapshot,
-        "summary": "independent diagnostic review passed",
-        "findings": [],
+    source_protection = {
+        "trusted_uid": 0,
+        "trusted_gid": 0,
+        "root_identity": {"device": 1, "inode": 2},
+        "held_through_use": True,
     }
-    context_unsigned = {
-        "schema": "tgw-local-independent-review-context/v1",
-        "mode": "exact-clean-candidate-semantic-review",
-        "snapshot_hash": snapshot,
-        "worktree": str(Path(record["binding"]["worktree"]).resolve()),
+    protected = {
+        "schema": "tgw-local-governed-review-projection/v1",
+        "provider_neutral": True,
+        "privileged_authority": False,
+        "candidate_commit": commit,
+        "candidate_tree": tree,
         "plan_commit": record["binding"]["plan_commit"],
-        "source_commit": record["binding"]["source_commit"],
-        "card_idempotency_key": fence["card_idempotency_key"],
-        "candidate_binding_hash": candidate["candidate_binding_hash"],
-        "task_spec_hash": digest(task),
-    }
-    execution_unsigned = {
-        "schema": "tgw-local-independent-review-execution/v1",
-        "actor": "codex",
-        "uid": 1001,
-        "pid": 1234,
-        "service": "tgw-claude-review-worker.service",
-        "queue": "claude-review",
-        "network": True,
-        "provider": "codex-ephemeral-read-only",
-        "independence": {
-            "separate_queue_job": True,
-            "ephemeral_provider_session": True,
-            "candidate_sandbox": "read-only",
-            "authority": False,
-        },
-        "context": {
-            **context_unsigned,
-            "context_hash": digest(context_unsigned),
-        },
+        "execution_hash": "sha256:" + "3" * 64,
+        "role_receipt_hash": "sha256:" + "4" * 64,
+        "candidate_receipt_hash": "sha256:" + "5" * 64,
+        "governed_bundle_hash": "sha256:" + "6" * 64,
+        "result_hash": "sha256:" + "7" * 64,
+        "source_protection": source_protection,
+        "source_protection_hash": digest(source_protection),
     }
     artifact = {
-        "kind": "tgw_review_report",
+        "kind": "tgw_governed_review_projection",
         "diagnostic_verdict": "PASS_NON_ADMITTING",
-        "execution": {
-            **execution_unsigned,
-            "execution_hash": digest(execution_unsigned),
-        },
         "root_id": record["root_id"],
         "binding_hash": record["binding"]["binding_hash"],
         "job_binding_hash": fence["job_binding_hash"],
         "job_id": job_id,
         "card_idempotency_key": fence["card_idempotency_key"],
         "candidate_binding_hash": candidate["candidate_binding_hash"],
-        "candidate_commit": commit,
-        "candidate_tree": tree,
-        "report": report,
-        "report_bytes": canonical(report).decode(),
-        "report_sha256": "sha256:" + hashlib.sha256(canonical(report)).hexdigest(),
-        "checks": [
-            {
-                "name": name,
-                "returncode": 0,
-                "output_sha256": "sha256:" + "7" * 64,
-            }
-            for name in ("git-diff-check",)
-        ],
+        "task_spec_hash": digest(task),
+        "protected_review": protected,
+        "projection_hash": digest(protected),
     }
     return {
         "status": "PASS",
@@ -262,6 +228,21 @@ def root_paths(tmp_path: Path, store: LifecycleStore, worktree: Path) -> RootEff
         group_gid=os.getegid(),
         root_uid=os.geteuid(),
     )
+
+
+def protected_review_evidence(request: dict) -> dict:
+    unsigned = {
+        "schema": "tgw-local-coding-protected-review-evidence/v1",
+        "role": "independent-review",
+        "candidate_commit": request["candidate_commit"],
+        "candidate_tree": request["candidate_tree"],
+        "plan_commit": request["plan_commit"],
+        "governed_bundle_hash": "sha256:" + "6" * 64,
+        "candidate_receipt_hash": "sha256:" + "5" * 64,
+        "role_receipt_hash": "sha256:" + "4" * 64,
+        "execution_hash": "sha256:" + "3" * 64,
+    }
+    return {**unsigned, "protected_review_hash": digest(unsigned)}
 
 
 def test_create_is_immediate_group_shared_and_duplicate_replay_is_one_record(
@@ -577,7 +558,7 @@ def test_resume_recovers_worker_completed_crash_boundary_with_new_fenced_job(
     assert captured[0][1] == {1915}
 
 
-def test_review_runner_and_both_receipt_boundaries_require_semantic_pass(
+def test_review_worker_projects_only_exact_provider_neutral_governed_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     worktree = tmp_path / "worktree"
@@ -607,31 +588,57 @@ def test_review_runner_and_both_receipt_boundaries_require_semantic_pass(
     payload["job_id"] = "review-job"
     payload["todo_agent"] = "implementation-actor"
 
-    def passing_runner(*_args, **_kwargs):
-        return subprocess.CompletedProcess([], 0, "checked", "")
+    request_root = tmp_path / "protected-requests"
+    request_root.mkdir()
+    source_protection = {
+        "trusted_uid": 0,
+        "trusted_gid": 0,
+        "root_identity": {"device": 1, "inode": 2},
+        "held_through_use": True,
+    }
+    normalized_execution = {
+        "source": {
+            "commit": commit,
+            "tree": tree,
+            "snapshot_hash": "sha256:" + "8" * 64,
+        },
+        "plan_commit": payload["plan_binding"]["plan_commit"],
+        "review": {"verdict": "PASS", "findings": []},
+        "source_protection": source_protection,
+        "execution_hash": "sha256:" + "3" * 64,
+    }
+    finalized = {
+        "execution": {"opaque": "validated by governed adapter"},
+        "governed_review_receipt": {
+            "role": "independent-review",
+            "status": "PASS",
+            "established_conditions": ["reviewed"],
+            "receipt_hash": "sha256:" + "4" * 64,
+        },
+        "governed_execution_bundle": {
+            "source_commit": commit,
+            "source_tree": tree,
+            "plan_commit": payload["plan_binding"]["plan_commit"],
+            "role": "independent-review",
+            "candidate_receipt": {
+                "ref": "candidate:receipt",
+                "content_sha256": "sha256:" + "5" * 64,
+            },
+            "bundle_hash": "sha256:" + "6" * 64,
+        },
+        "result": {"overall": "PASS", "result_hash": "sha256:" + "7" * 64},
+        "validation": {"status": "PASS"},
+    }
+    observed_requests = []
 
-    def semantic_backend(request, cwd):
-        assert cwd == worktree
-        assert request["output_contract"] == "tgw-code-review/v1"
-        assert request["review_context"]["task_spec"] == payload["task_spec"]
-        assert request["review_context"]["review_mode"] == "NON_ADMITTING_DIAGNOSTIC"
-        return {
-            "schema": "tgw-code-review/v1",
-            "verdict": "PASS",
-            "snapshot_hash": request["snapshot_hash"],
-            "summary": "ephemeral semantic review found no defects",
-            "findings": [],
-        }
-
-    monkeypatch.setattr(
-        "tgw.development.coding_review.pwd.getpwuid",
-        lambda _uid: type("Identity", (), {"pw_name": "review-actor"})(),
-    )
     result = run_local_review(
         payload,
         worktree,
-        runner=passing_runner,
-        semantic_backend=semantic_backend,
+        governed_runner=lambda path: observed_requests.append(path) or finalized,
+        execution_validator=lambda _value: normalized_execution,
+        config_loader=lambda *_args, **_kwargs: {
+            "request_root": request_root,
+        },
     )
     artifact = validate_review_artifact(
         result,
@@ -639,40 +646,54 @@ def test_review_runner_and_both_receipt_boundaries_require_semantic_pass(
         worktree=worktree,
         expected_job_id="review-job",
     )
+    assert observed_requests == [request_root / f"{commit}.request.json"]
     assert artifact["diagnostic_verdict"] == "PASS_NON_ADMITTING"
-    assert artifact["report"]["verdict"] == "PASS"
-    assert artifact["report"]["findings"] == []
-    assert artifact["execution"]["provider"] == "codex-ephemeral-read-only"
-    assert artifact["execution"]["independence"]["authority"] is False
-    assert artifact["checks"]
-    failed = run_local_review(
-        payload,
-        worktree,
-        runner=passing_runner,
-        semantic_backend=lambda request, _cwd: {
-            "schema": "tgw-code-review/v1",
-            "verdict": "FAIL",
-            "snapshot_hash": request["snapshot_hash"],
-            "summary": "semantic defect remains",
-            "findings": [
-                {
-                    "severity": "high",
-                    "path": "pyproject.toml",
-                    "line": 1,
-                    "message": "bounded task behavior is incomplete",
-                }
-            ],
-        },
-    )
-    assert failed["outcome"] == "failed"
-    assert failed["established_conditions"] == []
-    assert failed["artifacts"][0]["diagnostic_verdict"] == "FAIL"
+    assert artifact["protected_review"]["provider_neutral"] is True
+    assert artifact["protected_review"]["privileged_authority"] is False
+    assert artifact["protected_review"]["source_protection"][
+        "held_through_use"
+    ] is True
+    failed = {**result, "outcome": "failed", "established_conditions": []}
     with pytest.raises(ReviewRunnerError, match="success conditions"):
         validate_review_artifact(
             failed,
             payload=payload,
             worktree=worktree,
             expected_job_id="review-job",
+        )
+    mismatched = {
+        **finalized,
+        "governed_execution_bundle": {
+            **finalized["governed_execution_bundle"],
+            "source_tree": "9" * 40,
+        },
+    }
+    with pytest.raises(ReviewRunnerError, match="exact bindings"):
+        run_local_review(
+            payload,
+            worktree,
+            governed_runner=lambda _path: mismatched,
+            execution_validator=lambda _value: normalized_execution,
+            config_loader=lambda *_args, **_kwargs: {
+                "request_root": request_root,
+            },
+        )
+    unheld_execution = {
+        **normalized_execution,
+        "source_protection": {
+            **source_protection,
+            "held_through_use": False,
+        },
+    }
+    with pytest.raises(ReviewRunnerError, match="exact bindings"):
+        run_local_review(
+            payload,
+            worktree,
+            governed_runner=lambda _path: finalized,
+            execution_validator=lambda _value: unheld_execution,
+            config_loader=lambda *_args, **_kwargs: {
+                "request_root": request_root,
+            },
         )
     with pytest.raises(ReviewRunnerError, match="one report artifact"):
         validate_review_artifact(
@@ -777,6 +798,18 @@ def test_root_request_rejects_forbidden_fields_and_is_idempotent_after_recovery(
     stale["request_hash"] = digest(stale_unsigned)
     with pytest.raises(RootEffectError, match="differs from lifecycle"):
         validate_request(stale, store=store)
+    with pytest.raises(RootEffectError, match="protected review refused"):
+        process_request(
+            paths,
+            request,
+            store=store,
+            effects=lambda *_args: pytest.fail(
+                "untrusted request reached privileged effects"
+            ),
+            review_verifier=lambda *_args: (_ for _ in ()).throw(
+                RootEffectError("protected review refused untrusted trigger")
+            ),
+        )
 
     request_file = coding_root_effect.request_path(paths, record["root_id"])
     request_file.write_bytes(canonical({"schema": "invalid"}) + b"\n")
@@ -822,13 +855,30 @@ def test_root_request_rejects_forbidden_fields_and_is_idempotent_after_recovery(
             "canary_hash": "sha256:" + "8" * 64,
         },
     )
-    first_effects = coding_root_effect._default_effects(paths, request)
+    protected = protected_review_evidence(request)
+    first_effects = coding_root_effect._default_effects(
+        paths, {**request, "_protected_review": protected}
+    )
     assert first_effects["selection"]["state"] == "completed"
-    recovered = process_request(paths, request, store=store)
-    replay = process_request(paths, request, store=store)
+
+    def verifier(*_args):
+        return protected
+
+    recovered = process_request(
+        paths, request, store=store, review_verifier=verifier
+    )
+    replay = process_request(
+        paths,
+        request,
+        store=store,
+        review_verifier=lambda *_args: pytest.fail(
+            "trusted response replay must not rerun review"
+        ),
+    )
     assert recovered == replay
     assert recovered["status"] == "PASS"
     assert recovered["candidate_commit"] == commit
+    assert recovered["governed_review_bundle_hash"] == "sha256:" + "6" * 64
     assert recovered["technical_result_hash"].startswith("sha256:")
     response_file = coding_root_effect.response_path(paths, record["root_id"])
     assert response_file.stat().st_uid == paths.root_uid
@@ -840,6 +890,132 @@ def test_root_request_rejects_forbidden_fields_and_is_idempotent_after_recovery(
     assert (
         paths.runtime_root / "releases" / commit / ".release-manifest.json"
     ).is_file()
+
+
+def test_root_consumer_requires_exact_protected_governed_receipt_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "-q", repository], check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "protected@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Protected Review"],
+        cwd=repository,
+        check=True,
+    )
+    (repository / "source.py").write_text("RESULT = 1915\n")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "candidate"], cwd=repository, check=True
+    )
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True
+    ).strip()
+    store = store_at(tmp_path / "journal")
+    record = record_at_integration(
+        store,
+        repository,
+        source=commit,
+        source_tree=tree,
+        commit=commit,
+        tree=tree,
+    )
+    paths = root_paths(tmp_path, store, repository)
+    request = build_request(record)
+    pins = tmp_path / "pins.json"
+    sink = tmp_path / "sink.json"
+    monkeypatch.setattr(
+        coding_root_effect,
+        "load_protected_review_config",
+        lambda *_args, **_kwargs: {
+            "candidate_evidence_descriptor_config": pins,
+            "execution_evidence_sink_config": sink,
+        },
+    )
+    from tgw import context_generation_status
+
+    monkeypatch.setattr(
+        context_generation_status, "_protected_directory", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        context_generation_status, "_protected_json", lambda *_args: {}
+    )
+    monkeypatch.setattr(
+        coding_root_effect,
+        "PinnedCandidateEvidenceDescriptor",
+        lambda *_args, **_kwargs: type(
+            "Descriptor",
+            (),
+            {
+                "w06_plan_materialization_pin": {
+                    "plan_source": {"commit": request["plan_commit"]}
+                }
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        coding_root_effect,
+        "PinnedGitReceiptSink",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    def governed_bundle(*_args, **_kwargs):
+        return {
+            "receipt": {"receipt_hash": "sha256:" + "5" * 64},
+            "role_receipt": {
+                "receipt_hash": "sha256:" + "4" * 64,
+                "artifacts": [
+                    {
+                        "kind": "governed_review_execution",
+                        "execution_hash": "sha256:" + "3" * 64,
+                    }
+                ],
+            },
+            "card": {
+                "role": "independent-review",
+                "plan_commit": request["plan_commit"],
+                "solution_id": request["solution_hash"],
+                "bindings": {
+                    "plan_graph": {"hash": request["solution_hash"]},
+                    "authority_conditions": {"hash": request["closure_hash"]},
+                },
+            },
+            "bundle_hash": "sha256:" + "6" * 64,
+        }
+
+    monkeypatch.setattr(
+        coding_root_effect, "verify_governed_execution_bundle", governed_bundle
+    )
+    verified = coding_root_effect.verify_protected_review_evidence(
+        paths, request, record
+    )
+    assert verified["role"] == "independent-review"
+    assert verified["governed_bundle_hash"] == "sha256:" + "6" * 64
+
+    def substituted_bundle(*_args, **_kwargs):
+        value = governed_bundle()
+        value["bundle_hash"] = "sha256:" + "9" * 64
+        return value
+
+    monkeypatch.setattr(
+        coding_root_effect,
+        "verify_governed_execution_bundle",
+        substituted_bundle,
+    )
+    with pytest.raises(
+        coding_root_effect.ProtectedReviewEvidenceError,
+        match="differs from protected",
+    ):
+        coding_root_effect.verify_protected_review_evidence(
+            paths, request, record
+        )
 
 
 def test_context_projection_is_terminal_bound_and_retry_state_is_cadenced(
@@ -1120,6 +1296,11 @@ def test_installed_config_and_services_are_exact_and_forbid_broad_effects():
     assert value["coding"]["commands"]["claude-review"] == [
         "/opt/TGW/.venvs/controller/bin/tgw-local-independent-review-runner"
     ]
+    parsed = local_workflow.parser().parse_args(
+        ["worker", "--queue", "claude-review"]
+    )
+    assert parsed.operation == "worker"
+    assert parsed.queue == "claude-review"
     assert "lifecycle_commands" not in value["coding"]
     managed = (
         "tgw-claude-review-worker.service",
@@ -1143,8 +1324,8 @@ def test_installed_config_and_services_are_exact_and_forbid_broad_effects():
         assert "[install]" in body
         assert "type=simple" in body
         if name == "tgw-claude-review-worker.service":
-            assert "tgw_codex_review_bin=/home/codex/.local/bin/codex" in body
-            assert "tgw_codex_review_auth=/home/codex/.codex/auth.json" in body
+            assert "tgw_codex_review_bin" not in body
+            assert "tgw_codex_review_auth" not in body
             assert "privatenetwork=true" not in body
         for forbidden in ("ssh ", "tgw-prod", "approval", "admission", "remote"):
             assert forbidden not in body

@@ -1674,7 +1674,12 @@ def verify_governed_execution_bundle(
         raise CandidateReceiptSinkError("governed execution evidence bundle cannot be verified") from exc
     if receipt["role"] != role or artifacts["role_receipt"].get("role") != role:
         raise CandidateReceiptSinkError("governed execution evidence bundle role mismatch")
-    return {"receipt": receipt, "role_receipt": artifacts["role_receipt"], "bundle_hash": bundle["bundle_hash"]}
+    return {
+        "receipt": receipt,
+        "role_receipt": artifacts["role_receipt"],
+        "card": artifacts["card"],
+        "bundle_hash": bundle["bundle_hash"],
+    }
 
 
 def resolve_approved_plan_authority(

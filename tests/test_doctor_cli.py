@@ -171,11 +171,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         directory.mkdir(parents=True, exist_ok=True)
         root_effect = directory == root_effect_root
         directory.chmod(0o3770 if root_effect else 0o2770)
-        os.chown(
-            directory,
-            0 if root_effect else -1,
-            grp.getgrnam("tgw-coders").gr_gid,
-        )
+        os.chown(directory, -1, grp.getgrnam("tgw-coders").gr_gid)
     for relative in _git(repository, "ls-files").splitlines():
         source = repository / relative
         path = release / relative
@@ -280,6 +276,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         trusted_release_owners=(os.getuid(),),
         context_install_uid=os.getuid(),
         context_install_gid=os.getgid(),
+        coding_root_effect_uid=os.getuid(),
         systemd_unit_roots=(tmp_path / "systemd-units",),
         archive_discovery_roots=(tmp_path / "archive-discovery",),
     )
@@ -5281,7 +5278,7 @@ def test_coding_support_roots_require_protected_same_filesystem_directories(tmp_
     group_gid = __import__("grp").getgrnam("tgw-coders").gr_gid
 
     before = doctor_cli._coding_support_roots(paths, group_gid)
-    assert not any(row["exact"] for row in before.values())
+    assert not all(row["exact"] for row in before.values())
 
     for directory in (archive, runner):
         directory.mkdir(parents=True, exist_ok=True)
