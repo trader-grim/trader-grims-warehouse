@@ -448,6 +448,7 @@ def test_coding_bootstrap_is_explicit_and_context_independent(
 
 def test_source_bootstrap_launcher_does_not_depend_on_selected_runtime() -> None:
     launcher = (ROOT / "bin/tgw-coding-bootstrap").read_text(encoding="utf-8")
+    assert launcher.splitlines()[0] == "#!/usr/bin/python3.13 -IS"
     assert "coding-runtime/current" not in launcher
     assert "/opt/TGW/.venvs" not in launcher
     assert "tgw_context" not in launcher.lower()
@@ -462,6 +463,39 @@ def test_source_bootstrap_launcher_does_not_depend_on_selected_runtime() -> None
     assert 'Path("/var/tmp")' in launcher
     assert '"tgw.doctor_cli"' in launcher
     assert "_extract_exact" in launcher
+
+
+def test_source_bootstrap_shebang_ignores_hostile_python_startup(
+    tmp_path: Path,
+) -> None:
+    launcher = ROOT / "bin/tgw-coding-bootstrap"
+    hostile = tmp_path / "hostile"
+    hostile.mkdir()
+    import_marker = tmp_path / "imported"
+    site_marker = tmp_path / "site-loaded"
+    (hostile / "argparse.py").write_text(
+        f"from pathlib import Path\nPath({str(import_marker)!r}).write_text('bad')\n",
+        encoding="utf-8",
+    )
+    (hostile / "sitecustomize.py").write_text(
+        f"from pathlib import Path\nPath({str(site_marker)!r}).write_text('bad')\n",
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(hostile)
+    completed = subprocess.run(
+        [str(launcher), "--commit", "0" * 40],
+        cwd=hostile,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 1
+    assert "tgw-coding-bootstrap:" in completed.stderr
+    assert not import_marker.exists()
+    assert not site_marker.exists()
 
 
 def test_source_bootstrap_reconstructs_only_exact_regular_git_files(

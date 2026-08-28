@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3.13 -IS
 """Acyclic, exact first-install entry point for the local coding runtime.
 
 Install this reviewed file as ``/usr/local/sbin/tgw-coding-bootstrap`` owned by
@@ -136,6 +136,15 @@ def _tree_files(
 def _require_installed_root_copy() -> None:
     invoked = Path(__file__)
     state = invoked.lstat()
+    if (
+        not sys.flags.isolated
+        or not sys.flags.ignore_environment
+        or not sys.flags.no_site
+        or not sys.flags.safe_path
+    ):
+        raise BootstrapError(
+            "bootstrap interpreter must start isolated without site or ambient paths"
+        )
     for directory in (
         Path("/usr"),
         Path("/usr/bin"),
