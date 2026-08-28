@@ -479,8 +479,10 @@ def test_source_bootstrap_launcher_does_not_depend_on_selected_runtime() -> None
 def test_bootstrap_release_ownership_promotion_rejects_symlink(
     tmp_path: Path,
 ) -> None:
-    release = tmp_path / "release"
-    release.mkdir()
+    release = tmp_path / "runtime" / "releases" / "release"
+    release.mkdir(parents=True)
+    release.parent.parent.chmod(0o750)
+    release.parent.chmod(0o750)
     (release / "linked").symlink_to("missing")
     release.chmod(0o555)
 
@@ -497,6 +499,73 @@ def test_bootstrap_release_ownership_promotion_rejects_symlink(
     finally:
         release.chmod(0o755)
         (release / "linked").unlink(missing_ok=True)
+
+
+def test_bootstrap_release_ownership_promotion_rejects_hard_link(
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "runtime" / "releases" / "release"
+    release.mkdir(parents=True)
+    release.parent.parent.chmod(0o750)
+    release.parent.chmod(0o750)
+    outside = tmp_path / "outside"
+    outside.write_text("bound bytes", encoding="utf-8")
+    outside.chmod(0o444)
+    os.link(outside, release / "linked")
+    release.chmod(0o555)
+    before = outside.stat(follow_symlinks=False)
+
+    try:
+        with pytest.raises(
+            doctor_cli.DoctorError,
+            match="bootstrap release cannot be promoted safely",
+        ):
+            doctor_cli._promote_bootstrap_release_ownership(
+                release,
+                uid=os.getuid(),
+                gid=os.getgid(),
+            )
+        after = outside.stat(follow_symlinks=False)
+        assert (after.st_uid, after.st_gid, after.st_ino) == (
+            before.st_uid,
+            before.st_gid,
+            before.st_ino,
+        )
+    finally:
+        release.chmod(0o755)
+        outside.chmod(0o644)
+
+
+def test_bootstrap_release_ownership_promotion_never_path_chowns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = tmp_path / "runtime" / "releases" / "release"
+    nested = release / "nested"
+    nested.mkdir(parents=True)
+    release.parent.parent.chmod(0o750)
+    release.parent.chmod(0o750)
+    payload = nested / "payload"
+    payload.write_text("exact bytes", encoding="utf-8")
+    payload.chmod(0o444)
+    nested.chmod(0o555)
+    release.chmod(0o555)
+
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pathname chown must not be used")
+        ),
+    )
+    doctor_cli._promote_bootstrap_release_ownership(
+        release,
+        uid=os.getuid(),
+        gid=os.getgid(),
+    )
+
+    assert payload.read_text(encoding="utf-8") == "exact bytes"
+    assert payload.stat(follow_symlinks=False).st_nlink == 1
 
 
 def test_source_bootstrap_shebang_ignores_hostile_python_startup(

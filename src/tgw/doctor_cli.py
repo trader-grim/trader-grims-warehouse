@@ -2925,6 +2925,8 @@ def _verify_release_tree(paths: DoctorPaths, desired: str, release: Path) -> dic
             unsafe_paths.append(relative + ":owner")
         if not stat.S_ISLNK(observed.st_mode) and observed.st_mode & 0o022:
             unsafe_paths.append(relative + ":writable")
+        if stat.S_ISREG(observed.st_mode) and observed.st_nlink != 1:
+            unsafe_paths.append(relative + ":link-count")
     missing = sorted(set(expected) - actual)
     extra = sorted(actual - set(expected))
     mismatched: list[str] = []
@@ -2942,6 +2944,9 @@ def _verify_release_tree(paths: DoctorPaths, desired: str, release: Path) -> dic
                 mismatched.append(relative + ":type")
                 continue
             before = path.stat(follow_symlinks=False)
+            if before.st_nlink != 1:
+                mismatched.append(relative + ":link-count")
+                continue
             data = path.read_bytes()
             after = path.stat(follow_symlinks=False)
             if (
@@ -2949,11 +2954,13 @@ def _verify_release_tree(paths: DoctorPaths, desired: str, release: Path) -> dic
                 before.st_ino,
                 before.st_size,
                 before.st_mtime_ns,
+                before.st_nlink,
             ) != (
                 after.st_dev,
                 after.st_ino,
                 after.st_size,
                 after.st_mtime_ns,
+                after.st_nlink,
             ):
                 mismatched.append(relative + ":changed-during-read")
             executable = bool(after.st_mode & 0o111)
@@ -3001,22 +3008,229 @@ def _verify_release_tree(paths: DoctorPaths, desired: str, release: Path) -> dic
 def _promote_bootstrap_release_ownership(
     release: Path, *, uid: int, gid: int
 ) -> None:
-    """Promote one already-verified bootstrap release to its immutable owner."""
-    entries = [release, *release.rglob("*")]
-    for path in entries:
-        observed = path.stat(follow_symlinks=False)
+    """Promote verified bytes without chowning a materializer-owned file inode.
+
+    Directory descriptors bind every lookup to the opened release even if a
+    pathname is concurrently renamed.  Directories are frozen top-down.  Each
+    regular file must start single-linked and is replaced by a new root-owned
+    inode, so an external hard link can never receive a privileged ownership
+    change.
+    """
+
+    open_directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    open_file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    allowed_source_uids = {uid, os.geteuid()}
+    try:
+        allowed_source_uids.add(pwd.getpwnam("db").pw_uid)
+    except KeyError:
+        pass
+
+    def validate_directory(observed: os.stat_result) -> int:
+        mode = stat.S_IMODE(observed.st_mode)
         if (
-            path.is_symlink()
-            or not (stat.S_ISDIR(observed.st_mode) or stat.S_ISREG(observed.st_mode))
-            or observed.st_mode & 0o022
+            not stat.S_ISDIR(observed.st_mode)
+            or observed.st_uid not in allowed_source_uids
+            or mode != 0o555
         ):
             raise DoctorError("bootstrap release cannot be promoted safely")
-    for path in entries:
-        os.chown(path, uid, gid, follow_symlinks=False)
-    for path in entries:
-        observed = path.stat(follow_symlinks=False)
-        if observed.st_uid != uid or observed.st_gid != gid or observed.st_mode & 0o022:
+        return mode
+
+    def validate_file(observed: os.stat_result) -> int:
+        mode = stat.S_IMODE(observed.st_mode)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or observed.st_uid not in allowed_source_uids
+            or observed.st_nlink != 1
+            or mode not in {0o444, 0o555}
+        ):
+            raise DoctorError("bootstrap release cannot be promoted safely")
+        return mode
+
+    def promote_file(parent_fd: int, name: str, expected: os.stat_result) -> None:
+        source_fd = os.open(name, open_file_flags, dir_fd=parent_fd)
+        temporary = f".tgw-root-promote-{secrets.token_hex(16)}"
+        target_fd: int | None = None
+        try:
+            before = os.fstat(source_fd)
+            if (before.st_dev, before.st_ino) != (expected.st_dev, expected.st_ino):
+                raise DoctorError("bootstrap release changed during ownership promotion")
+            mode = validate_file(before)
+            target_fd = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            while True:
+                chunk = os.read(source_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(target_fd, view)
+                    if written <= 0:
+                        raise DoctorError(
+                            "short write during bootstrap ownership promotion"
+                        )
+                    view = view[written:]
+            after = os.fstat(source_fd)
+            if (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_nlink,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_nlink,
+            ):
+                raise DoctorError("bootstrap release changed during ownership promotion")
+            os.fchown(target_fd, uid, gid)
+            os.fchmod(target_fd, mode)
+            os.fsync(target_fd)
+            os.close(target_fd)
+            target_fd = None
+            os.replace(
+                temporary,
+                name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            promoted = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(promoted.st_mode)
+                or promoted.st_uid != uid
+                or promoted.st_gid != gid
+                or promoted.st_nlink != 1
+                or stat.S_IMODE(promoted.st_mode) != mode
+            ):
+                raise DoctorError("bootstrap release ownership promotion is incomplete")
+        finally:
+            if target_fd is not None:
+                os.close(target_fd)
+            try:
+                os.unlink(temporary, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            os.close(source_fd)
+
+    def promote_directory(descriptor: int) -> None:
+        observed = os.fstat(descriptor)
+        mode = validate_directory(observed)
+        os.fchown(descriptor, uid, gid)
+        # Once descriptor-bound ownership is fixed, make the directory
+        # temporarily owner-private so replacement inodes can be published
+        # without granting the materializer any writable namespace.
+        os.fchmod(descriptor, 0o700)
+        try:
+            names = sorted(os.listdir(descriptor))
+            for name in names:
+                child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISDIR(child.st_mode):
+                    child_fd = os.open(name, open_directory_flags, dir_fd=descriptor)
+                    try:
+                        bound = os.fstat(child_fd)
+                        if (bound.st_dev, bound.st_ino) != (child.st_dev, child.st_ino):
+                            raise DoctorError(
+                                "bootstrap release changed during ownership promotion"
+                            )
+                        promote_directory(child_fd)
+                    finally:
+                        os.close(child_fd)
+                elif stat.S_ISREG(child.st_mode):
+                    promote_file(descriptor, name, child)
+                else:
+                    raise DoctorError("bootstrap release cannot be promoted safely")
+            if sorted(os.listdir(descriptor)) != names:
+                raise DoctorError("bootstrap release changed during ownership promotion")
+        finally:
+            os.fchmod(descriptor, mode)
+        final = os.fstat(descriptor)
+        if (
+            final.st_uid != uid
+            or final.st_gid != gid
+            or stat.S_IMODE(final.st_mode) != mode
+        ):
             raise DoctorError("bootstrap release ownership promotion is incomplete")
+        os.fsync(descriptor)
+
+    releases = release.parent
+    runtime_root = releases.parent
+    if releases.name != "releases" or release.name in {"", ".", ".."}:
+        raise DoctorError("bootstrap release cannot be promoted safely")
+    runtime_parent = runtime_root.parent.stat(follow_symlinks=False)
+    if (
+        runtime_root.parent.is_symlink()
+        or not stat.S_ISDIR(runtime_parent.st_mode)
+        or runtime_parent.st_uid != os.geteuid()
+        or runtime_parent.st_mode & 0o022
+    ):
+        raise DoctorError("bootstrap runtime parent is not trusted")
+
+    runtime_fd: int | None = None
+    releases_fd: int | None = None
+    release_fd: int | None = None
+    runtime_original: os.stat_result | None = None
+    releases_original: os.stat_result | None = None
+    try:
+        runtime_fd = os.open(runtime_root, open_directory_flags)
+        runtime_original = os.fstat(runtime_fd)
+        if (
+            not stat.S_ISDIR(runtime_original.st_mode)
+            or runtime_original.st_uid not in allowed_source_uids
+            or runtime_original.st_mode & 0o022
+        ):
+            raise DoctorError("bootstrap runtime root cannot be frozen safely")
+        os.fchown(runtime_fd, uid, gid)
+        os.fchmod(runtime_fd, 0o700)
+
+        releases_expected = os.stat(
+            "releases", dir_fd=runtime_fd, follow_symlinks=False
+        )
+        releases_fd = os.open("releases", open_directory_flags, dir_fd=runtime_fd)
+        releases_original = os.fstat(releases_fd)
+        if (
+            (releases_original.st_dev, releases_original.st_ino)
+            != (releases_expected.st_dev, releases_expected.st_ino)
+            or not stat.S_ISDIR(releases_original.st_mode)
+            or releases_original.st_uid not in allowed_source_uids
+            or releases_original.st_mode & 0o022
+        ):
+            raise DoctorError("bootstrap releases root cannot be frozen safely")
+        os.fchown(releases_fd, uid, gid)
+        os.fchmod(releases_fd, 0o700)
+
+        release_expected = os.stat(
+            release.name, dir_fd=releases_fd, follow_symlinks=False
+        )
+        release_fd = os.open(release.name, open_directory_flags, dir_fd=releases_fd)
+        release_bound = os.fstat(release_fd)
+        if (release_bound.st_dev, release_bound.st_ino) != (
+            release_expected.st_dev,
+            release_expected.st_ino,
+        ):
+            raise DoctorError("bootstrap release changed before ownership promotion")
+        promote_directory(release_fd)
+    except OSError as exc:
+        raise DoctorError("bootstrap release ownership promotion failed") from exc
+    finally:
+        if release_fd is not None:
+            os.close(release_fd)
+        if releases_fd is not None:
+            if releases_original is not None:
+                os.fchown(
+                    releases_fd, releases_original.st_uid, releases_original.st_gid
+                )
+                os.fchmod(releases_fd, stat.S_IMODE(releases_original.st_mode))
+            os.close(releases_fd)
+        if runtime_fd is not None:
+            if runtime_original is not None:
+                os.fchown(runtime_fd, runtime_original.st_uid, runtime_original.st_gid)
+                os.fchmod(runtime_fd, stat.S_IMODE(runtime_original.st_mode))
+            os.close(runtime_fd)
 
 
 def _launcher_links(paths: DoctorPaths) -> dict[Path, Path]:
