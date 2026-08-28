@@ -2998,6 +2998,27 @@ def _verify_release_tree(paths: DoctorPaths, desired: str, release: Path) -> dic
     }
 
 
+def _promote_bootstrap_release_ownership(
+    release: Path, *, uid: int, gid: int
+) -> None:
+    """Promote one already-verified bootstrap release to its immutable owner."""
+    entries = [release, *release.rglob("*")]
+    for path in entries:
+        observed = path.stat(follow_symlinks=False)
+        if (
+            path.is_symlink()
+            or not (stat.S_ISDIR(observed.st_mode) or stat.S_ISREG(observed.st_mode))
+            or observed.st_mode & 0o022
+        ):
+            raise DoctorError("bootstrap release cannot be promoted safely")
+    for path in entries:
+        os.chown(path, uid, gid, follow_symlinks=False)
+    for path in entries:
+        observed = path.stat(follow_symlinks=False)
+        if observed.st_uid != uid or observed.st_gid != gid or observed.st_mode & 0o022:
+            raise DoctorError("bootstrap release ownership promotion is incomplete")
+
+
 def _launcher_links(paths: DoctorPaths) -> dict[Path, Path]:
     current = paths.runtime_root / "current/bin"
     return {
@@ -7627,6 +7648,16 @@ def repair_coding_bootstrap(
     except json.JSONDecodeError as exc:
         raise DoctorError("coding bootstrap materializer returned invalid evidence") from exc
     release = paths.runtime_root / "releases" / commit
+    # The ordinary db:tgw-coders materializer is deliberately unable to
+    # create root-owned bytes.  Root first validates the exact Git-bound
+    # immutable release, then performs the narrow ownership promotion needed
+    # by the cold Context launcher and validates the same tree again.
+    _verify_release_tree(paths, commit, release)
+    _promote_bootstrap_release_ownership(
+        release,
+        uid=paths.context_install_uid,
+        gid=paths.context_install_gid,
+    )
     _verify_release_tree(paths, commit, release)
     current = paths.runtime_root / "current"
     if not current.is_symlink() or current.resolve(strict=True) != release.resolve():

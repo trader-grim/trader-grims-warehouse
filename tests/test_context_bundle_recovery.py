@@ -450,6 +450,7 @@ def _launcher_module(
     legacy_parser_api: str | None = None,
     snapshot_raw: bytes | None = None,
     snapshot_task_updates: dict[str, Any] | None = None,
+    extra_release_file: str | None = None,
 ) -> ModuleType:
     context_source = tmp_path / "source"
     context_source.mkdir()
@@ -573,7 +574,15 @@ def _launcher_module(
         tampered.chmod(0o644)
         tampered.write_text("# tampered\n", encoding="utf-8")
         tampered.chmod(0o444)
-    for directory in (runtime, runtime.parent, runtime.parent.parent):
+    release = runtime.parent.parent
+    manifest = release / ".release-manifest.json"
+    manifest.write_text('{"schema":"tgw-release-manifest-v1"}\n', encoding="utf-8")
+    manifest.chmod(0o444)
+    if extra_release_file is not None:
+        unexpected = release / extra_release_file
+        unexpected.write_text("unexpected\n", encoding="utf-8")
+        unexpected.chmod(0o444)
+    for directory in (runtime, runtime.parent, release):
         directory.chmod(0o555)
     current = tmp_path / "tgw-context-current.json"
     current.write_bytes(snapshot_raw if snapshot_raw is not None else _canonical(snapshot) + b"\n")
@@ -594,8 +603,12 @@ def _launcher_module(
         'CURRENT_CONTEXT = Path("/opt/TGW/tgw-lib/config/tgw-context-current.json")': (
             f"CURRENT_CONTEXT = Path({str(current)!r})"
         ),
-        "RUNTIME_OWNER_UID = 0": f"RUNTIME_OWNER_UID = {os.getuid()}",
-        "RUNTIME_OWNER_GID = 0": f"RUNTIME_OWNER_GID = {os.getgid()}",
+        "RUNTIME_OWNER_UID = 0": (
+            f"RUNTIME_OWNER_UID = {release.stat(follow_symlinks=False).st_uid}"
+        ),
+        "RUNTIME_OWNER_GID = 0": (
+            f"RUNTIME_OWNER_GID = {release.stat(follow_symlinks=False).st_gid}"
+        ),
     }
     for old, new in replacements.items():
         assert old in source
@@ -879,6 +892,17 @@ def test_launcher_bootstrap_binds_the_atomic_snapshot_release(
         assert current_task[key] == expected
     assert "durable_recovery_projection" in current_task
     assert "task_projection" not in current_task
+
+
+def test_launcher_bootstrap_rejects_unregistered_release_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(ValueError, match="file set differs from Git"):
+        _launcher_module(
+            tmp_path,
+            monkeypatch,
+            extra_release_file="unregistered-release-metadata.json",
+        )
 
 
 def test_launcher_preflight_descriptor_is_process_lifetime_context(

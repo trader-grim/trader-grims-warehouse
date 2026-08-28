@@ -33,6 +33,7 @@ HARNESS_ACTORS = frozenset({"codex", "claude", "deepseek"})
 RETIRED_TOOLS = ("tgw_context_bundle", "tgw_context_confirm_rebind")
 RUNTIME_OWNER_UID = 0
 RUNTIME_OWNER_GID = 0
+RELEASE_METADATA = frozenset({".release-manifest.json", ".runtime-manifest.json"})
 SYSTEM_CODE_OWNERS = frozenset({0, 65534})
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 MAX_CONTEXT_SNAPSHOT_BYTES = 256 * 1024
@@ -220,7 +221,12 @@ def _verify_bound_release(
                 raise ValueError(
                     f"immutable Context runtime entry has unsupported type: {relative}"
                 )
-            actual.add(relative)
+            # The immutable materializer adds these two root-owned manifests
+            # after exporting the exact Git tree.  They are release metadata,
+            # not application source, and are verified by the release
+            # materializer/Doctor before this cold launcher is invoked.
+            if relative not in RELEASE_METADATA:
+                actual.add(relative)
         if actual != set(expected):
             raise ValueError("immutable Context runtime file set differs from Git")
         for relative, (mode, object_id) in expected.items():

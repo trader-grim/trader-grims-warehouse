@@ -363,6 +363,8 @@ def test_coding_bootstrap_is_explicit_and_context_independent(
         context_cursor=cursor,
         systemd_install_root=tmp_path / "systemd",
         receipts=tmp_path / "receipts",
+        context_install_uid=os.getuid(),
+        context_install_gid=os.getgid(),
     )
     paths.worktrees.mkdir()
     paths.systemd_install_root.mkdir()
@@ -411,6 +413,9 @@ def test_coding_bootstrap_is_explicit_and_context_independent(
         assert "--bootstrap-commit" in command
         release = paths.runtime_root / "releases" / commit
         release.mkdir(parents=True)
+        (release / "source-byte").write_text("exact\n", encoding="utf-8")
+        (release / "source-byte").chmod(0o444)
+        release.chmod(0o555)
         paths.runtime_root.mkdir(exist_ok=True)
         (paths.runtime_root / "current").symlink_to(Path("releases") / commit)
         return subprocess.CompletedProcess(command, 0, json.dumps({"ok": True}), "")
@@ -444,6 +449,12 @@ def test_coding_bootstrap_is_explicit_and_context_independent(
     assert result["context_required"] is False
     assert result["review_authority"] is False
     assert paths.coding_config.read_bytes() == config_source.read_bytes()
+    release = paths.runtime_root / "releases" / commit
+    assert all(
+        path.stat(follow_symlinks=False).st_uid == paths.context_install_uid
+        and path.stat(follow_symlinks=False).st_gid == paths.context_install_gid
+        for path in (release, *release.rglob("*"))
+    )
 
 
 def test_source_bootstrap_launcher_does_not_depend_on_selected_runtime() -> None:
@@ -463,6 +474,29 @@ def test_source_bootstrap_launcher_does_not_depend_on_selected_runtime() -> None
     assert 'Path("/var/tmp")' in launcher
     assert '"tgw.doctor_cli"' in launcher
     assert "_extract_exact" in launcher
+
+
+def test_bootstrap_release_ownership_promotion_rejects_symlink(
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "linked").symlink_to("missing")
+    release.chmod(0o555)
+
+    try:
+        with pytest.raises(
+            doctor_cli.DoctorError,
+            match="bootstrap release cannot be promoted safely",
+        ):
+            doctor_cli._promote_bootstrap_release_ownership(
+                release,
+                uid=os.getuid(),
+                gid=os.getgid(),
+            )
+    finally:
+        release.chmod(0o755)
+        (release / "linked").unlink(missing_ok=True)
 
 
 def test_source_bootstrap_shebang_ignores_hostile_python_startup(
