@@ -3770,6 +3770,26 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
     }
 
 
+def condition_policy_census(cache_path: Path) -> dict[str, Any]:
+    """Read-only census of an observed eBay condition-policy cache."""
+    try:
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        policies = raw["policies"]
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise DoctorError(f"condition policy cache is unavailable or invalid: {exc}") from exc
+    if not isinstance(policies, dict):
+        raise DoctorError("condition policy cache policies must be an object")
+    flags = raw.get("item_condition_required")
+    flags = flags if isinstance(flags, dict) else {}
+    sets = sorted({tuple(sorted(str(row[0]) for row in rows if isinstance(row, list) and row)) for rows in policies.values() if isinstance(rows, list)})
+    covered = sum(isinstance(flags.get(str(category)), bool) for category in policies)
+    return {"schema": "tgw-doctor-ebay-condition-policy-census/v1", "cache_path": str(cache_path),
+            "category_count": len(policies), "required_flag_coverage": covered,
+            "required_flag_missing_or_invalid": len(policies) - covered,
+            "expected_distinct_condition_id_sets": 26, "actual_distinct_condition_id_sets": len(sets),
+            "condition_id_sets": [list(values) for values in sets], "drift": len(sets) != 26, "read_only": True}
+
+
 def _require_root() -> None:
     if os.geteuid() != 0:
         raise DoctorError("repair requires the operator to rerun this exact command with sudo -n")
@@ -8465,6 +8485,8 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="operation")
     sub.add_parser("check", help="run read-only diagnosis (default)")
     sub.add_parser("inventory", help="inventory linked and active-path remnants read-only")
+    census_parser = sub.add_parser("condition-policy-census", help="census cached condition policies read-only")
+    census_parser.add_argument("--cache", required=True, type=Path)
     resume_parser = sub.add_parser("coding-resume", help="resume one exact local RESUMABLE_PARTIAL Todo")
     resume_parser.add_argument("todo_id", type=int)
     reconcile_parser = sub.add_parser("coding-reconcile", help="reconcile one older-runner closed implementation receipt")
@@ -8497,6 +8519,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return int(result["diagnosis"]["exit_code"])
         if args.operation == "inventory":
             print(json.dumps(inventory(), indent=2, sort_keys=True))
+            return 0
+        if args.operation == "condition-policy-census":
+            print(json.dumps(condition_policy_census(args.cache), indent=2, sort_keys=True))
             return 0
         if args.operation == "coding-resume":
             from tgw.coding_cli import resume

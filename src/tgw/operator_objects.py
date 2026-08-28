@@ -269,6 +269,16 @@ def build_item_operator_object(
             conditions.append({"value": value, "label": label})
     current_condition = str(draft.get("condition_enum") or draft.get("condition") or "")
     valid_condition = not conditions or any(option["value"] == current_condition for option in conditions)
+    category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "").strip()
+    policy_fields_present = "category_recognized" in context or "required_flag_valid" in context
+    category_recognized = context.get("category_recognized") is True if policy_fields_present else bool(category_id)
+    required_flag_valid = context.get("required_flag_valid") is True if policy_fields_present else True
+    listing_condition_required = context.get("item_condition_required") is True if policy_fields_present else True
+    display_conditions = list(conditions)
+    if not listing_condition_required:
+        display_conditions.insert(0, {"value": "", "label": "No listing condition"})
+    if current_condition and not valid_condition:
+        display_conditions.insert(0, {"value": current_condition, "label": f"{draft.get('condition_label') or current_condition} — not allowed; remap or clear", "display_only": True})
 
     aspects = []
     missing_aspects = []
@@ -288,12 +298,13 @@ def build_item_operator_object(
             missing_aspects.append(descriptor["name"])
 
     validation_messages = []
-    category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "").strip()
-    if not category_id or category_id == "99":
+    if not category_id or category_id == "99" or not category_recognized:
         validation_messages.append("A valid eBay category is required.")
+    if category_id and not required_flag_valid:
+        validation_messages.append("The eBay itemConditionRequired policy flag is unresolved.")
     if current_condition and not valid_condition:
         validation_messages.append("The selected condition is not valid for this category.")
-    if not current_condition:
+    if not current_condition and listing_condition_required:
         validation_messages.append("A category-valid displayed condition is required.")
     if missing_aspects:
         validation_messages.append("Required aspects are missing: " + ", ".join(sorted(missing_aspects)))
@@ -362,6 +373,10 @@ def build_item_operator_object(
         "graph_id": workflow_card.get("graph_id"),
         "details": deepcopy(dict(workflow_card)),
     }
+    record_conditions = [str(value) for value in context.get("record_condition_vocabulary", ()) if isinstance(value, str) and value]
+    stored_record_condition = str(item.get("condition") or "")
+    canonical_record_condition = next((value for value in record_conditions if value.casefold() == stored_record_condition.casefold()), stored_record_condition)
+    group_options = list(context.get("category_groups") or ())
     field_schema = {
         "item_fields": {
             "title": {"type": "string", "label": "Inventory title", "value": item.get("title") or ""},
@@ -400,9 +415,9 @@ def build_item_operator_object(
         "condition": {
             "value": current_condition,
             "label": draft.get("condition_label") or draft.get("condition_description"),
-            "required": True,
-            "valid": valid_condition and bool(current_condition),
-            "options": conditions,
+            "required": listing_condition_required,
+            "valid": required_flag_valid and (valid_condition if current_condition else not listing_condition_required),
+            "options": display_conditions,
         },
         "aspects": aspects,
         "defaults": {
@@ -411,13 +426,27 @@ def build_item_operator_object(
         },
         "validation_messages": validation_messages,
     }
+    if policy_fields_present:
+        field_schema["condition"]["required_flag_valid"] = required_flag_valid
+    if group_options or record_conditions:
+        field_schema["item_fields"].update({
+            "condition": {"type": "string", "label": "Inventory condition", "value": canonical_record_condition,
+                          "options": [{"value": value, "label": value} for value in record_conditions]},
+            "category_group": {"type": "string", "label": "TGW category group", "value": item.get("category_group") or "", "options": group_options},
+            "size_class": {"type": "string", "label": "Size class", "value": item.get("size_class") or ""},
+            "ai_hint": {"type": "string", "label": "AI hint", "value": item.get("ai_hint") or ""},
+        })
+        field_schema["category_groups"] = deepcopy(group_options)
+        field_schema["record_condition_vocabulary"] = record_conditions
+    if context.get("record_attribute_vocabulary"):
+        field_schema["record_attribute_vocabulary"] = deepcopy(context["record_attribute_vocabulary"])
     command_input_schema = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "condition_enum": {
                 "type": "string",
-                "enum": [option["value"] for option in conditions],
+                "enum": ([""] if not listing_condition_required else []) + [option["value"] for option in conditions],
             },
             "item_specifics": {
                 "type": "object",
@@ -446,7 +475,7 @@ def build_item_operator_object(
                 "additionalProperties": False,
                 "properties": {name: {key: value for key, value in descriptor.items() if key in {"type", "nullable"}} for name, descriptor in field_schema["listing_fields"].items()}
                 | {
-                    "condition_enum": {"type": "string", "enum": [option["value"] for option in conditions]},
+                    "condition_enum": {"type": "string", "enum": ([""] if not listing_condition_required else []) + [option["value"] for option in conditions]},
                 },
             },
         },
@@ -466,15 +495,15 @@ def build_item_operator_object(
             },
             {
                 "id": "list-item",
-                "enabled": projected_command("list-item")[0],
-                "reason": projected_command("list-item")[1],
+                "enabled": projected_command("list-item")[0] and not (policy_fields_present and validation_messages),
+                "reason": (" ".join(validation_messages) if projected_command("list-item")[0] and policy_fields_present and validation_messages else projected_command("list-item")[1]),
                 "authority_scope": "publication",
                 "input_schema": command_input_schema,
             },
             {
                 "id": "update-item",
-                "enabled": projected_command("update-item")[0],
-                "reason": projected_command("update-item")[1],
+                "enabled": projected_command("update-item")[0] and not (policy_fields_present and validation_messages),
+                "reason": (" ".join(validation_messages) if projected_command("update-item")[0] and policy_fields_present and validation_messages else projected_command("update-item")[1]),
                 "authority_scope": "update-restage",
                 "input_schema": command_input_schema,
             },

@@ -45,6 +45,7 @@ _METADATA_PATH = '/sell/metadata/v1/marketplace/EBAY_US/get_item_condition_polic
 # caches which hold the parsed result in memory for the life of the process
 # (audit#1143).
 _policies_mem_cache: Optional[Dict[str, List[Tuple[str, str]]]] = None
+_required_mem_cache: Dict[str, bool | None] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +149,11 @@ def _load_cache(cfg: Dict[str, Any]) -> Optional[Dict[str, List[Tuple[str, str]]
             log.info('condition policy cache is stale — will refresh')
             return None
         # Stored as {cat_id: [[cond_id, desc], ...]}
-        return {k: [tuple(p) for p in v] for k, v in raw['policies'].items()}
+        policies = {k: [tuple(p) for p in v] for k, v in raw['policies'].items()}
+        global _required_mem_cache
+        flags = raw.get('item_condition_required', {})
+        _required_mem_cache = {str(k): v if isinstance(v, bool) else None for k, v in flags.items()} if isinstance(flags, dict) else {}
+        return policies
     except Exception as exc:
         log.warning('condition policy cache unreadable (%s) — will refresh', exc)
         return None
@@ -156,12 +161,15 @@ def _load_cache(cfg: Dict[str, Any]) -> Optional[Dict[str, List[Tuple[str, str]]
 
 def refresh_condition_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str, str]]]:
     """Fetch full condition policy table from eBay and write to cache."""
-    global _policies_mem_cache
+    global _policies_mem_cache, _required_mem_cache
     log.info('fetching eBay condition policies from Metadata API')
     data = ebay_get(cfg, _METADATA_PATH)
     policies: Dict[str, List[Tuple[str, str]]] = {}
+    required: Dict[str, bool | None] = {}
     for entry in data.get('itemConditionPolicies', []):
         cat_id = entry['categoryId']
+        flag = entry.get('itemConditionRequired')
+        required[str(cat_id)] = flag if isinstance(flag, bool) else None
         # Metadata occasionally omits the human description for a valid
         # conditionId.  The identifier is the authority needed for policy
         # enforcement; a missing optional label must not make the entire
@@ -180,13 +188,37 @@ def refresh_condition_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str,
     path.write_text(json.dumps({
         'fetched_at': datetime.now(timezone.utc).isoformat(),
         'policies':   {k: list(v) for k, v in policies.items()},
+        'item_condition_required': required,
     }, indent=2), encoding='utf-8')
 
     log.info('condition policies cached: %d categories, %d unique sets',
              len(policies),
              len({frozenset(c[0] for c in v) for v in policies.values()}))
     _policies_mem_cache = policies
+    _required_mem_cache = required
     return policies
+
+
+def condition_policy_for_category(cfg: Dict[str, Any], category_id: str) -> Dict[str, Any]:
+    """Return exact local policy evidence; never invent a fallback policy."""
+    policies = _get_policies(cfg)
+    key = str(category_id)
+    allowed = policies.get(key)
+    required = _required_mem_cache.get(key)
+    return {'recognized': allowed is not None, 'item_condition_required': required,
+            'required_flag_valid': isinstance(required, bool),
+            'conditions': [_make_result(cid, label) for cid, label in (allowed or [])]}
+
+
+def condition_policy_census(cfg: Dict[str, Any], expected_sets: int = 26) -> Dict[str, Any]:
+    """Read-only coverage/drift census of the cached eBay policy observation."""
+    policies = _get_policies(cfg)
+    sets = sorted({tuple(sorted(cid for cid, _label in rows)) for rows in policies.values()})
+    covered = sum(isinstance(_required_mem_cache.get(key), bool) for key in policies)
+    return {'schema': 'tgw-ebay-condition-policy-census/v1', 'category_count': len(policies),
+            'required_flag_coverage': covered, 'required_flag_missing_or_invalid': len(policies) - covered,
+            'expected_distinct_condition_id_sets': expected_sets, 'actual_distinct_condition_id_sets': len(sets),
+            'condition_id_sets': [list(row) for row in sets], 'drift': len(sets) != expected_sets}
 
 
 def _get_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str, str]]]:

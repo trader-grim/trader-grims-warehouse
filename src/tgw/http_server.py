@@ -1147,6 +1147,17 @@ def _current_item_operator_object(sku: str) -> Dict[str, Any]:
         current_condition = str(draft.get("condition_enum") or draft.get("condition") or "")
         category_context = ebay_category_context(category_id, current_condition=current_condition) if category_id and category_id != "99" else {}
         category_context = dict(category_context)
+        groups_path = _cfg.get("category_groups_path")
+        if groups_path and Path(groups_path).exists():
+            raw_groups = json.loads(Path(groups_path).read_text(encoding="utf-8"))
+            category_context["category_groups"] = [
+                {"value": key, "label": str(group.get("name") or key),
+                 "size_class": str(group.get("size_class") or ""), "ai_hint": str(group.get("ai_hint") or ""),
+                 "ebay_categories": [str(value) for value in group.get("ebay_categories", []) if str(value)]}
+                for key, group in raw_groups.get("groups", {}).items() if isinstance(group, dict)
+            ]
+            category_context["record_condition_vocabulary"] = list((raw_groups.get("condition_factors") or {}).keys())
+            category_context["record_attribute_vocabulary"] = raw_groups.get("attribute_vocabulary") or raw_groups.get("attributes") or {}
         try:
             store_categories, _store_refreshed, _store_error = _store_categories_snapshot(_cfg)
         except (KeyError, OSError, ValueError):
@@ -1247,8 +1258,23 @@ def execute_item_operator_command(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if body.command_id == "save-draft":
             item_fields = checked_values.get("item_fields", {})
-            draft_fields = checked_values.get("draft_listing", {})
-            patch_fields = {**item_fields, "draft_listing": draft_fields}
+            draft_fields = checked_values.get("draft_listing")
+            patch_fields = {**item_fields}
+            if draft_fields is not None:
+                patch_fields["draft_listing"] = draft_fields
+            selected_group = patch_fields.get("category_group")
+            if selected_group:
+                options = published["field_schema"].get("category_groups", [])
+                selected = next((option for option in options if option.get("value") == selected_group), None)
+                if selected is None:
+                    raise HTTPException(status_code=422, detail="category_group is not a published TGW group")
+                patch_fields.update(category_group=selected_group, size_class=selected.get("size_class", ""), ai_hint=selected.get("ai_hint", ""))
+                current_record = published["item"]["record"]
+                current_draft = current_record.get("draft_listing") if isinstance(current_record.get("draft_listing"), dict) else {}
+                if not (current_draft.get("category_id") or current_record.get("ebay_category_id")):
+                    categories = selected.get("ebay_categories") or []
+                    if categories:
+                        patch_fields["draft_listing"] = {**(draft_fields or {}), "category_id": categories[0]}
         else:
             patch_fields = {"draft_listing": checked_values}
         patch_item(
@@ -3314,8 +3340,19 @@ def ebay_category_context(category_id: str, current_condition: str = "") -> Dict
     # "Used" out into three invented grades — USED_EXCELLENT/GOOD/ACCEPTABLE — none
     # of which eBay actually allows for categories with only a single "Used" bucket)
     conditions: List[Dict[str, str]] = []
+    category_recognized = False
+    item_condition_required: Optional[bool] = None
+    required_flag_valid = False
     try:
-        from .apis.ebay.conditions import allowed_conditions_for_category
+        from .apis.ebay.conditions import allowed_conditions_for_category, condition_policy_for_category
+
+        try:
+            policy = condition_policy_for_category(_cfg, category_id)
+            category_recognized = policy["recognized"]
+            item_condition_required = policy["item_condition_required"]
+            required_flag_valid = policy["required_flag_valid"]
+        except Exception:
+            pass
 
         seen: set = set()
         for c in allowed_conditions_for_category(_cfg, category_id):
@@ -3394,6 +3431,9 @@ def ebay_category_context(category_id: str, current_condition: str = "") -> Dict
         "category_id": category_id,
         "conditions": conditions,
         "condition_remap": condition_remap,
+        "category_recognized": category_recognized,
+        "item_condition_required": item_condition_required,
+        "required_flag_valid": required_flag_valid,
         "aspects": aspects,
         "aspects_error": aspects_error,
         "store_category": store_category,
