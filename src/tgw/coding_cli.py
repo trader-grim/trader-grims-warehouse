@@ -379,6 +379,20 @@ def start(
         binding = {"binding": historical}
     elif resume_only and source_commit is None:
         binding = {"binding": _resume_attempt_binding(todo_id, item)}
+    elif lifecycle_job_binding is not None:
+        # A managed lifecycle already owns an exact, operator-created
+        # Plan/Todo/worktree binding.  The supervisor runs under its service
+        # account and must reuse that binding; rebinding here would replace
+        # the operator's Unix identity with the service identity.
+        _bound_item, exact_binding = _plan_binding_for_todo(todo_id)
+        if (
+            source_commit is not None
+            and exact_binding["source_commit"] != source_commit
+        ):
+            raise CodingCLIError(
+                "lifecycle source differs from the exact Todo binding"
+            )
+        binding = {"binding": exact_binding}
     else:
         binding = bind_command(
             argparse.Namespace(

@@ -552,7 +552,15 @@ def test_resume_recovers_worker_completed_crash_boundary_with_new_fenced_job(
     monkeypatch.setattr(
         coding_cli,
         "bind_command",
-        lambda _args: {"binding": record["binding"]["plan_todo_binding"]},
+        lambda _args: pytest.fail("managed lifecycle attempted to rebind"),
+    )
+    monkeypatch.setattr(
+        coding_cli,
+        "_plan_binding_for_todo",
+        lambda _identifier: (
+            item,
+            record["binding"]["plan_todo_binding"],
+        ),
     )
     monkeypatch.setattr(
         coding_cli,
@@ -578,6 +586,18 @@ def test_resume_recovers_worker_completed_crash_boundary_with_new_fenced_job(
     assert launched["foreman"]["dispatched"] == 1
     assert captured[0][0].lifecycle_rebind == {1915: "codex-implement"}
     assert captured[0][1] == {1915}
+
+    with pytest.raises(
+        coding_cli.CodingCLIError,
+        match="lifecycle source differs from the exact Todo binding",
+    ):
+        coding_cli.start(
+            1915,
+            config_path=tmp_path / "coding.json",
+            source_commit="9" * 40,
+            lifecycle_job_binding=job_binding(reopened),
+            lifecycle_stage="implementation",
+        )
 
 
 def test_review_runner_and_both_receipt_boundaries_require_semantic_pass(
