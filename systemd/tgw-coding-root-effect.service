@@ -20,6 +20,8 @@ Restart=always
 RestartSec=5s
 PrivateTmp=true
 ProtectHome=read-only
+MemoryMax=768M
+MemorySwapMax=0
 
 [Install]
 WantedBy=multi-user.target

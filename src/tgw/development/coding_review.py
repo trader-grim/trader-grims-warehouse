@@ -21,7 +21,7 @@ from tgw.development.partial_resume import source_fingerprint
 from tgw.governed_review_adapter import execute_request, validate_execution
 from tgw.review_contract import ReviewRunnerError
 
-PROTECTED_REVIEW_CONFIG_SCHEMA = "tgw-local-coding-protected-review/v1"
+PROTECTED_REVIEW_CONFIG_SCHEMA = "tgw-local-coding-protected-review/v2"
 DEFAULT_PROTECTED_REVIEW_CONFIG = PROTECTED_REVIEW_CONFIG
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -73,6 +73,12 @@ def load_protected_review_config(
         "candidate_evidence_descriptor_config",
         "execution_evidence_sink_config",
         "execution_evidence_pin_source",
+        "resource_registry_root",
+        "broker_grant_root",
+        "context_credential_config",
+        "evidence_credential_config",
+        "resource_credential_config",
+        "broker_credential_config",
     }
     if (
         set(value) != required
@@ -80,6 +86,12 @@ def load_protected_review_config(
     ):
         raise ReviewRunnerError("protected governed-review configuration is invalid")
     result: dict[str, Path] = {}
+    credential_names = {
+        "context_credential_config",
+        "evidence_credential_config",
+        "resource_credential_config",
+        "broker_credential_config",
+    }
     try:
         candidate_root = candidate_repository.resolve(strict=True)
         for name in required - {"schema"}:
@@ -91,6 +103,21 @@ def load_protected_review_config(
                 raise ReviewRunnerError(
                     "protected governed-review path must be absolute"
                 )
+            if name in credential_names:
+                # These root-only source files are copied into a private
+                # service credential directory by systemd.  The coding worker
+                # must retain their protected binding without gaining search
+                # access to the source credential directory.
+                if (
+                    candidate_root == configured
+                    or candidate_root in configured.parents
+                    or configured in candidate_root.parents
+                ):
+                    raise ReviewRunnerError(
+                        "protected governed-review path overlaps the candidate repository"
+                    )
+                result[name] = configured
+                continue
             resolved = configured.resolve(strict=True)
             if (
                 resolved == candidate_root
@@ -105,7 +132,10 @@ def load_protected_review_config(
         raise ReviewRunnerError(
             "protected governed-review path is unavailable"
         ) from exc
-    for name in ("request_root", "snapshot_root"):
+    for name in (
+        "request_root", "snapshot_root", "resource_registry_root",
+        "broker_grant_root",
+    ):
         if not result[name].is_dir():
             raise ReviewRunnerError(
                 f"protected governed-review {name} is invalid"

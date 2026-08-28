@@ -365,10 +365,6 @@ def verify_protected_review_evidence(
         or card.get("role") != "independent-review"
         or card.get("plan_commit") != request.get("plan_commit")
         or card.get("solution_id") != request.get("solution_hash")
-        or card_bindings.get("plan_graph", {}).get("hash")
-        != request.get("solution_hash")
-        or card_bindings.get("authority_conditions", {}).get("hash")
-        != request.get("closure_hash")
         or descriptor.w06_plan_materialization_pin.get("plan_source", {}).get(
             "commit"
         )
@@ -682,6 +678,14 @@ def process_review_preparation(
             ],
             request_root=configuration["request_root"],
             snapshot_root=configuration["snapshot_root"],
+            resource_registry_root=configuration["resource_registry_root"],
+            broker_grant_root=configuration["broker_grant_root"],
+            credential_paths={
+                "context": configuration["context_credential_config"],
+                "evidence": configuration["evidence_credential_config"],
+                "resource": configuration["resource_credential_config"],
+                "broker": configuration["broker_credential_config"],
+            },
             trusted_uid=paths.root_uid,
         )
     )

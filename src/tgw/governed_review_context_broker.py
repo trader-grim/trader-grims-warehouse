@@ -20,6 +20,7 @@ import json
 import os
 import socket
 import stat
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -45,6 +46,8 @@ from tgw.execution_resources import (
 BROKER_REQUEST_SCHEMA = "tgw-context-review-broker-request/v2"
 BROKER_BUNDLE_SCHEMA = "tgw-context-review-resource-bundle/v1"
 BROKER_CONFIG_SCHEMA = "tgw-context-review-broker-config/v2"
+BROKER_FILE_CONFIG_SCHEMA = "tgw-context-review-broker-config/v3"
+BROKER_GRANT_SCHEMA = "tgw-context-review-broker-file-grant/v1"
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 MAX_GRANT_WINDOW_SECONDS = 900
@@ -342,9 +345,200 @@ def _hash(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_canonical(value)).hexdigest()
 
 
+def derive_request_bearer(master_credential: str, request: Mapping[str, Any]) -> str:
+    """Derive a request-unique bearer without placing it in durable request data."""
+
+    if (
+        not isinstance(master_credential, str)
+        or len(master_credential) < 32
+        or any(character.isspace() for character in master_credential)
+    ):
+        raise ReviewContextBrokerError("review context broker request credential is invalid")
+    normalized = PrivilegedReviewContextBroker._request(request)
+    digest = hmac.new(
+        master_credential.encode(),
+        b"tgw-review-request-bearer/v1\0" + _canonical(normalized),
+        hashlib.sha256,
+    ).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+class FileReviewContextGrantStore:
+    """Root-owned, restart-safe one-use exact-request grants."""
+
+    def __init__(
+        self, root: Path, *, master_credential: str, client_id: str,
+        catalog_ref: str, catalog_hash: str,
+    ) -> None:
+        if (
+            not isinstance(master_credential, str)
+            or len(master_credential) < 32
+            or any(character.isspace() for character in master_credential)
+            or not isinstance(client_id, str)
+            or not client_id
+            or not isinstance(catalog_ref, str)
+            or not catalog_ref
+            or not isinstance(catalog_hash, str)
+            or not catalog_hash.startswith("sha256:")
+        ):
+            raise ReviewContextBrokerError(
+                "review context broker grant store binding is invalid"
+            )
+        self.root = root.resolve(strict=True)
+        if self.root != root:
+            raise ReviewContextBrokerError("review context broker grant root is not direct")
+        self.consumed_root = self.root / "consumed"
+        for path in (self.root, self.consumed_root):
+            observed = path.stat(follow_symlinks=False)
+            if (
+                path.is_symlink()
+                or not stat.S_ISDIR(observed.st_mode)
+                or observed.st_uid != 0
+                or observed.st_gid != 0
+                or stat.S_IMODE(observed.st_mode) & 0o022
+            ):
+                raise ReviewContextBrokerError("review context broker grant store is not protected")
+        self.master_credential = master_credential
+        self.client_id = client_id
+        self.catalog_ref = catalog_ref
+        self.catalog_hash = catalog_hash
+        self._lock = threading.Lock()
+
+    def _path(self, challenge: str, *, consumed: bool = False) -> Path:
+        if len(challenge) != 64 or not set(challenge) <= set("0123456789abcdef"):
+            raise ReviewContextBrokerError("review context broker challenge is invalid")
+        return (self.consumed_root if consumed else self.root) / f"{challenge}.json"
+
+    @staticmethod
+    def _read(path: Path) -> dict[str, Any]:
+        try:
+            named = path.lstat()
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise ReviewContextBrokerError("review context broker grant is unavailable") from exc
+        try:
+            observed = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(observed.st_mode)
+                or observed.st_uid != 0
+                or observed.st_gid != 0
+                or stat.S_IMODE(observed.st_mode) & 0o022
+                or observed.st_nlink != 1
+                or not 2 <= observed.st_size <= MAX_REQUEST_BYTES
+                or (named.st_dev, named.st_ino) != (observed.st_dev, observed.st_ino)
+            ):
+                raise ReviewContextBrokerError("review context broker grant is not protected")
+            raw = os.pread(descriptor, MAX_REQUEST_BYTES + 1, 0)
+            after = os.fstat(descriptor)
+            if len(raw) != observed.st_size or any(
+                getattr(after, field) != getattr(observed, field)
+                for field in (
+                    "st_dev", "st_ino", "st_mode", "st_uid", "st_gid",
+                    "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns",
+                )
+            ):
+                raise ReviewContextBrokerError("review context broker grant changed while held")
+            value = json.loads(raw)
+            if not isinstance(value, dict):
+                raise ReviewContextBrokerError("review context broker grant is invalid")
+            return value
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReviewContextBrokerError("review context broker grant is invalid") from exc
+        finally:
+            os.close(descriptor)
+
+    def issue(self, request: Mapping[str, Any]) -> dict[str, str]:
+        """Atomically issue one exact grant; idempotent only before consumption."""
+
+        if os.geteuid() != 0:
+            raise ReviewContextBrokerError("review context broker grant issuance requires root")
+        normalized = PrivilegedReviewContextBroker._request(request)
+        if (
+            normalized["client_id"] != self.client_id
+            or normalized["resource_service_catalog_ref"] != self.catalog_ref
+            or normalized["resource_service_catalog_hash"] != self.catalog_hash
+        ):
+            raise ReviewContextBrokerError("review context broker grant binding differs")
+        bearer = derive_request_bearer(self.master_credential, normalized)
+        value = {
+            "schema": BROKER_GRANT_SCHEMA,
+            "request": normalized,
+            "request_hash": _hash(normalized),
+            "bearer_hash": "sha256:" + hashlib.sha256(bearer.encode()).hexdigest(),
+        }
+        path = self._path(normalized["challenge"])
+        if self._path(normalized["challenge"], consumed=True).exists():
+            raise ReviewContextBrokerError("review context broker grant was already consumed")
+        if path.exists():
+            if self._read(path) != value:
+                raise ReviewContextBrokerError("review context broker grant challenge is reused")
+            return {"request_hash": value["request_hash"], "bearer_hash": value["bearer_hash"]}
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".grant-", dir=self.root)
+        temporary = Path(temporary_name)
+        try:
+            raw = _canonical(value) + b"\n"
+            os.write(descriptor, raw)
+            os.fsync(descriptor)
+            os.fchown(descriptor, 0, 0)
+            os.fchmod(descriptor, 0o400)
+            os.close(descriptor)
+            descriptor = -1
+            os.link(temporary, path, follow_symlinks=False)
+            parent = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+        return {"request_hash": value["request_hash"], "bearer_hash": value["bearer_hash"]}
+
+    def consume(self, credential: str | None, request: Mapping[str, Any]) -> None:
+        """Consume before backend work so crash/replay remains fail-closed."""
+
+        normalized = PrivilegedReviewContextBroker._request(request)
+        expected_bearer = derive_request_bearer(self.master_credential, normalized)
+        if credential is None or not hmac.compare_digest(credential, expected_bearer):
+            raise ReviewContextBrokerError("review context broker grant is unavailable")
+        path = self._path(normalized["challenge"])
+        with self._lock:
+            value = self._read(path)
+            if (
+                set(value) != {"schema", "request", "request_hash", "bearer_hash"}
+                or value.get("schema") != BROKER_GRANT_SCHEMA
+                or value.get("request_hash") != _hash(normalized)
+                or value.get("request") != normalized
+                or value.get("bearer_hash")
+                != "sha256:" + hashlib.sha256(expected_bearer.encode()).hexdigest()
+            ):
+                raise ReviewContextBrokerError("review context broker grant differs")
+            try:
+                os.replace(path, self._path(normalized["challenge"], consumed=True))
+                for directory in (self.root, self.consumed_root):
+                    descriptor = os.open(
+                        directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    )
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+            except OSError as exc:
+                raise ReviewContextBrokerError(
+                    "review context broker grant is unavailable"
+                ) from exc
+
+
+class _ConfiguredReviewContextBrokerServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 def create_review_context_broker_server(
     broker: PrivilegedReviewContextBroker, *,
-    request_grants: Mapping[str, Mapping[str, Any]],
+    request_grants: Mapping[str, Mapping[str, Any]] | None = None,
+    grant_store: FileReviewContextGrantStore | None = None,
     readback_credentials: Mapping[str, str],
     host: str = "127.0.0.1", port: int = 0,
 ) -> ThreadingHTTPServer:
@@ -359,11 +553,11 @@ def create_review_context_broker_server(
         raise ReviewContextBrokerError("review context broker bind address is invalid")
     grants = {
         credential: PrivilegedReviewContextBroker._request(value)
-        for credential, value in request_grants.items()
+        for credential, value in (request_grants or {}).items()
     }
     catalog_ref, catalog_hash = broker.backend_catalog_binding
     if (
-        not grants
+        not grants and grant_store is None
         or any(not isinstance(key, str) or not key for key in grants)
         or any(grant["client_id"] != broker.client_id for grant in grants.values())
         or any(
@@ -379,6 +573,9 @@ def create_review_context_broker_server(
         )
         or len(set(readback_credentials.values())) != len(readback_credentials)
         or set(grants) & set(readback_credentials.values())
+        or grant_store is not None and (
+            grant_store.client_id != broker.client_id
+        )
     ):
         raise ReviewContextBrokerError("review context broker credentials are invalid")
     grants_lock = threading.Lock()
@@ -421,18 +618,22 @@ def create_review_context_broker_server(
                 return
             credential = self._bearer()
             with grants_lock:
-                expected = grants.get(credential or "")
-                if expected is None or not hmac.compare_digest(
-                    _canonical(expected), _canonical(normalized)
-                ):
-                    self.send_error(404)
-                    return
                 try:
                     broker.validate_grant(normalized)
+                    if grant_store is not None:
+                        grant_store.consume(credential, normalized)
+                    else:
+                        expected = grants.get(credential or "")
+                        if expected is None or not hmac.compare_digest(
+                            _canonical(expected), _canonical(normalized)
+                        ):
+                            raise ReviewContextBrokerError(
+                                "review context broker grant is unavailable"
+                            )
+                        del grants[credential or ""]
                 except ReviewContextBrokerError:
                     self.send_error(404)
                     return
-                del grants[credential or ""]
             try:
                 self._json(200, broker.execute(normalized))
             except ReviewContextBrokerError:
@@ -478,7 +679,7 @@ def create_review_context_broker_server(
             address_family = socket.AF_INET6
 
         return IPv6ThreadingHTTPServer((host, port), Handler)
-    return ThreadingHTTPServer((host, port), Handler)
+    return _ConfiguredReviewContextBrokerServer((host, port), Handler)
 
 
 def broker_server_from_config(
@@ -487,16 +688,27 @@ def broker_server_from_config(
 ) -> ThreadingHTTPServer:
     """Construct the non-test service from one externally protected config."""
 
-    required = {
+    common = {
         "schema", "backend_descriptor", "backend_execution_identity",
         "backend_attestation_key_id", "backend_attestation_public_key",
         "backend_resource_service_catalog",
         "backend_resource_service_catalog_hash",
         "service_id", "client_id", "attestation_key_id",
         "attestation_public_key",
-        "signing_private_key_env", "request_grants", "readback_clients",
+        "signing_private_key_env", "readback_clients",
     }
-    if not isinstance(value, Mapping) or set(value) != required or value.get("schema") != BROKER_CONFIG_SCHEMA:
+    legacy = common | {"request_grants"}
+    file_backed = common | {
+        "request_grant_root", "request_credential_env",
+        "request_resource_service_catalog_ref",
+        "request_resource_service_catalog_hash",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema") == BROKER_CONFIG_SCHEMA and set(value) != legacy
+        or value.get("schema") == BROKER_FILE_CONFIG_SCHEMA and set(value) != file_backed
+        or value.get("schema") not in {BROKER_CONFIG_SCHEMA, BROKER_FILE_CONFIG_SCHEMA}
+    ):
         raise ReviewContextBrokerError("review context broker config is invalid")
     signing_env = value.get("signing_private_key_env")
     signing_key = environment.get(signing_env, "") if isinstance(signing_env, str) else ""
@@ -550,27 +762,53 @@ def broker_server_from_config(
             )
     except ResourceVerificationError as exc:
         raise ReviewContextBrokerError("review context broker backend is invalid") from exc
-    grants_value = value.get("request_grants")
     readback_value = value.get("readback_clients")
-    if not isinstance(grants_value, list) or not grants_value or not isinstance(readback_value, list) or not readback_value:
+    if not isinstance(readback_value, list) or not readback_value:
         raise ReviewContextBrokerError("review context broker client configuration is invalid")
     request_grants = {}
-    for item in grants_value:
-        if not isinstance(item, Mapping) or set(item) != {"client_id", "credential_env", "request"}:
-            raise ReviewContextBrokerError("review context broker request grant is invalid")
-        credential = environment.get(str(item["credential_env"]), "")
-        request = dict(item["request"]) if isinstance(item["request"], Mapping) else None
+    grant_store = None
+    if value.get("schema") == BROKER_CONFIG_SCHEMA:
+        grants_value = value.get("request_grants")
+        if not isinstance(grants_value, list) or not grants_value:
+            raise ReviewContextBrokerError("review context broker client configuration is invalid")
+        for item in grants_value:
+            if not isinstance(item, Mapping) or set(item) != {"client_id", "credential_env", "request"}:
+                raise ReviewContextBrokerError("review context broker request grant is invalid")
+            credential = environment.get(str(item["credential_env"]), "")
+            request = dict(item["request"]) if isinstance(item["request"], Mapping) else None
+            if (
+                not credential
+                or request is None
+                or request.get("client_id") != item["client_id"]
+                or request.get("resource_service_catalog_ref")
+                != backend_catalog["catalog_ref"]
+                or request.get("resource_service_catalog_hash") != backend_catalog_hash
+                or credential in request_grants
+            ):
+                raise ReviewContextBrokerError("review context broker request grant is invalid")
+            request_grants[credential] = request
+    else:
+        credential_env = value.get("request_credential_env")
+        master_credential = environment.get(str(credential_env), "")
+        raw_grant_root = value.get("request_grant_root")
+        request_catalog_ref = value.get("request_resource_service_catalog_ref")
+        request_catalog_hash = value.get("request_resource_service_catalog_hash")
         if (
-            not credential
-            or request is None
-            or request.get("client_id") != item["client_id"]
-            or request.get("resource_service_catalog_ref")
-            != backend_catalog["catalog_ref"]
-            or request.get("resource_service_catalog_hash") != backend_catalog_hash
-            or credential in request_grants
+            not master_credential
+            or not isinstance(raw_grant_root, str)
+            or not Path(raw_grant_root).is_absolute()
+            or not isinstance(request_catalog_ref, str)
+            or not request_catalog_ref
+            or not isinstance(request_catalog_hash, str)
+            or not request_catalog_hash.startswith("sha256:")
         ):
-            raise ReviewContextBrokerError("review context broker request grant is invalid")
-        request_grants[credential] = request
+            raise ReviewContextBrokerError("review context broker grant store configuration is invalid")
+        grant_store = FileReviewContextGrantStore(
+            Path(raw_grant_root), master_credential=master_credential,
+            client_id=str(value["client_id"]),
+            catalog_ref=request_catalog_ref,
+            catalog_hash=request_catalog_hash,
+        )
     readback_credentials = {}
     for item in readback_value:
         if not isinstance(item, Mapping) or set(item) != {"client_id", "credential_env"}:
@@ -606,7 +844,7 @@ def broker_server_from_config(
         signing_private_key=signing_private_key,
     )
     return create_review_context_broker_server(
-        broker, request_grants=request_grants,
+        broker, request_grants=request_grants, grant_store=grant_store,
         readback_credentials=readback_credentials, host=host, port=port,
     )
 

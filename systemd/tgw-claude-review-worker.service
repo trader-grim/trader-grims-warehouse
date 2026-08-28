@@ -6,6 +6,8 @@ ConditionPathExists=/opt/TGW/tgw-lib/config/tgw-coding-local.json
 ConditionPathExists=/opt/TGW/tgw-lib/coding-runtime/current/src/tgw/development/local_workflow.py
 ConditionPathExists=/var/lib/tgw/coding-protected-review/config.json
 ConditionPathIsDirectory=/var/lib/tgw/coding-protected-review/requests
+ConditionPathExists=/var/lib/tgw/coding-protected-review/credentials/context.json
+ConditionPathExists=/var/lib/tgw/coding-protected-review/credentials/evidence.json
 
 [Service]
 Type=simple
@@ -18,6 +20,10 @@ Environment=HOME=/home/codex
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=GIT_OPTIONAL_LOCKS=0
 Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src
+LoadCredential=review-context:/var/lib/tgw/coding-protected-review/credentials/context.json
+LoadCredential=review-evidence:/var/lib/tgw/coding-protected-review/credentials/evidence.json
+Environment=TGW_REVIEW_CONTEXT_CREDENTIAL_FILE=%d/review-context
+Environment=TGW_REVIEW_EVIDENCE_CREDENTIAL_FILE=%d/review-evidence
 ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.development.local_workflow --config /opt/TGW/tgw-lib/config/tgw-coding-local.json worker --queue claude-review
 Restart=on-failure
 RestartSec=5s

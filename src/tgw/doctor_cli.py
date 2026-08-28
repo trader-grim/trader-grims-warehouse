@@ -3185,6 +3185,14 @@ def _protected_review_paths(paths: DoctorPaths) -> dict[str, Path]:
         "config": root / "config.json",
         "requests": root / "requests",
         "snapshots": root / "snapshots",
+        "resources": root / "registered-resources",
+        "grants": root / "broker-grants",
+        "consumed_grants": root / "broker-grants" / "consumed",
+        "credentials": root / "credentials",
+        "context_credential": root / "credentials" / "context.json",
+        "evidence_credential": root / "credentials" / "evidence.json",
+        "resource_credential": root / "credentials" / "resource.json",
+        "broker_credential": root / "credentials" / "broker.json",
         "profile": root / "request-profile.json",
         "candidate": root / "candidate-evidence-descriptor.json",
         "execution": root / "execution-evidence-sink.json",
@@ -3193,7 +3201,7 @@ def _protected_review_paths(paths: DoctorPaths) -> dict[str, Path]:
 
 
 def _protected_review_surface(
-    path: Path, *, directory: bool, mode: int
+    path: Path, *, directory: bool, mode: int, include_hash: bool = True,
 ) -> dict[str, Any]:
     observed = path.stat(follow_symlinks=False)
     expected_kind = stat.S_ISDIR if directory else stat.S_ISREG
@@ -3213,7 +3221,7 @@ def _protected_review_surface(
         "mode": stat.S_IMODE(observed.st_mode),
         "device": observed.st_dev,
         "inode": observed.st_ino,
-        **({} if directory else {"sha256": _file_hash(path)}),
+        **({} if directory or not include_hash else {"sha256": _file_hash(path)}),
     }
 
 
@@ -3233,6 +3241,18 @@ def check_protected_review(paths: DoctorPaths) -> dict[str, Any]:
             "snapshots": _protected_review_surface(
                 selected["snapshots"], directory=True, mode=0o755
             ),
+            "resources": _protected_review_surface(
+                selected["resources"], directory=True, mode=0o755
+            ),
+            "grants": _protected_review_surface(
+                selected["grants"], directory=True, mode=0o755
+            ),
+            "consumed_grants": _protected_review_surface(
+                selected["consumed_grants"], directory=True, mode=0o700
+            ),
+            "credentials": _protected_review_surface(
+                selected["credentials"], directory=True, mode=0o700
+            ),
             "config": _protected_review_surface(
                 selected["config"], directory=False, mode=0o444
             ),
@@ -3248,6 +3268,16 @@ def check_protected_review(paths: DoctorPaths) -> dict[str, Any]:
             "published": _protected_review_surface(
                 selected["published"], directory=False, mode=0o400
             ),
+            **{
+                name: _protected_review_surface(
+                    selected[name], directory=False, mode=0o400,
+                    include_hash=False,
+                )
+                for name in (
+                    "context_credential", "evidence_credential",
+                    "resource_credential", "broker_credential",
+                )
+            },
         }
         from tgw.candidate_receipt_sink import (
             PinnedCandidateEvidenceDescriptor,
@@ -3255,7 +3285,10 @@ def check_protected_review(paths: DoctorPaths) -> dict[str, Any]:
         )
         from tgw.context_generation_status import _protected_json
         from tgw.development.coding_review import load_protected_review_config
-        from tgw.development.coding_review_protection import load_profile
+        from tgw.development.coding_review_protection import (
+            load_profile,
+            load_service_credential,
+        )
 
         configuration = load_protected_review_config(
             selected["config"],
@@ -3269,10 +3302,28 @@ def check_protected_review(paths: DoctorPaths) -> dict[str, Any]:
             "candidate_evidence_descriptor_config": selected["candidate"].resolve(),
             "execution_evidence_sink_config": selected["execution"].resolve(),
             "execution_evidence_pin_source": selected["published"].resolve(),
+            "resource_registry_root": selected["resources"].resolve(),
+            "broker_grant_root": selected["grants"].resolve(),
+            "context_credential_config": selected["context_credential"].resolve(),
+            "evidence_credential_config": selected["evidence_credential"].resolve(),
+            "resource_credential_config": selected["resource_credential"].resolve(),
+            "broker_credential_config": selected["broker_credential"].resolve(),
         }
         if configuration != expected:
             raise DoctorError("protected-review fixed paths differ")
-        load_profile(selected["profile"], trusted_uid=0)
+        profile = load_profile(selected["profile"], trusted_uid=0)
+        for purpose in ("context", "evidence", "resource", "broker"):
+            load_service_credential(
+                selected[f"{purpose}_credential"], purpose=purpose,
+                generation=profile["credential_generations"][purpose],
+                trusted_uid=0,
+            )
+        evidence["credential_wiring"] = {
+            "context_environment": "TGW_REVIEW_CONTEXT_CREDENTIAL_FILE",
+            "evidence_environment": "TGW_REVIEW_EVIDENCE_CREDENTIAL_FILE",
+            "delivery": "systemd-load-credential",
+            "values_reported": False,
+        }
         candidate = _protected_json(
             selected["candidate"], "protected-review candidate binding", 0
         )
@@ -6518,18 +6569,34 @@ def _protected_onboarding(paths: DoctorPaths) -> dict[str, Any]:
         "candidate_evidence_descriptor_config",
         "execution_evidence_sink_config",
         "execution_evidence_pin_source_config",
+        "credentials",
     }
     if (
         not isinstance(value, dict)
         or set(value) != required
         or value.get("schema")
-        != "tgw-local-coding-protected-review-onboarding/v1"
+        != "tgw-local-coding-protected-review-onboarding/v2"
         or not all(
             isinstance(value.get(name), dict)
             for name in required - {"schema"}
         )
     ):
         raise DoctorError("protected-review onboarding contract is invalid")
+    credentials = value["credentials"]
+    if set(credentials) != {"context", "evidence", "resource", "broker"}:
+        raise DoctorError("protected-review credential coverage is invalid")
+    for purpose, credential in credentials.items():
+        if (
+            set(credential) != {"schema", "purpose", "generation", "bearer"}
+            or credential.get("schema") != "tgw-protected-service-credential/v1"
+            or credential.get("purpose") != purpose
+            or not isinstance(credential.get("generation"), str)
+            or not credential["generation"]
+            or not isinstance(credential.get("bearer"), str)
+            or len(credential["bearer"]) < 32
+            or any(character.isspace() for character in credential["bearer"])
+        ):
+            raise DoctorError(f"protected-review {purpose} credential is invalid")
     return value
 
 
@@ -6546,7 +6613,12 @@ def repair_protected_review(paths: DoctorPaths) -> dict[str, Any]:
     from tgw.development.coding_review_protection import validate_profile
 
     # Validate all external pins before changing even the first managed path.
-    validate_profile(onboarding["request_profile"])
+    profile = validate_profile(onboarding["request_profile"])
+    if profile["credential_generations"] != {
+        purpose: credential["generation"]
+        for purpose, credential in onboarding["credentials"].items()
+    }:
+        raise DoctorError("protected-review credential generations do not match the request profile")
     PinnedCandidateEvidenceDescriptor(
         onboarding["candidate_evidence_descriptor_config"],
         candidate_repository=paths.repository,
@@ -6577,17 +6649,29 @@ def repair_protected_review(paths: DoctorPaths) -> dict[str, Any]:
     live_config_before = live_config_identity()
     before = check_protected_review(paths)
     changed: list[str] = []
-    for path in (selected["root"], selected["requests"], selected["snapshots"]):
+    for path in (
+        selected["root"], selected["requests"], selected["snapshots"],
+        selected["resources"], selected["grants"],
+    ):
         if _repair_managed_directory(path, uid=0, gid=0, mode=0o755):
             changed.append(str(path))
+    for path in (selected["consumed_grants"], selected["credentials"]):
+        if _repair_managed_directory(path, uid=0, gid=0, mode=0o700):
+            changed.append(str(path))
     config = {
-        "schema": "tgw-local-coding-protected-review/v1",
+        "schema": "tgw-local-coding-protected-review/v2",
         "request_root": str(selected["requests"]),
         "snapshot_root": str(selected["snapshots"]),
         "request_profile_config": str(selected["profile"]),
         "candidate_evidence_descriptor_config": str(selected["candidate"]),
         "execution_evidence_sink_config": str(selected["execution"]),
         "execution_evidence_pin_source": str(selected["published"]),
+        "resource_registry_root": str(selected["resources"]),
+        "broker_grant_root": str(selected["grants"]),
+        "context_credential_config": str(selected["context_credential"]),
+        "evidence_credential_config": str(selected["evidence_credential"]),
+        "resource_credential_config": str(selected["resource_credential"]),
+        "broker_credential_config": str(selected["broker_credential"]),
     }
     desired = {
         selected["config"]: (_json_bytes(config), 0o444),
@@ -6607,6 +6691,12 @@ def repair_protected_review(paths: DoctorPaths) -> dict[str, Any]:
             _json_bytes(onboarding["execution_evidence_pin_source_config"]),
             0o400,
         ),
+        **{
+            selected[f"{purpose}_credential"]: (
+                _json_bytes(onboarding["credentials"][purpose]), 0o400,
+            )
+            for purpose in ("context", "evidence", "resource", "broker")
+        },
     }
     for destination, (body, mode) in desired.items():
         if destination.is_symlink() or (

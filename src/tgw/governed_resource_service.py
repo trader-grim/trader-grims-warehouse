@@ -15,6 +15,7 @@ import hmac
 import json
 import os
 import secrets
+import stat
 import threading
 import time
 from dataclasses import dataclass, field
@@ -35,6 +36,8 @@ from tgw.execution_resources import (
 )
 
 SERVICE_CONFIG_SCHEMA = "tgw-governed-resource-service-config/v5"
+SERVICE_CONFIG_REGISTRY_SCHEMA = "tgw-governed-resource-service-config/v6"
+RESOURCE_GENERATION_SCHEMA = "tgw-registered-resource-generation/v1"
 # The resolver separately bounds the complete JSON response.  Keep enough
 # room for current exact resources while preserving the aggregate review cap.
 # A real TGW source-snapshot preimage and its CodeGraph are each larger than
@@ -49,6 +52,7 @@ _CONFIG_FIELDS = {
     "attestation_private_key_env", "harness_run_ttl_seconds", "completed_run_ttl_seconds",
     "max_open_runs_per_client", "max_completed_runs_per_client", "resources",
 }
+_REGISTRY_CONFIG_FIELDS = _CONFIG_FIELDS | {"resource_registry_root"}
 _CLIENT_FIELDS = {"id", "credential_env", "execution_identity", "role"}
 _RESOURCE_FIELDS = {"ref", "path", "content_hash"}
 
@@ -134,6 +138,14 @@ def _valid_run_id(value: Any) -> bool:
     )
 
 
+def _valid_git_object(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _resource_bindings(value: Any) -> dict[str, dict[str, str]]:
     if not isinstance(value, Mapping) or set(value) != CARD_RESOURCE_NAMES:
         raise _ProtocolError(400, "harness retrieval run resources are invalid")
@@ -156,6 +168,153 @@ class FrozenResource:
     ref: str
     content: bytes
     content_hash: str
+
+
+@dataclass(frozen=True)
+class RegisteredResourceGeneration:
+    """One immutable candidate-specific resource generation."""
+
+    generation: str
+    source: Mapping[str, Any]
+    resources: Mapping[str, FrozenResource]
+    bindings: Mapping[str, Mapping[str, str]]
+
+
+def _protected_directory(path: Path, label: str) -> os.stat_result:
+    try:
+        observed = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise ResourceServiceConfigurationError(f"{label} is unavailable") from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(observed.st_mode)
+        or observed.st_uid != 0
+        or observed.st_gid != 0
+        or stat.S_IMODE(observed.st_mode) & 0o022
+    ):
+        raise ResourceServiceConfigurationError(f"{label} is not protected")
+    return observed
+
+
+def _protected_generation_file(path: Path, label: str, *, limit: int) -> bytes:
+    try:
+        named = path.lstat()
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ResourceServiceConfigurationError(f"{label} is unavailable") from exc
+    try:
+        observed = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or observed.st_uid != 0
+            or observed.st_gid != 0
+            or stat.S_IMODE(observed.st_mode) & 0o022
+            or observed.st_nlink != 1
+            or observed.st_size > limit
+            or (named.st_dev, named.st_ino) != (observed.st_dev, observed.st_ino)
+        ):
+            raise ResourceServiceConfigurationError(f"{label} is not protected")
+        raw = bytearray()
+        while len(raw) <= limit:
+            block = os.read(descriptor, min(1024 * 1024, limit + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        if len(raw) != observed.st_size or len(raw) > limit:
+            raise ResourceServiceConfigurationError(f"{label} exceeds its bound")
+        after = os.fstat(descriptor)
+        if any(
+            getattr(after, field) != getattr(observed, field)
+            for field in (
+                "st_dev", "st_ino", "st_mode", "st_uid", "st_gid",
+                "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns",
+            )
+        ):
+            raise ResourceServiceConfigurationError(f"{label} changed while held")
+        return bytes(raw)
+    finally:
+        os.close(descriptor)
+
+
+def load_registered_resource_generation(
+    registry_root: Path, generation: str,
+) -> RegisteredResourceGeneration:
+    """Load one root-owned immutable generation without following links."""
+
+    if not _valid_run_id(generation):
+        raise ResourceServiceConfigurationError("registered resource generation identity is invalid")
+    root = registry_root.resolve(strict=True)
+    if root != registry_root:
+        raise ResourceServiceConfigurationError("registered resource registry path is not direct")
+    _protected_directory(root, "registered resource registry")
+    generation_root = root / generation
+    _protected_directory(generation_root, "registered resource generation")
+    manifest_raw = _protected_generation_file(
+        generation_root / "manifest.json",
+        "registered resource generation manifest",
+        limit=MAX_REQUEST_BYTES,
+    )
+    try:
+        manifest = json.loads(manifest_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ResourceServiceConfigurationError("registered resource generation manifest is invalid") from exc
+    if (
+        not isinstance(manifest, Mapping)
+        or set(manifest) != {"schema", "generation", "source", "resources"}
+        or manifest.get("schema") != RESOURCE_GENERATION_SCHEMA
+        or manifest.get("generation") != generation
+        or not isinstance(manifest.get("source"), Mapping)
+        or set(manifest["source"]) != {"commit", "tree", "canonical_installed"}
+        or manifest["source"].get("commit") != generation
+        or not _valid_git_object(manifest["source"].get("commit"))
+        or not _valid_git_object(manifest["source"].get("tree"))
+        or manifest["source"].get("canonical_installed") is not False
+        or not isinstance(manifest.get("resources"), list)
+        or len(manifest["resources"]) != len(CARD_RESOURCE_NAMES)
+    ):
+        raise ResourceServiceConfigurationError("registered resource generation manifest is invalid")
+    frozen: dict[str, FrozenResource] = {}
+    bindings: dict[str, dict[str, str]] = {}
+    total = 0
+    for item in manifest["resources"]:
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != {"name", "ref", "path", "content_hash"}
+            or item.get("name") not in CARD_RESOURCE_NAMES
+            or item["name"] in frozen
+            or not _valid_ref(item.get("ref"))
+            or not _valid_hash(item.get("content_hash"))
+            or not isinstance(item.get("path"), str)
+        ):
+            raise ResourceServiceConfigurationError("registered resource generation entry is invalid")
+        relative = Path(item["path"])
+        if relative.is_absolute() or not relative.parts or any(
+            part in {"", ".", ".."} for part in relative.parts
+        ):
+            raise ResourceServiceConfigurationError("registered resource generation path is invalid")
+        resource_path = generation_root / relative
+        try:
+            if resource_path.resolve(strict=True).parent != (generation_root / "resources").resolve(strict=True):
+                raise ResourceServiceConfigurationError("registered resource generation path escapes its root")
+        except OSError as exc:
+            raise ResourceServiceConfigurationError("registered resource generation resource is unavailable") from exc
+        content = _protected_generation_file(
+            resource_path, "registered resource generation resource", limit=MAX_RESOURCE_BYTES,
+        )
+        total += len(content)
+        if total > 64 * 1024 * 1024 or content_hash(content) != item["content_hash"]:
+            raise ResourceServiceConfigurationError("registered resource generation content differs")
+        resource = FrozenResource(str(item["ref"]), content, str(item["content_hash"]))
+        frozen[str(item["name"])] = resource
+        bindings[str(item["name"])] = {"ref": resource.ref, "hash": resource.content_hash}
+    if set(frozen) != CARD_RESOURCE_NAMES or len({item.ref for item in frozen.values()}) != len(frozen):
+        raise ResourceServiceConfigurationError("registered resource generation coverage is invalid")
+    return RegisteredResourceGeneration(
+        generation=generation,
+        source=dict(manifest["source"]),
+        resources=frozen,
+        bindings=bindings,
+    )
 
 
 @dataclass(frozen=True)
@@ -186,12 +345,21 @@ class ResourceServiceConfig:
     max_open_runs_per_client: int
     max_completed_runs_per_client: int
     resources: Mapping[str, FrozenResource]
+    resource_registry_root: Path | None = None
 
     @classmethod
     def parse(cls, value: Mapping[str, Any]) -> "ResourceServiceConfig":
-        if not isinstance(value, Mapping) or set(value) != _CONFIG_FIELDS:
+        if not isinstance(value, Mapping) or frozenset(value) not in {
+            frozenset(_CONFIG_FIELDS), frozenset(_REGISTRY_CONFIG_FIELDS),
+        }:
             raise ResourceServiceConfigurationError("governed resource service configuration is invalid")
-        if value.get("schema") != SERVICE_CONFIG_SCHEMA:
+        if (
+            value.get("schema") == SERVICE_CONFIG_SCHEMA
+            and set(value) != _CONFIG_FIELDS
+            or value.get("schema") == SERVICE_CONFIG_REGISTRY_SCHEMA
+            and set(value) != _REGISTRY_CONFIG_FIELDS
+            or value.get("schema") not in {SERVICE_CONFIG_SCHEMA, SERVICE_CONFIG_REGISTRY_SCHEMA}
+        ):
             raise ResourceServiceConfigurationError("governed resource service configuration schema is invalid")
         service_id = value.get("service_id")
         clients = value.get("clients")
@@ -262,7 +430,9 @@ class ResourceServiceConfig:
         ):
             raise ResourceServiceConfigurationError("governed resource service completed run capacity is invalid")
         resources = value.get("resources")
-        if not isinstance(resources, list) or not resources:
+        if not isinstance(resources, list) or (
+            not resources and value.get("schema") != SERVICE_CONFIG_REGISTRY_SCHEMA
+        ):
             raise ResourceServiceConfigurationError("governed resource service resources are invalid")
         frozen: dict[str, FrozenResource] = {}
         for item in resources:
@@ -291,6 +461,15 @@ class ResourceServiceConfig:
             if ref in frozen:
                 raise ResourceServiceConfigurationError("governed resource service resource reference is duplicated")
             frozen[ref] = FrozenResource(ref=str(ref), content=resource_content, content_hash=actual_hash)
+        registry_root = None
+        if value.get("schema") == SERVICE_CONFIG_REGISTRY_SCHEMA:
+            raw_registry_root = value.get("resource_registry_root")
+            if not isinstance(raw_registry_root, str) or not Path(raw_registry_root).is_absolute():
+                raise ResourceServiceConfigurationError("governed resource service registry root is invalid")
+            registry_root = Path(raw_registry_root).resolve(strict=True)
+            if registry_root != Path(raw_registry_root):
+                raise ResourceServiceConfigurationError("governed resource service registry root is not direct")
+            _protected_directory(registry_root, "registered resource registry")
         return cls(
             service_id=str(service_id),
             clients=normalized_clients,
@@ -301,6 +480,7 @@ class ResourceServiceConfig:
             max_open_runs_per_client=max_open_runs_per_client,
             max_completed_runs_per_client=max_completed_runs_per_client,
             resources=frozen,
+            resource_registry_root=registry_root,
         )
 
 
@@ -323,6 +503,7 @@ class _HarnessRun:
     attestation: dict[str, Any] | None = None
     completed_monotonic: float | None = None
     completed_response_returned: bool = False
+    resources: Mapping[str, FrozenResource] = field(default_factory=dict)
 
 
 class _ResourceServiceState:
@@ -346,6 +527,51 @@ class _ResourceServiceState:
         self._clock = clock
         self._runs: dict[str, _HarnessRun] = {}
         self._lock = threading.Lock()
+
+    def generation(self, generation: str) -> RegisteredResourceGeneration:
+        if self.config.resource_registry_root is None:
+            raise _ProtocolError(404, "registered resource generation is unavailable")
+        try:
+            return load_registered_resource_generation(
+                self.config.resource_registry_root, generation,
+            )
+        except ResourceServiceConfigurationError as exc:
+            raise _ProtocolError(404, "registered resource generation is unavailable") from exc
+
+    def _resources_for_bindings(
+        self, bindings: Mapping[str, Mapping[str, str]],
+    ) -> Mapping[str, FrozenResource]:
+        static = {
+            name: self.config.resources[binding["ref"]]
+            for name, binding in bindings.items()
+            if binding["ref"] in self.config.resources
+            and self.config.resources[binding["ref"]].content_hash == binding["hash"]
+        }
+        if len(static) == len(bindings):
+            return static
+        root = self.config.resource_registry_root
+        if root is None:
+            raise _ProtocolError(409, "harness retrieval run resource binding is unavailable")
+        try:
+            candidates = sorted(
+                item.name for item in root.iterdir()
+                if item.is_dir() and not item.is_symlink() and _valid_run_id(item.name)
+            )
+        except OSError as exc:
+            raise _ProtocolError(409, "registered resource registry is unavailable") from exc
+        if len(candidates) > 1024:
+            raise _ProtocolError(409, "registered resource registry capacity is exceeded")
+        matches: list[RegisteredResourceGeneration] = []
+        for generation in candidates:
+            try:
+                registered = load_registered_resource_generation(root, generation)
+            except ResourceServiceConfigurationError:
+                continue
+            if dict(registered.bindings) == dict(bindings):
+                matches.append(registered)
+        if len(matches) != 1:
+            raise _ProtocolError(409, "harness retrieval run resource binding is unavailable")
+        return matches[0].resources
 
     def client_for_authorization(self, authorization: str | None) -> ResourceServiceClient | None:
         """Resolve one bearer to its configured principal without trusting claims.
@@ -432,9 +658,6 @@ class _ResourceServiceState:
             raise _ProtocolError(403, "resource retrieval requires a bound harness run")
         with self._lock:
             self._reclaim_expired_runs()
-            resource = self.config.resources.get(ref)
-            if resource is None:
-                raise _ProtocolError(404, "resource is unavailable")
             run = self._runs.get(run_id)
             if run is None:
                 raise _ProtocolError(404, "harness run is unavailable")
@@ -443,6 +666,11 @@ class _ResourceServiceState:
             bindings = run.value["resources"]
             if ref not in {binding["ref"] for binding in bindings.values()}:
                 raise _ProtocolError(403, "resource is not bound to harness run")
+            resource = next(
+                (item for item in run.resources.values() if item.ref == ref), None,
+            )
+            if resource is None:
+                raise _ProtocolError(404, "resource is unavailable")
             run.seen.add(ref)
             return resource
 
@@ -469,10 +697,7 @@ class _ResourceServiceState:
         ):
             raise _ProtocolError(400, "harness retrieval run identity is invalid")
         bindings = _resource_bindings(value.get("resources"))
-        for binding in bindings.values():
-            resource = self.config.resources.get(binding["ref"])
-            if resource is None or resource.content_hash != binding["hash"]:
-                raise _ProtocolError(409, "harness retrieval run resource binding is unavailable")
+        resources = self._resources_for_bindings(bindings)
         payload = {
             "schema": HARNESS_RUN_SCHEMA,
             "service_id": self.config.service_id,
@@ -497,6 +722,7 @@ class _ResourceServiceState:
                 run_id = secrets.token_urlsafe(24)
             self._runs[run_id] = _HarnessRun(
                 value=payload, client_id=client.client_id, created_monotonic=self._clock(),
+                resources=resources,
             )
         return {**payload, "run_id": run_id}
 
@@ -643,6 +869,21 @@ def create_resource_service_server(
                             "service_id": config.service_id,
                             "attestation_key_id": config.attestation_key_id,
                             "status": "healthy",
+                        },
+                    )
+                    return
+                generation_prefix = "/v1/registered-generations/"
+                if path.startswith(generation_prefix):
+                    generation = unquote(path.removeprefix(generation_prefix))
+                    registered = state.generation(generation)
+                    self._send_json(
+                        200,
+                        {
+                            "schema": RESOURCE_GENERATION_SCHEMA,
+                            "service_id": config.service_id,
+                            "generation": registered.generation,
+                            "source": registered.source,
+                            "resources": registered.bindings,
                         },
                     )
                     return
