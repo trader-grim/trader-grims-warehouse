@@ -1241,8 +1241,9 @@ def execute_item_operator_command(
             status_code=409,
             detail={"code": "command_held", "reason": command.get("reason")},
         )
-    if body.command_id == "save-draft" and not body.values:
-        raise HTTPException(status_code=422, detail="save-draft requires server-published field values")
+    local_save_commands = {"save-inventory", "save-listing-draft"}
+    if body.command_id in local_save_commands and not body.values:
+        raise HTTPException(status_code=422, detail=f"{body.command_id} requires server-published field values")
 
     checked_values: Dict[str, Any] = {}
     if body.values:
@@ -1256,12 +1257,9 @@ def execute_item_operator_command(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        if body.command_id == "save-draft":
+        if body.command_id == "save-inventory":
             item_fields = checked_values.get("item_fields", {})
-            draft_fields = checked_values.get("draft_listing")
             patch_fields = {**item_fields}
-            if draft_fields is not None:
-                patch_fields["draft_listing"] = draft_fields
             selected_group = patch_fields.get("category_group")
             if selected_group:
                 options = published["field_schema"].get("category_groups", [])
@@ -1274,7 +1272,11 @@ def execute_item_operator_command(
                 if not (current_draft.get("category_id") or current_record.get("ebay_category_id")):
                     categories = selected.get("ebay_categories") or []
                     if categories:
-                        patch_fields["draft_listing"] = {**(draft_fields or {}), "category_id": categories[0]}
+                        patch_fields["draft_listing"] = {"category_id": categories[0]}
+        elif body.command_id == "save-listing-draft":
+            patch_fields = {
+                "draft_listing": checked_values.get("draft_listing", {}),
+            }
         else:
             patch_fields = {"draft_listing": checked_values}
         patch_item(
@@ -1295,7 +1297,7 @@ def execute_item_operator_command(
                 detail={"code": "command_held_after_update", "reason": command.get("reason")},
             )
 
-    if body.command_id == "save-draft":
+    if body.command_id in local_save_commands:
         return {
             "ok": True,
             "command_id": body.command_id,
@@ -4400,6 +4402,34 @@ _CATEGORY_CONTEXT_IIFE = (
     _CATEGORY_CONTEXT_IIFE.replace(
         "if(!catId){if(loading)loading.textContent='No category.';return;}",
         "if(!catId){flagFieldInvalid('dl-cat-search',true);if(loading){loading.textContent='Category required before item specifics can be checked.';loading.style.color='#e88';}return;}",
+    )
+    .replace(
+        """      if(curVal&&!stillValid){
+        if(d.condition_remap){
+          curVal=d.condition_remap.enum;
+          html=html.replace('<option value="'+curVal+'"','<option value="'+curVal+'" selected');
+        }else{
+          html+='<option value="'+curVal+'" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';
+        }
+      }
+      sel.innerHTML=html;
+      flagFieldInvalid(sel,!!(curVal&&!stillValid&&!d.condition_remap));
+      if(d.condition_remap&&curVal===d.condition_remap.enum){
+        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',
+          headers:authHeaders({'Content-Type':'application/json'}),
+          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});
+      }
+      var cn=document.getElementById('condition-policy-note');
+      var nl=d.conditions.length;
+      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');""",
+        """      if(curVal&&!stillValid){
+        html+='<option value="'+curVal+'" selected disabled>'+curVal+' \\u2014 not valid for this category, please fix</option>';
+      }
+      sel.innerHTML=html;
+      flagFieldInvalid(sel,!!(curVal&&!stillValid));
+      var cn=document.getElementById('condition-policy-note');
+      var nl=d.conditions.length;
+      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 condition remap available: '+d.condition_remap.label+'; select it explicitly':'')+((curVal&&!stillValid)?' \\u2014 current value invalid, please re-select or clear':'');""",
     )
     .replace(
         "var html='';\n    d.aspects.forEach",

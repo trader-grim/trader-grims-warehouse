@@ -58,6 +58,28 @@ def test_conditions_empty_when_policy_lookup_fails(tmp_path):
     assert result["conditions"] == []
 
 
+def test_category_context_preserves_resolved_optional_empty_policy(tmp_path):
+    http_server._cfg = _cfg(tmp_path)
+    with patch(
+        "tgw.apis.ebay.conditions.condition_policy_for_category",
+        return_value={
+            "recognized": True,
+            "item_condition_required": False,
+            "required_flag_valid": True,
+            "conditions": [],
+        },
+    ), patch(
+        "tgw.apis.ebay.conditions.allowed_conditions_for_category",
+        return_value=[],
+    ), patch("tgw.apis.ebay.specifics.get_aspects", return_value=[]):
+        result = http_server.ebay_category_context("108857")
+
+    assert result["category_recognized"] is True
+    assert result["item_condition_required"] is False
+    assert result["required_flag_valid"] is True
+    assert result["conditions"] == []
+
+
 def test_aspects_error_distinguishes_lookup_failure_from_genuine_empty(tmp_path):
     """No real eBay category has zero specifics — an empty aspects list must carry
     aspects_error so the UI can say 'lookup failed', not 'no specifics'."""
@@ -95,3 +117,12 @@ def test_editor_applies_persisted_error_after_aspect_form_is_rendered():
     script = http_server._CATEGORY_CONTEXT_IIFE
     assert "window._PE_FIELD" in script
     assert "form.innerHTML=html;if(window._PE_FIELD)" in script
+
+
+def test_editor_never_auto_applies_condition_remap():
+    script = http_server._CATEGORY_CONTEXT_IIFE
+
+    assert "condition auto-matched" not in script
+    assert "condition remap available" in script
+    assert "draft_listing:{condition_enum:curVal}" not in script
+    assert "not valid for this category, please fix" in script

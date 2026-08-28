@@ -185,7 +185,8 @@ def test_server_builder_publishes_complete_thin_client_contract():
         "options": [{"value": "USED_GOOD", "label": "Used - Good"}],
     }
     assert {command["id"]: command["enabled"] for command in view["commands"]} == {
-        "save-draft": True,
+        "save-inventory": True,
+        "save-listing-draft": True,
         "list-item": True,
         "update-item": True,
     }
@@ -202,7 +203,8 @@ def test_published_provider_state_disables_list_but_keeps_update_nonpublishing()
     assert published["workflow"]["state"] == "published"
     assert commands["list-item"]["enabled"] is False
     assert commands["list-item"]["authority_scope"] == "publication"
-    assert commands["save-draft"]["authority_scope"] == "local-item-mutation"
+    assert commands["save-inventory"]["authority_scope"] == "local-item-mutation"
+    assert commands["save-listing-draft"]["authority_scope"] == "local-item-mutation"
     assert commands["update-item"]["enabled"] is True
     assert commands["update-item"]["authority_scope"] == "update-restage"
 
@@ -216,7 +218,8 @@ def test_reconciliation_gate_holds_provider_commands_but_preserves_local_repair(
 
     assert published["workflow"]["state"] == "reconciliation_required"
     commands = {command["id"]: command for command in published["commands"]}
-    assert commands["save-draft"]["enabled"] is True
+    assert commands["save-inventory"]["enabled"] is True
+    assert commands["save-listing-draft"]["enabled"] is True
     assert commands["list-item"]["enabled"] is False
     assert commands["update-item"]["enabled"] is False
 
@@ -236,3 +239,186 @@ def test_command_values_are_validated_from_published_condition_and_aspect_schema
         validate_operator_command_values(published, "update-item", {"price": "1.00"})
     with pytest.raises(OperatorObjectBindingError, match="allowed value"):
         validate_operator_command_values(published, "list-item", {"condition_enum": "invented"})
+
+
+def _policy_context(**overrides):
+    context = {
+        "category_recognized": True,
+        "item_condition_required": True,
+        "required_flag_valid": True,
+        "conditions": [{"enum": "USED_GOOD", "label": "Used - Good"}],
+        "aspects": [],
+    }
+    context.update(overrides)
+    return context
+
+
+def test_optional_108857_keeps_independent_record_condition_and_global_vocabularies():
+    item = _item()
+    item["condition"] = "very good"
+    item["draft_listing"] = {
+        "category_id": "108857",
+        "condition_enum": "",
+        "item_specifics": {},
+    }
+    groups = [{
+        "value": "paper",
+        "label": "Paper",
+        "size_class": "flat",
+        "ai_hint": "printed paper",
+        "ebay_categories": ["108857"],
+    }]
+
+    published = build_item_operator_object(
+        item=item,
+        workflow_card=_workflow_card(),
+        category_context=_policy_context(
+            item_condition_required=False,
+            conditions=[],
+            category_groups=groups,
+            record_condition_vocabulary=["New", "Very Good", "Good"],
+            record_attribute_vocabulary={
+                "Brand": {"type": "string"},
+                "Color": {"type": "string"},
+            },
+        ),
+    )
+
+    schema = published["field_schema"]
+    commands = {command["id"]: command for command in published["commands"]}
+    assert schema["condition"] == {
+        "value": "",
+        "label": None,
+        "required": False,
+        "valid": True,
+        "options": [{"value": "", "label": "No listing condition"}],
+        "required_flag_valid": True,
+    }
+    assert schema["item_fields"]["condition"]["value"] == "Very Good"
+    assert [
+        option["value"]
+        for option in schema["item_fields"]["condition"]["options"]
+    ] == ["New", "Very Good", "Good"]
+    assert schema["item_fields"]["category_group"]["options"] == groups
+    assert "Color" in schema["record_attribute_vocabulary"]
+    assert schema["aspects"] == []
+    assert commands["save-inventory"]["enabled"] is True
+    assert commands["save-listing-draft"]["enabled"] is True
+    assert commands["list-item"]["enabled"] is True
+    assert commands["update-item"]["enabled"] is True
+
+
+@pytest.mark.parametrize(
+    ("context", "condition_enum", "held_reason"),
+    [
+        (
+            _policy_context(conditions=[]),
+            "USED_GOOD",
+            "selected condition is not valid",
+        ),
+        (
+            _policy_context(),
+            "",
+            "category-valid displayed condition is required",
+        ),
+        (
+            _policy_context(
+                item_condition_required=None,
+                required_flag_valid=False,
+            ),
+            "USED_GOOD",
+            "itemConditionRequired policy flag is unresolved",
+        ),
+    ],
+)
+def test_condition_policy_holds_only_provider_commands(
+    context, condition_enum, held_reason
+):
+    item = _item()
+    item["draft_listing"]["condition_enum"] = condition_enum
+    published = build_item_operator_object(
+        item=item,
+        workflow_card=_workflow_card(),
+        category_context=context,
+    )
+    commands = {command["id"]: command for command in published["commands"]}
+
+    assert commands["save-inventory"]["enabled"] is True
+    assert set(commands["save-inventory"]["input_schema"]["properties"]) == {
+        "item_fields",
+    }
+    assert commands["save-listing-draft"]["enabled"] is True
+    assert set(
+        commands["save-listing-draft"]["input_schema"]["properties"]
+    ) == {"draft_listing"}
+    assert commands["list-item"]["enabled"] is False
+    assert commands["update-item"]["enabled"] is False
+    assert held_reason in commands["list-item"]["reason"]
+
+
+def test_illegal_condition_is_display_only_until_explicit_remap_or_clear():
+    item = _item()
+    item["condition"] = "Good"
+    item["draft_listing"]["condition_enum"] = "USED_GOOD"
+    published = build_item_operator_object(
+        item=item,
+        workflow_card=_workflow_card(),
+        category_context=_policy_context(
+            conditions=[{"enum": "NEW", "label": "New"}],
+            condition_remap={"enum": "NEW", "label": "New"},
+        ),
+    )
+
+    condition = published["field_schema"]["condition"]
+    commands = {command["id"]: command for command in published["commands"]}
+    assert condition["value"] == "USED_GOOD"
+    assert condition["options"][0] == {
+        "value": "USED_GOOD",
+        "label": "Used - Good — not allowed; remap or clear",
+        "display_only": True,
+    }
+    assert published["item"]["record"]["condition"] == "Good"
+    assert commands["save-inventory"]["enabled"] is True
+    assert commands["save-listing-draft"]["enabled"] is True
+    assert commands["list-item"]["enabled"] is False
+    assert commands["update-item"]["enabled"] is False
+    assert validate_operator_command_values(
+        published,
+        "save-listing-draft",
+        {"draft_listing": {"condition_enum": ""}},
+    ) == {"draft_listing": {"condition_enum": ""}}
+    with pytest.raises(OperatorObjectBindingError, match="allowed value"):
+        validate_operator_command_values(
+            published,
+            "save-listing-draft",
+            {"draft_listing": {"condition_enum": "USED_GOOD"}},
+        )
+    assert validate_operator_command_values(
+        published,
+        "save-listing-draft",
+        {"draft_listing": {"condition_enum": "NEW"}},
+    ) == {"draft_listing": {"condition_enum": "NEW"}}
+
+
+def test_every_nonempty_provider_aspect_value_remains_a_selection_choice():
+    values = ["Red", "Blue", "Custom provider value"]
+    published = build_item_operator_object(
+        item=_item(),
+        workflow_card=_workflow_card(),
+        category_context=_policy_context(
+            aspects=[{
+                "name": "Color",
+                "required": False,
+                "mode": "FREE_TEXT",
+                "allowed_values": values,
+            }],
+        ),
+    )
+
+    assert published["field_schema"]["aspects"][0]["allowed_values"] == values
+    command = next(
+        command for command in published["commands"] if command["id"] == "list-item"
+    )
+    assert command["input_schema"]["properties"]["item_specifics"][
+        "properties"
+    ]["Color"]["enum"] == values

@@ -167,9 +167,9 @@ def refresh_condition_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str,
     policies: Dict[str, List[Tuple[str, str]]] = {}
     required: Dict[str, bool | None] = {}
     for entry in data.get('itemConditionPolicies', []):
-        cat_id = entry['categoryId']
+        cat_id = str(entry['categoryId'])
         flag = entry.get('itemConditionRequired')
-        required[str(cat_id)] = flag if isinstance(flag, bool) else None
+        required[cat_id] = flag if isinstance(flag, bool) else None
         # Metadata occasionally omits the human description for a valid
         # conditionId.  The identifier is the authority needed for policy
         # enforcement; a missing optional label must not make the entire
@@ -180,8 +180,10 @@ def refresh_condition_policies(cfg: Dict[str, Any]) -> Dict[str, List[Tuple[str,
             for c in entry.get('itemConditions', [])
             if isinstance(c, dict) and c.get('conditionId') not in (None, '')
         ]
-        if conds:
-            policies[cat_id] = conds
+        # A recognized category can explicitly require no listing condition.
+        # Preserve that category with an empty allowed set rather than making
+        # it indistinguishable from a cache miss.
+        policies[cat_id] = conds
 
     path = _cache_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)

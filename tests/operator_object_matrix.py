@@ -85,12 +85,12 @@ def generated_matrix() -> list[dict]:
         "aspects": [{"name": "Brand", "required": True, "allowed_values": []}],
     }
     expectations = {
-        "ready": ["save-draft", "list-item"],
-        "staged": ["save-draft", "list-item", "update-item"],
-        "published": ["save-draft", "update-item"],
-        "held": ["save-draft"],
+        "ready": ["save-inventory", "save-listing-draft", "list-item"],
+        "staged": ["save-inventory", "save-listing-draft", "list-item", "update-item"],
+        "published": ["save-inventory", "save-listing-draft", "update-item"],
+        "held": ["save-inventory", "save-listing-draft"],
         "in_progress": [],
-        "reconciliation_required": ["save-draft"],
+        "reconciliation_required": ["save-inventory", "save-listing-draft"],
     }
     rows = []
     for requested_state, enabled in expectations.items():

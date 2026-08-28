@@ -3,11 +3,13 @@
     "expected": {
       "authority_scopes": {
         "list-item": "publication",
-        "save-draft": "local-item-mutation",
+        "save-inventory": "local-item-mutation",
+        "save-listing-draft": "local-item-mutation",
         "update-item": "update-restage"
       },
       "enabled_commands": [
-        "save-draft",
+        "save-inventory",
+        "save-listing-draft",
         "list-item"
       ],
       "field_schema_keys": [
@@ -27,7 +29,39 @@
         {
           "authority_scope": "local-item-mutation",
           "enabled": true,
-          "id": "save-draft",
+          "id": "save-inventory",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "item_fields": {
+                "additionalProperties": false,
+                "properties": {
+                  "item_attributes": {
+                    "type": "string-map"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Save Inventory",
+          "reason": null,
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "local-item-mutation",
+          "enabled": true,
+          "id": "save-listing-draft",
           "input_schema": {
             "additionalProperties": false,
             "properties": {
@@ -94,29 +128,11 @@
                   }
                 },
                 "type": "object"
-              },
-              "item_fields": {
-                "additionalProperties": false,
-                "properties": {
-                  "item_attributes": {
-                    "type": "string-map"
-                  },
-                  "location": {
-                    "type": "string"
-                  },
-                  "notes": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "type": "object"
               }
             },
             "type": "object"
           },
-          "label": "Save Draft",
+          "label": "Save Listing Draft",
           "reason": null,
           "refresh_target": "current-object"
         },
@@ -400,11 +416,13 @@
     "expected": {
       "authority_scopes": {
         "list-item": "publication",
-        "save-draft": "local-item-mutation",
+        "save-inventory": "local-item-mutation",
+        "save-listing-draft": "local-item-mutation",
         "update-item": "update-restage"
       },
       "enabled_commands": [
-        "save-draft",
+        "save-inventory",
+        "save-listing-draft",
         "list-item",
         "update-item"
       ],
@@ -425,7 +443,39 @@
         {
           "authority_scope": "local-item-mutation",
           "enabled": true,
-          "id": "save-draft",
+          "id": "save-inventory",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "item_fields": {
+                "additionalProperties": false,
+                "properties": {
+                  "item_attributes": {
+                    "type": "string-map"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Save Inventory",
+          "reason": null,
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "local-item-mutation",
+          "enabled": true,
+          "id": "save-listing-draft",
           "input_schema": {
             "additionalProperties": false,
             "properties": {
@@ -492,29 +542,11 @@
                   }
                 },
                 "type": "object"
-              },
-              "item_fields": {
-                "additionalProperties": false,
-                "properties": {
-                  "item_attributes": {
-                    "type": "string-map"
-                  },
-                  "location": {
-                    "type": "string"
-                  },
-                  "notes": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "type": "object"
               }
             },
             "type": "object"
           },
-          "label": "Save Draft",
+          "label": "Save Listing Draft",
           "reason": null,
           "refresh_target": "current-object"
         },
@@ -805,11 +837,13 @@
     "expected": {
       "authority_scopes": {
         "list-item": "publication",
-        "save-draft": "local-item-mutation",
+        "save-inventory": "local-item-mutation",
+        "save-listing-draft": "local-item-mutation",
         "update-item": "update-restage"
       },
       "enabled_commands": [
-        "save-draft",
+        "save-inventory",
+        "save-listing-draft",
         "update-item"
       ],
       "field_schema_keys": [
@@ -829,7 +863,39 @@
         {
           "authority_scope": "local-item-mutation",
           "enabled": true,
-          "id": "save-draft",
+          "id": "save-inventory",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "item_fields": {
+                "additionalProperties": false,
+                "properties": {
+                  "item_attributes": {
+                    "type": "string-map"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Save Inventory",
+          "reason": null,
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "local-item-mutation",
+          "enabled": true,
+          "id": "save-listing-draft",
           "input_schema": {
             "additionalProperties": false,
             "properties": {
@@ -896,29 +962,11 @@
                   }
                 },
                 "type": "object"
-              },
-              "item_fields": {
-                "additionalProperties": false,
-                "properties": {
-                  "item_attributes": {
-                    "type": "string-map"
-                  },
-                  "location": {
-                    "type": "string"
-                  },
-                  "notes": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "type": "object"
               }
             },
             "type": "object"
           },
-          "label": "Save Draft",
+          "label": "Save Listing Draft",
           "reason": null,
           "refresh_target": "current-object"
         },
@@ -1210,11 +1258,13 @@
     "expected": {
       "authority_scopes": {
         "list-item": "publication",
-        "save-draft": "local-item-mutation",
+        "save-inventory": "local-item-mutation",
+        "save-listing-draft": "local-item-mutation",
         "update-item": "update-restage"
       },
       "enabled_commands": [
-        "save-draft"
+        "save-inventory",
+        "save-listing-draft"
       ],
       "field_schema_keys": [
         "aspects",
@@ -1233,7 +1283,39 @@
         {
           "authority_scope": "local-item-mutation",
           "enabled": true,
-          "id": "save-draft",
+          "id": "save-inventory",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "item_fields": {
+                "additionalProperties": false,
+                "properties": {
+                  "item_attributes": {
+                    "type": "string-map"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Save Inventory",
+          "reason": null,
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "local-item-mutation",
+          "enabled": true,
+          "id": "save-listing-draft",
           "input_schema": {
             "additionalProperties": false,
             "properties": {
@@ -1300,29 +1382,11 @@
                   }
                 },
                 "type": "object"
-              },
-              "item_fields": {
-                "additionalProperties": false,
-                "properties": {
-                  "item_attributes": {
-                    "type": "string-map"
-                  },
-                  "location": {
-                    "type": "string"
-                  },
-                  "notes": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "type": "object"
               }
             },
             "type": "object"
           },
-          "label": "Save Draft",
+          "label": "Save Listing Draft",
           "reason": null,
           "refresh_target": "current-object"
         },
@@ -1596,7 +1660,8 @@
     "expected": {
       "authority_scopes": {
         "list-item": "publication",
-        "save-draft": "local-item-mutation",
+        "save-inventory": "local-item-mutation",
+        "save-listing-draft": "local-item-mutation",
         "update-item": "update-restage"
       },
       "enabled_commands": [],
@@ -1617,7 +1682,39 @@
         {
           "authority_scope": "local-item-mutation",
           "enabled": false,
-          "id": "save-draft",
+          "id": "save-inventory",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "item_fields": {
+                "additionalProperties": false,
+                "properties": {
+                  "item_attributes": {
+                    "type": "string-map"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Save Inventory",
+          "reason": "The authoritative workflow is active.",
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "local-item-mutation",
+          "enabled": false,
+          "id": "save-listing-draft",
           "input_schema": {
             "additionalProperties": false,
             "properties": {
@@ -1684,29 +1781,11 @@
                   }
                 },
                 "type": "object"
-              },
-              "item_fields": {
-                "additionalProperties": false,
-                "properties": {
-                  "item_attributes": {
-                    "type": "string-map"
-                  },
-                  "location": {
-                    "type": "string"
-                  },
-                  "notes": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "type": "object"
               }
             },
             "type": "object"
           },
-          "label": "Save Draft",
+          "label": "Save Listing Draft",
           "reason": "The authoritative workflow is active.",
           "refresh_target": "current-object"
         },
@@ -1984,11 +2063,13 @@
     "expected": {
       "authority_scopes": {
         "list-item": "publication",
-        "save-draft": "local-item-mutation",
+        "save-inventory": "local-item-mutation",
+        "save-listing-draft": "local-item-mutation",
         "update-item": "update-restage"
       },
       "enabled_commands": [
-        "save-draft"
+        "save-inventory",
+        "save-listing-draft"
       ],
       "field_schema_keys": [
         "aspects",
@@ -2009,7 +2090,39 @@
         {
           "authority_scope": "local-item-mutation",
           "enabled": true,
-          "id": "save-draft",
+          "id": "save-inventory",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "item_fields": {
+                "additionalProperties": false,
+                "properties": {
+                  "item_attributes": {
+                    "type": "string-map"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "label": "Save Inventory",
+          "reason": null,
+          "refresh_target": "current-object"
+        },
+        {
+          "authority_scope": "local-item-mutation",
+          "enabled": true,
+          "id": "save-listing-draft",
           "input_schema": {
             "additionalProperties": false,
             "properties": {
@@ -2076,29 +2189,11 @@
                   }
                 },
                 "type": "object"
-              },
-              "item_fields": {
-                "additionalProperties": false,
-                "properties": {
-                  "item_attributes": {
-                    "type": "string-map"
-                  },
-                  "location": {
-                    "type": "string"
-                  },
-                  "notes": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "type": "object"
               }
             },
             "type": "object"
           },
-          "label": "Save Draft",
+          "label": "Save Listing Draft",
           "reason": null,
           "refresh_target": "current-object"
         },

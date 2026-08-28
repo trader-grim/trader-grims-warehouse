@@ -48,7 +48,9 @@ def _string_list(value: Any, name: str) -> list[str]:
 
 def _command_descriptor(command: Mapping[str, Any]) -> dict[str, Any]:
     command_id = command.get("id")
-    if command_id not in {"save-draft", "list-item", "update-item"}:
+    if command_id not in {
+        "save-inventory", "save-listing-draft", "list-item", "update-item",
+    }:
         raise OperatorObjectBindingError("unrecognized operator command")
     enabled = command.get("enabled")
     if not isinstance(enabled, bool):
@@ -60,7 +62,8 @@ def _command_descriptor(command: Mapping[str, Any]) -> dict[str, Any]:
     # This is declarative metadata only.  Issuing the grant remains in the
     # server command handler; a browser or Flutter client cannot replace it.
     expected_scope = {
-        "save-draft": "local-item-mutation",
+        "save-inventory": "local-item-mutation",
+        "save-listing-draft": "local-item-mutation",
         "list-item": "publication",
         "update-item": "update-restage",
     }[command_id]
@@ -69,7 +72,8 @@ def _command_descriptor(command: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "id": command_id,
         "label": {
-            "save-draft": "Save Draft",
+            "save-inventory": "Save Inventory",
+            "save-listing-draft": "Save Listing Draft",
             "list-item": "List Item",
             "update-item": "Update Item",
         }[command_id],
@@ -268,9 +272,15 @@ def build_item_operator_object(
         if isinstance(value, str) and value and isinstance(label, str) and label:
             conditions.append({"value": value, "label": label})
     current_condition = str(draft.get("condition_enum") or draft.get("condition") or "")
-    valid_condition = not conditions or any(option["value"] == current_condition for option in conditions)
     category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "").strip()
     policy_fields_present = "category_recognized" in context or "required_flag_valid" in context
+    valid_condition = (
+        any(option["value"] == current_condition for option in conditions)
+        if policy_fields_present
+        else not conditions or any(
+            option["value"] == current_condition for option in conditions
+        )
+    )
     category_recognized = context.get("category_recognized") is True if policy_fields_present else bool(category_id)
     required_flag_valid = context.get("required_flag_valid") is True if policy_fields_present else True
     listing_condition_required = context.get("item_condition_required") is True if policy_fields_present else True
@@ -461,7 +471,7 @@ def build_item_operator_object(
             },
         },
     }
-    save_input_schema = {
+    save_inventory_input_schema = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
@@ -470,12 +480,21 @@ def build_item_operator_object(
                 "additionalProperties": False,
                 "properties": {name: {key: value for key, value in descriptor.items() if key in {"type", "nullable"}} for name, descriptor in field_schema["item_fields"].items()},
             },
+        },
+    }
+    save_listing_input_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
             "draft_listing": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {name: {key: value for key, value in descriptor.items() if key in {"type", "nullable"}} for name, descriptor in field_schema["listing_fields"].items()}
                 | {
-                    "condition_enum": {"type": "string", "enum": ([""] if not listing_condition_required else []) + [option["value"] for option in conditions]},
+                    # Local editing may explicitly clear a stale/illegal
+                    # condition. Provider commands retain the narrower enum
+                    # above and remain held until a required value is remapped.
+                    "condition_enum": {"type": "string", "enum": ([""] if policy_fields_present else []) + [option["value"] for option in conditions]},
                 },
             },
         },
@@ -487,11 +506,18 @@ def build_item_operator_object(
         field_schema=field_schema,
         commands=(
             {
-                "id": "save-draft",
+                "id": "save-inventory",
                 "enabled": projected_command("save-draft")[0],
                 "reason": projected_command("save-draft")[1],
                 "authority_scope": "local-item-mutation",
-                "input_schema": save_input_schema,
+                "input_schema": save_inventory_input_schema,
+            },
+            {
+                "id": "save-listing-draft",
+                "enabled": projected_command("save-draft")[0],
+                "reason": projected_command("save-draft")[1],
+                "authority_scope": "local-item-mutation",
+                "input_schema": save_listing_input_schema,
             },
             {
                 "id": "list-item",
