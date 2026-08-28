@@ -3158,6 +3158,28 @@ def _promote_bootstrap_release_ownership(
             raise DoctorError("bootstrap release cannot be promoted safely")
         return mode
 
+    def directory_names(descriptor: int) -> list[str]:
+        """Read one bound directory through a fresh file description.
+
+        Reusing ``descriptor`` for repeated ``os.listdir`` calls is not
+        portable: on some filesystems the duplicated descriptor retains the
+        prior directory offset and a stable directory appears empty on the
+        second read.  A fresh ``openat('.')`` keeps the lookup bound to the
+        already-open inode while giving every comparison a new cursor.
+        """
+
+        scan_fd = os.open(".", open_directory_flags, dir_fd=descriptor)
+        try:
+            held = os.fstat(descriptor)
+            scanned = os.fstat(scan_fd)
+            if (held.st_dev, held.st_ino) != (scanned.st_dev, scanned.st_ino):
+                raise DoctorError(
+                    "bootstrap release changed during ownership promotion"
+                )
+            return sorted(os.listdir(scan_fd))
+        finally:
+            os.close(scan_fd)
+
     def promote_file(parent_fd: int, name: str, expected: os.stat_result) -> None:
         source_fd = os.open(name, open_file_flags, dir_fd=parent_fd)
         temporary = f".tgw-root-promote-{secrets.token_hex(16)}"
@@ -3238,7 +3260,7 @@ def _promote_bootstrap_release_ownership(
         # without granting the materializer any writable namespace.
         os.fchmod(descriptor, 0o700)
         try:
-            names = sorted(os.listdir(descriptor))
+            names = directory_names(descriptor)
             for name in names:
                 child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
                 if stat.S_ISDIR(child.st_mode):
@@ -3256,7 +3278,7 @@ def _promote_bootstrap_release_ownership(
                     promote_file(descriptor, name, child)
                 else:
                     raise DoctorError("bootstrap release cannot be promoted safely")
-            if sorted(os.listdir(descriptor)) != names:
+            if directory_names(descriptor) != names:
                 raise DoctorError("bootstrap release changed during ownership promotion")
         finally:
             os.fchmod(descriptor, mode)

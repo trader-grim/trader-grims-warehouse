@@ -635,6 +635,14 @@ def test_bootstrap_release_ownership_promotion_never_path_chowns(
     release.chmod(0o555)
     runtime_parent_before = release.parent.parent.stat(follow_symlinks=False)
     releases_parent_before = release.parent.stat(follow_symlinks=False)
+    real_open = os.open
+    fresh_directory_scans = 0
+
+    def track_open(path, *args, **kwargs):
+        nonlocal fresh_directory_scans
+        if path == "." and kwargs.get("dir_fd") is not None:
+            fresh_directory_scans += 1
+        return real_open(path, *args, **kwargs)
 
     monkeypatch.setattr(
         os,
@@ -643,6 +651,7 @@ def test_bootstrap_release_ownership_promotion_never_path_chowns(
             AssertionError("pathname chown must not be used")
         ),
     )
+    monkeypatch.setattr(doctor_cli.os, "open", track_open)
     doctor_cli._promote_bootstrap_release_ownership(
         release,
         uid=os.getuid(),
@@ -651,6 +660,7 @@ def test_bootstrap_release_ownership_promotion_never_path_chowns(
 
     assert payload.read_text(encoding="utf-8") == "exact bytes"
     assert payload.stat(follow_symlinks=False).st_nlink == 1
+    assert fresh_directory_scans >= 4
     runtime_parent_after = release.parent.parent.stat(follow_symlinks=False)
     releases_parent_after = release.parent.stat(follow_symlinks=False)
     assert (
