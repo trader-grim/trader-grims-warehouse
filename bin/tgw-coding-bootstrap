@@ -187,6 +187,7 @@ def _require_installed_root_copy() -> None:
     for directory in (
         Path("/usr"),
         Path("/usr/bin"),
+        Path("/usr/sbin"),
         Path("/usr/local"),
         _INSTALLED.parent,
         Path("/var"),

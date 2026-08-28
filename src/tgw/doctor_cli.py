@@ -405,7 +405,7 @@ def _source_identity(paths: DoctorPaths) -> tuple[str, str, str]:
     tree = _git(paths.repository, "rev-parse", "HEAD^{tree}")
     status_command = protected_git_command(paths.repository, "status", "--short")
     status_environment = dict(protected_git_environment())
-    if os.getuid() == 0:
+    if os.geteuid() == 0:
         status_command = [
             "/usr/sbin/runuser",
             "-u",

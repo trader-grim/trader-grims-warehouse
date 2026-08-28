@@ -5,7 +5,6 @@ import grp
 import hashlib
 import importlib.machinery
 import importlib.util
-import inspect
 import json
 import os
 import pwd
@@ -500,6 +499,7 @@ def test_source_bootstrap_launcher_does_not_depend_on_selected_runtime() -> None
     assert "PYTHONPATH" in launcher
     assert "PYTHONSAFEPATH" in launcher
     assert 'Path("/usr/bin/python3.13")' in launcher
+    assert 'Path("/usr/sbin")' in launcher
     assert 'Path("/usr/sbin/runuser")' in launcher
     assert 'Path("/var/tmp")' in launcher
     assert '"tgw.doctor_cli"' in launcher
@@ -4463,13 +4463,39 @@ def test_runtime_selector_rollback_preserves_a_concurrent_selection(
     assert current.readlink() == Path("releases/concurrent")
 
 
-def test_doctor_root_source_status_is_demoted_to_ordinary_db() -> None:
-    source = inspect.getsource(doctor_cli._source_identity)
+def test_doctor_effective_root_source_status_is_demoted_to_ordinary_db(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commit = "a" * 40
+    observed: list[tuple[list[str], object]] = []
 
-    assert "os.getuid() == 0" in source
-    assert '"/usr/sbin/runuser"' in source
-    assert '"db"' in source
-    assert "_CODING_RUNTIME_GROUP" in source
+    monkeypatch.setattr(doctor_cli, "_git", lambda *_args: commit)
+    monkeypatch.setattr(doctor_cli.os, "getuid", lambda: 1004)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+
+    def run(command, **kwargs):
+        observed.append((command, kwargs.get("env")))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(doctor_cli.subprocess, "run", run)
+
+    assert doctor_cli._source_identity(
+        replace(doctor_cli.DoctorPaths(), repository=tmp_path)
+    ) == (commit, commit, "")
+    command, environment = observed.pop()
+    assert command[:7] == [
+        "/usr/sbin/runuser",
+        "-u",
+        "db",
+        "-g",
+        "tgw-coders",
+        "--",
+        "/usr/bin/env",
+    ]
+    assert "-i" in command
+    assert "/usr/bin/git" in command
+    assert environment is None
 
 
 def test_runtime_selector_lock_accepts_the_materializer_lock(
