@@ -29,14 +29,16 @@ from tgw.candidate_receipt_sink import (
     CandidateReceiptSinkError,
     PinnedCandidateEvidenceDescriptor,
     PinnedGitReceiptSink,
+    validate_receipt_sink_descriptor,
     verify_governed_execution_bundle,
 )
-from tgw.development.coding_lifecycle import LifecycleError, LifecycleStore
+from tgw.development.coding_lifecycle import LifecycleError, LifecycleStore, job_binding
 from tgw.development.coding_review import (
     DEFAULT_PROTECTED_REVIEW_CONFIG,
     load_protected_review_config,
     validate_review_artifact,
 )
+from tgw.development.coding_review_protection import prepare_governed_request
 from tgw.release_installer import (
     _select as select_fixed_local,  # the fixed CAS primitive; never admission
 )
@@ -48,6 +50,8 @@ RESPONSE_SCHEMA = "tgw-local-coding-root-effect-response/v1"
 STATE_SCHEMA = "tgw-local-coding-root-effect-state/v1"
 PROJECTION_SCHEMA = "tgw-local-coding-context-projection-request/v1"
 PROJECTION_RESPONSE_SCHEMA = "tgw-local-coding-context-projection-response/v1"
+PREPARATION_SCHEMA = "tgw-local-coding-review-preparation-request/v1"
+PREPARATION_RESPONSE_SCHEMA = "tgw-local-coding-review-preparation-response/v1"
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _ROOT = re.compile(r"coding:[0-9a-f]{64}\Z")
@@ -280,6 +284,35 @@ def verify_protected_review_evidence(
             candidate_repository=paths.repository,
             trusted_uid=paths.root_uid,
         )
+        published = configuration["execution_evidence_pin_source"]
+        _protected_directory(
+            published.parent,
+            "coding protected-review execution evidence publication parent",
+            paths.root_uid,
+        )
+        published_value = _protected_json(
+            published,
+            "coding protected-review execution evidence publication",
+            paths.root_uid,
+        )
+        validate_receipt_sink_descriptor(published_value)
+        execution_config = configuration["execution_evidence_sink_config"]
+        try:
+            installed_execution = _protected_json(
+                execution_config,
+                "coding protected-review execution evidence binding",
+                paths.root_uid,
+            )
+        except ContextGenerationStatusError:
+            installed_execution = None
+        if installed_execution != published_value:
+            if os.geteuid() != paths.root_uid:
+                raise ProtectedReviewEvidenceError(
+                    "protected execution evidence binding requires root refresh"
+                )
+            from tgw.development.coding_review_protection import _atomic_root_json
+
+            _atomic_root_json(execution_config, published_value, mode=0o400)
         protected_values: dict[str, dict[str, Any]] = {}
         for name in (
             "candidate_evidence_descriptor_config",
@@ -469,6 +502,221 @@ def response_path(paths: RootEffectPaths, root_id: str) -> Path:
     if _ROOT.fullmatch(root_id) is None:
         raise RootEffectError("root effect identity is invalid")
     return paths.request_root / f"{root_id.removeprefix('coding:')}.response.json"
+
+
+def preparation_path(paths: RootEffectPaths, root_id: str) -> Path:
+    if _ROOT.fullmatch(root_id) is None:
+        raise RootEffectError("review preparation identity is invalid")
+    return paths.request_root / (
+        f"{root_id.removeprefix('coding:')}.review-preparation-request.json"
+    )
+
+
+def preparation_response_path(paths: RootEffectPaths, root_id: str) -> Path:
+    if _ROOT.fullmatch(root_id) is None:
+        raise RootEffectError("review preparation identity is invalid")
+    return paths.request_root / (
+        f"{root_id.removeprefix('coding:')}.review-preparation-response.json"
+    )
+
+
+def build_review_preparation_request(
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build an ordinary trigger containing no protected path or result field."""
+
+    binding = record.get("binding", {})
+    candidate = record.get("effects", {}).get("candidate", {}).get("receipt", {})
+    lifecycle = job_binding(record)
+    unsigned = {
+        "schema": PREPARATION_SCHEMA,
+        "root_id": record.get("root_id"),
+        "binding_hash": binding.get("binding_hash"),
+        "job_binding_hash": lifecycle.get("job_binding_hash"),
+        "card_idempotency_key": binding.get("card_idempotency_key"),
+        "plan_commit": binding.get("plan_commit"),
+        "solution_hash": binding.get("solution_hash"),
+        "closure_hash": binding.get("closure_hash"),
+        "candidate_commit": candidate.get("commit"),
+        "candidate_tree": candidate.get("tree"),
+        "candidate_receipt_hash": _stage_hash(record, "candidate"),
+    }
+    _assert_no_forbidden(unsigned)
+    return {**unsigned, "preparation_hash": _hash(unsigned)}
+
+
+def validate_review_preparation_request(
+    value: object, *, store: LifecycleStore
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(value, Mapping):
+        raise RootEffectError("review preparation request is not an object")
+    request = dict(value)
+    _assert_no_forbidden(request)
+    required = {
+        "schema",
+        "root_id",
+        "binding_hash",
+        "job_binding_hash",
+        "card_idempotency_key",
+        "plan_commit",
+        "solution_hash",
+        "closure_hash",
+        "candidate_commit",
+        "candidate_tree",
+        "candidate_receipt_hash",
+        "preparation_hash",
+    }
+    unsigned = {
+        key: item for key, item in request.items() if key != "preparation_hash"
+    }
+    if (
+        set(request) != required
+        or request.get("schema") != PREPARATION_SCHEMA
+        or request.get("preparation_hash") != _hash(unsigned)
+        or _ROOT.fullmatch(str(request.get("root_id", ""))) is None
+        or any(
+            _COMMIT.fullmatch(str(request.get(field, ""))) is None
+            for field in ("plan_commit", "candidate_commit", "candidate_tree")
+        )
+        or any(
+            _SHA256.fullmatch(str(request.get(field, ""))) is None
+            for field in (
+                "binding_hash",
+                "job_binding_hash",
+                "card_idempotency_key",
+                "solution_hash",
+                "closure_hash",
+                "candidate_receipt_hash",
+            )
+        )
+    ):
+        raise RootEffectError("review preparation request schema/hash is invalid")
+    record = store.get(str(request["root_id"]))
+    if record is None or build_review_preparation_request(record) != request:
+        raise RootEffectError("review preparation differs from lifecycle candidate")
+    return request, record
+
+
+def ensure_review_preparation_request(
+    paths: RootEffectPaths, record: Mapping[str, Any]
+) -> dict[str, Any]:
+    request = build_review_preparation_request(record)
+    _atomic(
+        preparation_path(paths, str(request["root_id"])),
+        request,
+        replace=False,
+        group_gid=_group_gid(paths),
+        directory_uid=paths.root_uid,
+    )
+    return request
+
+
+def read_review_preparation_response(
+    paths: RootEffectPaths, request: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    value = _root_document_or_absent(
+        paths, preparation_response_path(paths, str(request["root_id"]))
+    )
+    if value is None:
+        return None
+    unsigned = {key: item for key, item in value.items() if key != "response_hash"}
+    try:
+        expires = datetime.fromisoformat(
+            str(value.get("expires_at", "")).replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise RootEffectError("review preparation response time is invalid") from exc
+    if (
+        value.get("schema") != PREPARATION_RESPONSE_SCHEMA
+        or value.get("status") != "PREPARED"
+        or value.get("root_id") != request.get("root_id")
+        or value.get("binding_hash") != request.get("binding_hash")
+        or value.get("preparation_hash") != request.get("preparation_hash")
+        or value.get("candidate_commit") != request.get("candidate_commit")
+        or value.get("candidate_tree") != request.get("candidate_tree")
+        or value.get("plan_commit") != request.get("plan_commit")
+        or value.get("response_hash") != _hash(unsigned)
+        or any(
+            _SHA256.fullmatch(str(value.get(field, ""))) is None
+            for field in ("request_sha256", "snapshot_hash", "card_hash", "packet_hash")
+        )
+        or expires.tzinfo is None
+        or expires.utcoffset() is None
+    ):
+        raise RootEffectError("review preparation response binding is invalid")
+    if datetime.now(timezone.utc) + timedelta(seconds=30) >= expires:
+        return None
+    return value
+
+
+def process_review_preparation(
+    paths: RootEffectPaths,
+    value: object,
+    *,
+    store: LifecycleStore | None = None,
+    preparer: Callable[..., Mapping[str, Any]] = prepare_governed_request,
+) -> dict[str, Any]:
+    journal = store or LifecycleStore(
+        paths.lifecycle_root, group_gid=_group_gid(paths)
+    )
+    request, _record = validate_review_preparation_request(value, store=journal)
+    prior = read_review_preparation_response(paths, request)
+    if prior is not None:
+        return prior
+    configuration = load_protected_review_config(
+        paths.protected_review_config,
+        candidate_repository=paths.repository,
+        trusted_uid=paths.root_uid,
+    )
+    prepared = dict(
+        preparer(
+            repository=paths.repository,
+            candidate_commit=str(request["candidate_commit"]),
+            candidate_tree=str(request["candidate_tree"]),
+            plan_commit=str(request["plan_commit"]),
+            solution_hash=str(request["solution_hash"]),
+            closure_hash=str(request["closure_hash"]),
+            profile_path=configuration["request_profile_config"],
+            candidate_descriptor_path=configuration[
+                "candidate_evidence_descriptor_config"
+            ],
+            request_root=configuration["request_root"],
+            snapshot_root=configuration["snapshot_root"],
+            trusted_uid=paths.root_uid,
+        )
+    )
+    if set(prepared) != {
+        "request_path",
+        "request_sha256",
+        "snapshot",
+        "snapshot_hash",
+        "expires_at",
+        "card_hash",
+        "packet_hash",
+    }:
+        raise RootEffectError("protected review preparer returned incomplete evidence")
+    unsigned = {
+        "schema": PREPARATION_RESPONSE_SCHEMA,
+        "status": "PREPARED",
+        "root_id": request["root_id"],
+        "binding_hash": request["binding_hash"],
+        "preparation_hash": request["preparation_hash"],
+        "candidate_commit": request["candidate_commit"],
+        "candidate_tree": request["candidate_tree"],
+        "plan_commit": request["plan_commit"],
+        **prepared,
+    }
+    response = {**unsigned, "response_hash": _hash(unsigned)}
+    _atomic(
+        preparation_response_path(paths, str(request["root_id"])),
+        response,
+        replace=True,
+        group_gid=_group_gid(paths),
+        mode=0o640,
+        owner_uid=paths.root_uid,
+        directory_uid=paths.root_uid,
+    )
+    return response
 
 
 def projection_path(paths: RootEffectPaths, root_id: str) -> Path:
@@ -718,10 +966,13 @@ def _git(paths: RootEffectPaths, *args: str) -> str:
 
 
 def _write_state(paths: RootEffectPaths, request: Mapping[str, Any], stage: str) -> None:
+    request_identity = request.get("request_hash", request.get("preparation_hash"))
+    if _SHA256.fullmatch(str(request_identity or "")) is None:
+        raise RootEffectError("root effect state request identity is invalid")
     unsigned = {
         "schema": STATE_SCHEMA,
         "root_id": request["root_id"],
-        "request_hash": request["request_hash"],
+        "request_hash": request_identity,
         "stage": stage,
     }
     path = paths.request_root / f"{str(request['root_id']).removeprefix('coding:')}.state.json"
@@ -1432,7 +1683,41 @@ def consume_once(paths: RootEffectPaths) -> int:
     )
     store = LifecycleStore(paths.lifecycle_root, group_gid=_group_gid(paths))
     processed = 0
+    for path in sorted(
+        paths.request_root.glob("*.review-preparation-request.json")
+    ):
+        refusal = _refusal_path(paths, path)
+        if _refusal_applies(paths, refusal, path):
+            continue
+        try:
+            value = _load_exact(
+                path,
+                expected_gid=_group_gid(paths),
+                expected_mode=0o660,
+            )
+            request, _record = validate_review_preparation_request(
+                value, store=store
+            )
+        except (LifecycleError, RootEffectError, OSError, ValueError) as exc:
+            _refuse_invalid_file(paths, path, str(exc))
+            continue
+        try:
+            if read_review_preparation_response(paths, request) is None:
+                process_review_preparation(paths, request, store=store)
+                processed += 1
+        except (
+            KeyError,
+            LifecycleError,
+            RootEffectError,
+            OSError,
+            ReviewRunnerError,
+            TypeError,
+            ValueError,
+        ):
+            _write_state(paths, request, "protected-review-preparation-held")
     for path in sorted(paths.request_root.glob("*.request.json")):
+        if path.name.endswith(".review-preparation-request.json"):
+            continue
         refusal = _refusal_path(paths, path)
         if _refusal_applies(paths, refusal, path):
             continue

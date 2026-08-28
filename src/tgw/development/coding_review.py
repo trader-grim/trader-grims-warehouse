@@ -16,14 +16,13 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from tgw.development.coding_review_protection import PROTECTED_REVIEW_CONFIG
 from tgw.development.partial_resume import source_fingerprint
 from tgw.governed_review_adapter import execute_request, validate_execution
 from tgw.review_contract import ReviewRunnerError
 
 PROTECTED_REVIEW_CONFIG_SCHEMA = "tgw-local-coding-protected-review/v1"
-DEFAULT_PROTECTED_REVIEW_CONFIG = Path(
-    "/opt/TGW/tgw-lib/config/tgw-coding-protected-review.json"
-)
+DEFAULT_PROTECTED_REVIEW_CONFIG = PROTECTED_REVIEW_CONFIG
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -69,8 +68,11 @@ def load_protected_review_config(
     required = {
         "schema",
         "request_root",
+        "snapshot_root",
+        "request_profile_config",
         "candidate_evidence_descriptor_config",
         "execution_evidence_sink_config",
+        "execution_evidence_pin_source",
     }
     if (
         set(value) != required
@@ -103,10 +105,11 @@ def load_protected_review_config(
         raise ReviewRunnerError(
             "protected governed-review path is unavailable"
         ) from exc
-    if not result["request_root"].is_dir():
-        raise ReviewRunnerError(
-            "protected governed-review request root is invalid"
-        )
+    for name in ("request_root", "snapshot_root"):
+        if not result[name].is_dir():
+            raise ReviewRunnerError(
+                f"protected governed-review {name} is invalid"
+            )
     return result
 
 

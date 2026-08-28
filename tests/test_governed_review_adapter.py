@@ -386,7 +386,7 @@ def _review_packet(source, *, provider="claude"):
 
 def _fixture(
     tmp_path, *, malformed=False, failed=False, mutate=False, detach=False,
-    consume_context=True,
+    consume_context=True, review_snapshot_hash=None,
 ):
     tmp_path.mkdir(parents=True, exist_ok=True)
     source = tmp_path / "snapshot"
@@ -394,7 +394,7 @@ def _fixture(
     (source / "app.py").write_text("answer = 42\n")
     (source / "app.py").chmod(0o444)
     source.chmod(0o555)
-    expected = snapshot_hash(source)
+    expected = review_snapshot_hash or snapshot_hash(source)
     review = {
         "schema": "tgw-code-review/v1", "verdict": "FAIL" if failed else "PASS",
         "snapshot_hash": expected, "summary": "reviewed exact source",

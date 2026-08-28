@@ -186,6 +186,10 @@ class DoctorPaths:
     repository: Path = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
     worktrees: Path = Path("/opt/TGW/var/worktrees")
     coding_config: Path = Path("/opt/TGW/tgw-lib/config/tgw-coding-local.json")
+    protected_review_root: Path = Path("/var/lib/tgw/coding-protected-review")
+    protected_review_onboarding: Path = Path(
+        "/etc/tgw/coding-protected-review-onboarding.json"
+    )
     plan_render_config: Path = Path("/opt/TGW/tgw-lib/config/tgw-plan-render-local.json")
     plan_render_root: Path = Path("/opt/TGW/var/plan-render")
     plan_render_log_root: Path = Path("/opt/TGW/var/plan-render/log")
@@ -2680,7 +2684,7 @@ def _directory_identity(path: Path, *, uid: int, gid: int, mode: int) -> dict[st
             "mode": None,
             "exact": False,
         }
-    except (DoctorError, OSError, ValueError) as exc:
+    except (DoctorError, KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
         return {
             **expected,
             "kind": "unsafe",
@@ -3136,6 +3140,7 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         check_context_launcher(paths),
         check_context_processes(paths),
         check_unix_access(paths),
+        check_protected_review(paths),
         check_worktrees(paths),
         check_database(paths),
         check_units(paths),
@@ -3171,6 +3176,130 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
             "plan_intent_mutation": False,
         },
     }
+
+
+def _protected_review_paths(paths: DoctorPaths) -> dict[str, Path]:
+    root = paths.protected_review_root
+    return {
+        "root": root,
+        "config": root / "config.json",
+        "requests": root / "requests",
+        "snapshots": root / "snapshots",
+        "profile": root / "request-profile.json",
+        "candidate": root / "candidate-evidence-descriptor.json",
+        "execution": root / "execution-evidence-sink.json",
+        "published": root / "execution-evidence-published.json",
+    }
+
+
+def _protected_review_surface(
+    path: Path, *, directory: bool, mode: int
+) -> dict[str, Any]:
+    observed = path.stat(follow_symlinks=False)
+    expected_kind = stat.S_ISDIR if directory else stat.S_ISREG
+    if (
+        path.is_symlink()
+        or not expected_kind(observed.st_mode)
+        or observed.st_uid != 0
+        or observed.st_gid != 0
+        or stat.S_IMODE(observed.st_mode) != mode
+        or (not directory and observed.st_nlink != 1)
+    ):
+        raise DoctorError(f"protected-review surface identity differs: {path}")
+    return {
+        "path": str(path),
+        "uid": observed.st_uid,
+        "gid": observed.st_gid,
+        "mode": stat.S_IMODE(observed.st_mode),
+        "device": observed.st_dev,
+        "inode": observed.st_ino,
+        **({} if directory else {"sha256": _file_hash(path)}),
+    }
+
+
+def check_protected_review(paths: DoctorPaths) -> dict[str, Any]:
+    """Diagnose the fixed root-owned local governed-review wiring."""
+
+    repair_command = "sudo -n tgw doctor repair protected-review"
+    try:
+        selected = _protected_review_paths(paths)
+        evidence = {
+            "root": _protected_review_surface(
+                selected["root"], directory=True, mode=0o755
+            ),
+            "requests": _protected_review_surface(
+                selected["requests"], directory=True, mode=0o755
+            ),
+            "snapshots": _protected_review_surface(
+                selected["snapshots"], directory=True, mode=0o755
+            ),
+            "config": _protected_review_surface(
+                selected["config"], directory=False, mode=0o444
+            ),
+            "profile": _protected_review_surface(
+                selected["profile"], directory=False, mode=0o400
+            ),
+            "candidate": _protected_review_surface(
+                selected["candidate"], directory=False, mode=0o400
+            ),
+            "execution": _protected_review_surface(
+                selected["execution"], directory=False, mode=0o400
+            ),
+            "published": _protected_review_surface(
+                selected["published"], directory=False, mode=0o400
+            ),
+        }
+        from tgw.candidate_receipt_sink import (
+            PinnedCandidateEvidenceDescriptor,
+            PinnedGitReceiptSink,
+        )
+        from tgw.context_generation_status import _protected_json
+        from tgw.development.coding_review import load_protected_review_config
+        from tgw.development.coding_review_protection import load_profile
+
+        configuration = load_protected_review_config(
+            selected["config"],
+            candidate_repository=paths.repository,
+            trusted_uid=0,
+        )
+        expected = {
+            "request_root": selected["requests"].resolve(),
+            "snapshot_root": selected["snapshots"].resolve(),
+            "request_profile_config": selected["profile"].resolve(),
+            "candidate_evidence_descriptor_config": selected["candidate"].resolve(),
+            "execution_evidence_sink_config": selected["execution"].resolve(),
+            "execution_evidence_pin_source": selected["published"].resolve(),
+        }
+        if configuration != expected:
+            raise DoctorError("protected-review fixed paths differ")
+        load_profile(selected["profile"], trusted_uid=0)
+        candidate = _protected_json(
+            selected["candidate"], "protected-review candidate binding", 0
+        )
+        execution = _protected_json(
+            selected["execution"], "protected-review execution binding", 0
+        )
+        published = _protected_json(
+            selected["published"], "protected-review published binding", 0
+        )
+        PinnedCandidateEvidenceDescriptor(
+            candidate, candidate_repository=paths.repository
+        )
+        PinnedGitReceiptSink(execution, candidate_repository=paths.repository)
+        PinnedGitReceiptSink(published, candidate_repository=paths.repository)
+    except (DoctorError, OSError, ValueError) as exc:
+        return _check(
+            "coding.protected-review",
+            "FAIL",
+            str(exc),
+            repair=repair_command,
+        )
+    return _check(
+        "coding.protected-review",
+        "PASS",
+        "fixed /var/lib protected-review wiring is root-owned and read-only",
+        evidence=evidence,
+    )
 
 
 def _require_root() -> None:
@@ -6368,6 +6497,157 @@ def repair_plan_render_worker(paths: DoctorPaths) -> dict[str, Any]:
     }
 
 
+def _protected_onboarding(paths: DoctorPaths) -> dict[str, Any]:
+    surface = _surface_snapshot(paths.protected_review_onboarding)
+    if (
+        surface.get("kind") != "file"
+        or surface.get("uid") != 0
+        or surface.get("gid") != 0
+        or int(surface.get("mode", 0)) & 0o077
+    ):
+        raise DoctorError(
+            "protected-review onboarding input is not root:root read-only data"
+        )
+    try:
+        value = json.loads(surface["raw"])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DoctorError("protected-review onboarding input is invalid JSON") from exc
+    required = {
+        "schema",
+        "request_profile",
+        "candidate_evidence_descriptor_config",
+        "execution_evidence_sink_config",
+        "execution_evidence_pin_source_config",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != required
+        or value.get("schema")
+        != "tgw-local-coding-protected-review-onboarding/v1"
+        or not all(
+            isinstance(value.get(name), dict)
+            for name in required - {"schema"}
+        )
+    ):
+        raise DoctorError("protected-review onboarding contract is invalid")
+    return value
+
+
+def repair_protected_review(paths: DoctorPaths) -> dict[str, Any]:
+    """Provision or repair only the fixed root-owned review trust surfaces."""
+
+    _require_root()
+    selected = _protected_review_paths(paths)
+    onboarding = _protected_onboarding(paths)
+    from tgw.candidate_receipt_sink import (
+        PinnedCandidateEvidenceDescriptor,
+        PinnedGitReceiptSink,
+    )
+    from tgw.development.coding_review_protection import validate_profile
+
+    # Validate all external pins before changing even the first managed path.
+    validate_profile(onboarding["request_profile"])
+    PinnedCandidateEvidenceDescriptor(
+        onboarding["candidate_evidence_descriptor_config"],
+        candidate_repository=paths.repository,
+    )
+    PinnedGitReceiptSink(
+        onboarding["execution_evidence_sink_config"],
+        candidate_repository=paths.repository,
+    )
+    PinnedGitReceiptSink(
+        onboarding["execution_evidence_pin_source_config"],
+        candidate_repository=paths.repository,
+    )
+    live_config_root = Path("/opt/TGW/tgw-lib/config")
+
+    def live_config_identity() -> dict[str, Any]:
+        if not _lexists(live_config_root):
+            return {"kind": "missing"}
+        observed = live_config_root.stat(follow_symlinks=False)
+        return {
+            "kind": "directory" if stat.S_ISDIR(observed.st_mode) else "other",
+            "uid": observed.st_uid,
+            "gid": observed.st_gid,
+            "mode": stat.S_IMODE(observed.st_mode),
+            "device": observed.st_dev,
+            "inode": observed.st_ino,
+        }
+
+    live_config_before = live_config_identity()
+    before = check_protected_review(paths)
+    changed: list[str] = []
+    for path in (selected["root"], selected["requests"], selected["snapshots"]):
+        if _repair_managed_directory(path, uid=0, gid=0, mode=0o755):
+            changed.append(str(path))
+    config = {
+        "schema": "tgw-local-coding-protected-review/v1",
+        "request_root": str(selected["requests"]),
+        "snapshot_root": str(selected["snapshots"]),
+        "request_profile_config": str(selected["profile"]),
+        "candidate_evidence_descriptor_config": str(selected["candidate"]),
+        "execution_evidence_sink_config": str(selected["execution"]),
+        "execution_evidence_pin_source": str(selected["published"]),
+    }
+    desired = {
+        selected["config"]: (_json_bytes(config), 0o444),
+        selected["profile"]: (
+            _json_bytes(onboarding["request_profile"]),
+            0o400,
+        ),
+        selected["candidate"]: (
+            _json_bytes(onboarding["candidate_evidence_descriptor_config"]),
+            0o400,
+        ),
+        selected["execution"]: (
+            _json_bytes(onboarding["execution_evidence_sink_config"]),
+            0o400,
+        ),
+        selected["published"]: (
+            _json_bytes(onboarding["execution_evidence_pin_source_config"]),
+            0o400,
+        ),
+    }
+    for destination, (body, mode) in desired.items():
+        if destination.is_symlink() or (
+            destination.exists() and not destination.is_file()
+        ):
+            raise DoctorError(
+                f"refusing unsafe protected-review destination: {destination}"
+            )
+        exact = False
+        if destination.is_file():
+            observed = destination.stat(follow_symlinks=False)
+            exact = (
+                observed.st_uid == 0
+                and observed.st_gid == 0
+                and stat.S_IMODE(observed.st_mode) == mode
+                and observed.st_nlink == 1
+                and destination.read_bytes() == body
+            )
+        if not exact:
+            _atomic_bytes(destination, body, mode=mode, uid=0, gid=0)
+            changed.append(str(destination))
+    after = check_protected_review(paths)
+    if after["state"] != "PASS":
+        raise DoctorError("protected-review wiring remains incomplete after repair")
+    live_config_after = live_config_identity()
+    for field in ("kind", "uid", "gid", "mode", "device", "inode"):
+        if live_config_before.get(field) != live_config_after.get(field):
+            raise DoctorError(
+                "/opt/TGW/tgw-lib/config ownership or permissions changed"
+            )
+    receipt = _receipt(paths, "protected-review", before, after)
+    return {
+        "ok": True,
+        "operation": "protected-review",
+        "changed": bool(changed),
+        "changed_paths": changed,
+        "config_root_unchanged": True,
+        "receipt": receipt,
+    }
+
+
 def _cleanup_references(paths: DoctorPaths, surfaces: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
     needles = {
         value
@@ -7286,6 +7566,7 @@ _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
     "runtime": repair_runtime,
     "database": repair_database,
     "unix-git-access": repair_unix_git_access,
+    "protected-review": repair_protected_review,
     "workers": repair_workers,
     "plan-render-worker": repair_plan_render_worker,
     "obsolete-surfaces": repair_obsolete_surfaces,

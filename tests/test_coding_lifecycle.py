@@ -322,6 +322,82 @@ def test_managed_service_reconstructs_persisted_nonterminal_roots(
     assert calls == [(record["root_id"], tmp_path / "coding.json")]
 
 
+def test_supervisor_prepares_exact_protected_request_before_review_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+    record["stage"] = "review"
+    record["state"] = "WAITING"
+    config_path = tmp_path / "coding.json"
+    config = {
+        "postgres_dsn": "test",
+        "coding": {
+            "lifecycle_root": str(store.root),
+            "root_effect_root": str(tmp_path / "root-effects"),
+            "repository_root": str(tmp_path / "repository"),
+            "runtime_root": str(tmp_path / "runtime"),
+            "commands": {"claude-review": ["/usr/bin/claude-review"]},
+            "allowed_runners": ["/usr/bin/claude-review"],
+        },
+    }
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: config)
+    monkeypatch.setattr(
+        coding_cli,
+        "LifecycleStore",
+        lambda _root: LifecycleStore(store.root, group_gid=os.getegid()),
+    )
+
+    events = []
+    request = {"schema": "tgw-local-coding-review-preparation-request/v1"}
+
+    def ensure(_paths, observed):
+        assert observed is record
+        events.append("requested")
+        return request
+
+    responses = iter((None, {"schema": "prepared"}))
+
+    def read(_paths, observed):
+        assert observed is request
+        response = next(responses)
+        events.append("waiting" if response is None else "prepared")
+        return response
+
+    monkeypatch.setattr(coding_root_effect, "ensure_review_preparation_request", ensure)
+    monkeypatch.setattr(coding_root_effect, "read_review_preparation_response", read)
+
+    def queue_evidence(*_args, **kwargs):
+        assert kwargs["queue_name"] == "claude-review"
+        assert events[-1] == "prepared"
+        events.append("dispatched")
+        return {"review": "dispatched"}
+
+    monkeypatch.setattr(coding_cli, "_queue_evidence", queue_evidence)
+
+    def advance(_store, identity, handlers):
+        assert identity == record["root_id"]
+        held = handlers["review"](record)
+        assert held["outcome"] == "waiting"
+        assert "automatic root preparation" in held["reason"]
+        dispatched = handlers["review"](record)
+        assert dispatched == {"review": "dispatched"}
+        return dispatched
+
+    monkeypatch.setattr(coding_lifecycle, "advance", advance)
+
+    assert coding_cli.supervise(record["root_id"], config_path=config_path) == {
+        "review": "dispatched"
+    }
+    assert events == [
+        "requested",
+        "waiting",
+        "requested",
+        "prepared",
+        "dispatched",
+    ]
+
+
 def test_pp_start_aliases_exactly_one_smallest_todo_root_and_refuses_ambiguity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -934,10 +1010,11 @@ def test_root_consumer_requires_exact_protected_governed_receipt_binding(
     monkeypatch.setattr(
         coding_root_effect,
         "load_protected_review_config",
-        lambda *_args, **_kwargs: {
-            "candidate_evidence_descriptor_config": pins,
-            "execution_evidence_sink_config": sink,
-        },
+            lambda *_args, **_kwargs: {
+                "candidate_evidence_descriptor_config": pins,
+                "execution_evidence_sink_config": sink,
+                "execution_evidence_pin_source": sink,
+            },
     )
     from tgw import context_generation_status
 
@@ -946,6 +1023,9 @@ def test_root_consumer_requires_exact_protected_governed_receipt_binding(
     )
     monkeypatch.setattr(
         context_generation_status, "_protected_json", lambda *_args: {}
+    )
+    monkeypatch.setattr(
+        coding_root_effect, "validate_receipt_sink_descriptor", lambda value: value
     )
     monkeypatch.setattr(
         coding_root_effect,
@@ -1327,6 +1407,14 @@ def test_installed_config_and_services_are_exact_and_forbid_broad_effects():
             assert "tgw_codex_review_bin" not in body
             assert "tgw_codex_review_auth" not in body
             assert "privatenetwork=true" not in body
+            assert (
+                "conditionpathexists=/var/lib/tgw/coding-protected-review/config.json"
+                in body
+            )
+            assert (
+                "conditionpathisdirectory=/var/lib/tgw/coding-protected-review/requests"
+                in body
+            )
         for forbidden in ("ssh ", "tgw-prod", "approval", "admission", "remote"):
             assert forbidden not in body
 

@@ -4,6 +4,8 @@ After=postgresql.service
 Requires=postgresql.service
 ConditionPathExists=/opt/TGW/tgw-lib/config/tgw-coding-local.json
 ConditionPathExists=/opt/TGW/tgw-lib/coding-runtime/current/src/tgw/development/local_workflow.py
+ConditionPathExists=/var/lib/tgw/coding-protected-review/config.json
+ConditionPathIsDirectory=/var/lib/tgw/coding-protected-review/requests
 
 [Service]
 Type=simple
