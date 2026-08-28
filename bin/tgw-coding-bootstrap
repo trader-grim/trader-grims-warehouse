@@ -22,7 +22,8 @@ from pathlib import Path
 
 _INSTALLED = Path("/usr/local/sbin/tgw-coding-bootstrap")
 _REPOSITORY = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
-_PYTHON = "/opt/TGW/.venvs/controller/bin/python3"
+_PYTHON = Path("/usr/bin/python3.13")
+_STAGING_PARENT = Path("/var/tmp")
 _OBJECT = re.compile(r"[0-9a-f]{40}\Z")
 
 
@@ -45,6 +46,18 @@ def _environment() -> dict[str, str]:
         "LC_ALL": "C.UTF-8",
         "PATH": "/usr/bin:/bin",
     }
+
+
+def _candidate_environment(staging: Path) -> dict[str, str]:
+    environment = _environment()
+    environment.update(
+        {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(staging / "src"),
+            "PYTHONSAFEPATH": "1",
+        }
+    )
+    return environment
 
 
 def _git(*arguments: str) -> bytes:
@@ -123,6 +136,42 @@ def _tree_files(
 def _require_installed_root_copy() -> None:
     invoked = Path(__file__)
     state = invoked.lstat()
+    for directory in (
+        Path("/usr"),
+        Path("/usr/bin"),
+        Path("/usr/local"),
+        _INSTALLED.parent,
+        Path("/var"),
+    ):
+        directory_state = directory.lstat()
+        if (
+            directory.is_symlink()
+            or not stat.S_ISDIR(directory_state.st_mode)
+            or directory_state.st_uid != 0
+            or directory_state.st_gid != 0
+            or stat.S_IMODE(directory_state.st_mode) & 0o022
+        ):
+            raise BootstrapError(
+                "bootstrap installation path must be root-owned and non-writable"
+            )
+    staging_state = _STAGING_PARENT.lstat()
+    if (
+        _STAGING_PARENT.is_symlink()
+        or not stat.S_ISDIR(staging_state.st_mode)
+        or staging_state.st_uid != 0
+        or staging_state.st_gid != 0
+        or not stat.S_IMODE(staging_state.st_mode) & stat.S_ISVTX
+    ):
+        raise BootstrapError("bootstrap staging parent must be root-owned and sticky")
+    python_state = _PYTHON.lstat()
+    if (
+        _PYTHON.is_symlink()
+        or not stat.S_ISREG(python_state.st_mode)
+        or python_state.st_uid != 0
+        or python_state.st_gid != 0
+        or stat.S_IMODE(python_state.st_mode) & 0o022
+    ):
+        raise BootstrapError("bootstrap interpreter must be root-owned and non-writable")
     if (
         invoked.is_symlink()
         or invoked.resolve(strict=True) != _INSTALLED
@@ -181,27 +230,26 @@ def main(argv: list[str] | None = None) -> int:
             raise BootstrapError("canonical source is not clean")
         if _git("rev-parse", "HEAD").decode().strip() != args.commit:
             raise BootstrapError("canonical source does not select the requested commit")
-        staging = Path(tempfile.mkdtemp(prefix="tgw-coding-bootstrap-"))
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix="tgw-coding-bootstrap-", dir=str(_STAGING_PARENT)
+            )
+        )
         try:
             tree = _extract_exact(args.commit, staging)
-            environment = _environment()
-            environment.update(
-                {
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                    "PYTHONPATH": str(staging / "src"),
-                }
-            )
             completed = subprocess.run(
                 [
-                    _PYTHON,
+                    str(_PYTHON),
+                    "-S",
+                    "-P",
                     "-m",
                     "tgw.doctor_cli",
                     "coding-bootstrap",
                     "--commit",
                     args.commit,
                 ],
-                cwd=_REPOSITORY,
-                env=environment,
+                cwd=staging,
+                env=_candidate_environment(staging),
                 check=False,
             )
             if completed.returncode:

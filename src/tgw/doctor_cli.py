@@ -39,15 +39,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-import psycopg2
-import psycopg2.extras
-
 from tgw.protected_git import (
     GIT_EXECUTABLE,
     protected_git_command,
     protected_git_environment,
     read_exact_tree_file,
 )
+
+
+def _postgres_driver() -> tuple[Any, Any]:
+    """Load database support only for Doctor operations that actually need it."""
+
+    try:
+        import psycopg2
+        import psycopg2.extras
+    except ModuleNotFoundError as exc:
+        raise DoctorError("Doctor database support is unavailable") from exc
+    return psycopg2, psycopg2.extras
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _LOOSE_OBJECT_DIRECTORY = re.compile(r"[0-9a-f]{2}\Z")
@@ -1714,6 +1722,7 @@ def _todo_binding_rows(paths: DoctorPaths) -> list[dict[str, Any]]:
             raise DoctorError(result.stderr.strip() or "cannot read Todo Plan bindings")
         raw = result.stdout.strip()
     else:
+        psycopg2, _extras = _postgres_driver()
         with psycopg2.connect(config["postgres_dsn"]) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(_TODO_BINDINGS_SQL)
@@ -1938,6 +1947,7 @@ def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = N
             raise DoctorError("durable implementation receipt is absent or unreadable") from exc
         prior_receipt_sha256 = "sha256:" + hashlib.sha256(prior_receipt_bytes).hexdigest()
         config = _coding_config(paths)
+        psycopg2, _extras = _postgres_driver()
         with psycopg2.connect(config["postgres_dsn"]) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -2441,8 +2451,9 @@ def _database_observation(config: Mapping[str, Any]) -> tuple[dict[str, Any], in
             raise DoctorError("operator database check returned a non-object")
         active = int(row.pop("active_jobs"))
         return row, active
+    psycopg2, extras = _postgres_driver()
     with psycopg2.connect(config["postgres_dsn"]) as connection:
-        with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+        with connection.cursor(cursor_factory=extras.RealDictCursor) as cursor:
             cursor.execute(_DATABASE_OBSERVATION_SQL)
             row = json.loads(cursor.fetchone()["observation_json"])
     active = int(row.pop("active_jobs"))

@@ -449,6 +449,7 @@ def test_coding_bootstrap_is_explicit_and_context_independent(
 def test_source_bootstrap_launcher_does_not_depend_on_selected_runtime() -> None:
     launcher = (ROOT / "bin/tgw-coding-bootstrap").read_text(encoding="utf-8")
     assert "coding-runtime/current" not in launcher
+    assert "/opt/TGW/.venvs" not in launcher
     assert "tgw_context" not in launcher.lower()
     assert "protected-review" not in launcher.lower()
     assert "admission" not in launcher.lower()
@@ -456,6 +457,9 @@ def test_source_bootstrap_launcher_does_not_depend_on_selected_runtime() -> None
     assert "/usr/local/sbin/tgw-coding-bootstrap" in launcher
     assert "st_uid != 0" in launcher
     assert "PYTHONPATH" in launcher
+    assert "PYTHONSAFEPATH" in launcher
+    assert 'Path("/usr/bin/python3.13")' in launcher
+    assert 'Path("/var/tmp")' in launcher
     assert '"tgw.doctor_cli"' in launcher
     assert "_extract_exact" in launcher
 
@@ -499,6 +503,43 @@ def test_source_bootstrap_reconstructs_only_exact_regular_git_files(
     linked_commit = _git(repository, "rev-parse", "HEAD")
     with pytest.raises(module.BootstrapError, match="link or unsupported"):
         module._extract_exact(linked_commit, tmp_path / "refused")
+
+
+def test_source_bootstrap_imports_only_from_private_exact_tree(tmp_path: Path) -> None:
+    launcher = ROOT / "bin/tgw-coding-bootstrap"
+    loader = importlib.machinery.SourceFileLoader("tgw_safe_bootstrap_test", str(launcher))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    canonical = tmp_path / "canonical"
+    exact = tmp_path / "exact"
+    for root, marker in ((canonical, "mutable"), (exact / "src", "exact")):
+        package = root / "tgw"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "bootstrap_probe.py").write_text(
+            f"MARKER = {marker!r}\n", encoding="utf-8"
+        )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-P",
+            "-c",
+            "import tgw.bootstrap_probe as p; print(p.MARKER); print(p.__file__)",
+        ],
+        cwd=canonical,
+        env=module._candidate_environment(exact),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    output = completed.stdout.splitlines()
+    assert output[0] == "exact"
+    assert Path(output[1]).is_relative_to(exact / "src")
 
 
 def test_context_managed_parents_allow_a_non_install_group(tmp_path: Path) -> None:
