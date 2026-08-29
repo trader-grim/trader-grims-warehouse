@@ -774,13 +774,15 @@ def _exact_bootstrap_workflow_projection(
         materialization = after.get("materialization")
         if (
             not isinstance(materialization, Mapping)
-            or materialization.get("commit") != commit
-            or materialization.get("tree") != tree
-            or _SHA256.fullmatch(str(materialization.get("receipt_hash", "")))
-            is None
             or _SHA256.fullmatch(str(after.get("configuration_sha256", "")))
             is None
         ):
+            continue
+        try:
+            materialization = _validated_bootstrap_materialization(
+                materialization, commit=commit, tree=tree
+            )
+        except DoctorError:
             continue
         return {
             "state": "LIVE_EXACT_LOCAL_RUNTIME",
@@ -796,6 +798,25 @@ def _exact_bootstrap_workflow_projection(
     raise DoctorError(
         "Context runtime reconciliation found no exact root bootstrap receipt"
     )
+
+
+def _validated_bootstrap_materialization(
+    value: Mapping[str, Any], *, commit: str, tree: str
+) -> dict[str, Any]:
+    """Validate evidence emitted by the ordinary db materializer."""
+
+    receipt = dict(value)
+    claimed = receipt.pop("receipt_hash", None)
+    if (
+        value.get("schema") != "tgw-local-coding-bootstrap-materialization/v1"
+        or value.get("actor") != "db"
+        or value.get("commit") != commit
+        or value.get("tree") != tree
+        or _SHA256.fullmatch(str(claimed or "")) is None
+        or claimed != _hash(receipt)
+    ):
+        raise DoctorError("coding bootstrap materialization evidence is invalid")
+    return dict(value)
 
 
 def _selected_context_launcher(paths: DoctorPaths) -> tuple[str, Path]:
@@ -8637,6 +8658,11 @@ def repair_coding_bootstrap(
         materialization = json.loads(materialized.stdout)
     except json.JSONDecodeError as exc:
         raise DoctorError("coding bootstrap materializer returned invalid evidence") from exc
+    if not isinstance(materialization, Mapping):
+        raise DoctorError("coding bootstrap materializer returned invalid evidence")
+    materialization = _validated_bootstrap_materialization(
+        materialization, commit=commit, tree=tree
+    )
     release = paths.runtime_root / "releases" / commit
     # The ordinary db:tgw-coders materializer is deliberately unable to
     # create root-owned bytes.  Root first validates the exact Git-bound

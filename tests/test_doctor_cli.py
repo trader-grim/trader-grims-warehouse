@@ -446,7 +446,16 @@ def test_coding_bootstrap_is_explicit_and_context_independent(
         paths.runtime_root.chmod(0o750)
         (paths.runtime_root / "releases").chmod(0o750)
         (paths.runtime_root / "current").symlink_to(Path("releases") / commit)
-        return subprocess.CompletedProcess(command, 0, json.dumps({"ok": True}), "")
+        materialization = {
+            "schema": "tgw-local-coding-bootstrap-materialization/v1",
+            "actor": "db",
+            "commit": commit,
+            "tree": tree,
+        }
+        materialization["receipt_hash"] = doctor_cli._hash(materialization)
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps(materialization), ""
+        )
 
     monkeypatch.setattr(doctor_cli, "_run", materialize)
     monkeypatch.setattr(
@@ -4130,17 +4139,20 @@ def test_explicit_exact_context_repair_reconciles_stale_task_source_without_auth
     _write_json(paths.context_task, task)
     _write_json(paths.context_cursor, cursor)
     _write_json(paths.context_snapshot, _snapshot(task, cursor))
+    materialization = {
+        "schema": "tgw-local-coding-bootstrap-materialization/v1",
+        "actor": "db",
+        "commit": head,
+        "tree": tree,
+    }
+    materialization["receipt_hash"] = doctor_cli._hash(materialization)
     bootstrap_after = {
         "schema": "tgw-local-coding-bootstrap/v1",
         "ok": True,
         "commit": head,
         "tree": tree,
         "configuration_sha256": "sha256:" + "1" * 64,
-        "materialization": {
-            "commit": head,
-            "tree": tree,
-            "receipt_hash": "sha256:" + "2" * 64,
-        },
+        "materialization": materialization,
     }
     bootstrap_receipt = {
         "schema": "tgw-local-doctor-repair-receipt/v1",
@@ -4209,7 +4221,7 @@ def test_explicit_exact_context_repair_reconciles_stale_task_source_without_auth
         "tree": tree,
         "release": str((paths.runtime_root / "releases" / head).resolve()),
         "bootstrap_receipt": str(bootstrap_path),
-        "materialization_receipt_hash": "sha256:" + "2" * 64,
+        "materialization_receipt_hash": materialization["receipt_hash"],
         "configuration_sha256": "sha256:" + "1" * 64,
         "context_required": False,
         "review_authority": False,
@@ -4240,6 +4252,28 @@ def test_explicit_exact_context_repair_reconciles_stale_task_source_without_auth
     }
     assert repaired_cursor["source_commit"] == head
     assert repaired_cursor["source_tree"] == tree
+
+
+def test_bootstrap_materialization_evidence_requires_exact_self_hash() -> None:
+    commit = "a" * 40
+    tree = "b" * 40
+    unsigned = {
+        "schema": "tgw-local-coding-bootstrap-materialization/v1",
+        "actor": "db",
+        "commit": commit,
+        "tree": tree,
+    }
+    valid = {**unsigned, "receipt_hash": doctor_cli._hash(unsigned)}
+
+    assert doctor_cli._validated_bootstrap_materialization(
+        valid, commit=commit, tree=tree
+    ) == valid
+
+    forged = {**valid, "receipt_hash": "sha256:" + "0" * 64}
+    with pytest.raises(doctor_cli.DoctorError, match="evidence is invalid"):
+        doctor_cli._validated_bootstrap_materialization(
+            forged, commit=commit, tree=tree
+        )
 
 
 @pytest.mark.parametrize("hostile_kind", ["symlink", "hardlink"])
