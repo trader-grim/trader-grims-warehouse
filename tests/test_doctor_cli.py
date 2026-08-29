@@ -588,6 +588,134 @@ def test_repair_cli_succeeds_with_non_failing_diagnostic_attention(
     assert '"state": "ATTENTION"' in capsys.readouterr().out
 
 
+def test_unix_access_probes_support_roots_and_inflight_worktrees(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = doctor_cli.DoctorPaths(
+        repository=Path("/repo"), worktrees=Path("/worktrees")
+    )
+    active = Path("/worktrees/todo-1921-plan-abc123")
+    support = {
+        "preservation_archive_root": {"path": "/support/preservation", "exact": True},
+        "runner_state_root": {"path": "/support/runner", "exact": True},
+        "lifecycle_root": {"path": "/support/lifecycle", "exact": True},
+        "root_effect_root": {"path": "/support/root-effect", "exact": True},
+    }
+    support_calls = []
+    path_calls = []
+    monkeypatch.setattr(doctor_cli, "_operator_actor", lambda: "codex")
+    monkeypatch.setattr(
+        doctor_cli.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=77, gr_mem=["codex", "db"]),
+    )
+    monkeypatch.setattr(
+        doctor_cli.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_gid=77),
+    )
+    monkeypatch.setattr(doctor_cli.os, "getgrouplist", lambda _name, _gid: [77])
+    monkeypatch.setattr(
+        doctor_cli,
+        "_actor_path_access",
+        lambda actor, path: path_calls.append((actor, str(path))) or True,
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_actor_path_access_flags",
+        lambda actor, path, flags: support_calls.append(
+            (actor, str(path), tuple(flags))
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_shared_git_directory",
+        lambda path, _gid: {"path": str(path), "exact": True},
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_inspect_shared_git_trees",
+        lambda *_args, **_kwargs: {
+            "exact": True,
+            "trees": {},
+            "outside_configured_root_untouched": [],
+            "linked_worktrees_inspected": False,
+            "linked_worktree_count": 1,
+        },
+    )
+    monkeypatch.setattr(doctor_cli, "_coding_support_roots", lambda *_args: support)
+    monkeypatch.setattr(doctor_cli, "_active_coding_worktrees", lambda _paths: [active])
+
+    result = doctor_cli.check_unix_access(paths)
+
+    assert result["state"] == "PASS"
+    assert result["evidence"]["active_coding_worktrees"] == [str(active)]
+    assert ("codex", str(active)) in path_calls
+    assert ("db", str(active)) in path_calls
+    assert (
+        "codex",
+        "/support/root-effect",
+        ("-r", "-x"),
+    ) in support_calls
+    assert (
+        "db",
+        "/support/root-effect",
+        ("-r", "-w", "-x"),
+    ) in support_calls
+
+
+def test_unix_access_fails_when_operator_cannot_reach_support_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = doctor_cli.DoctorPaths(
+        repository=Path("/repo"), worktrees=Path("/worktrees")
+    )
+    monkeypatch.setattr(doctor_cli, "_operator_actor", lambda: "codex")
+    monkeypatch.setattr(
+        doctor_cli.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=77, gr_mem=["codex", "db"]),
+    )
+    monkeypatch.setattr(
+        doctor_cli.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_gid=77),
+    )
+    monkeypatch.setattr(doctor_cli.os, "getgrouplist", lambda _name, _gid: [77])
+    monkeypatch.setattr(doctor_cli, "_actor_path_access", lambda *_args: True)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_actor_path_access_flags",
+        lambda actor, path, _flags: not (
+            actor == "codex" and str(path) == "/support/lifecycle"
+        ),
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_shared_git_directory",
+        lambda path, _gid: {"path": str(path), "exact": True},
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_inspect_shared_git_trees",
+        lambda *_args, **_kwargs: {"exact": True, "trees": {}},
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_coding_support_roots",
+        lambda *_args: {
+            "lifecycle_root": {"path": "/support/lifecycle", "exact": True}
+        },
+    )
+    monkeypatch.setattr(doctor_cli, "_active_coding_worktrees", lambda _paths: [])
+
+    result = doctor_cli.check_unix_access(paths)
+
+    assert result["state"] == "FAIL"
+    assert result["evidence"]["actors"]["codex"]["exact"] is False
+
+
 def test_bootstrap_release_ownership_promotion_rejects_symlink(
     tmp_path: Path,
 ) -> None:

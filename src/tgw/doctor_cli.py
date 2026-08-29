@@ -1927,10 +1927,94 @@ def _context_probe_actor(paths: DoctorPaths) -> str:
 
 
 def _actor_path_access(actor: str, path: Path) -> bool:
+    return _actor_path_access_flags(actor, path, ("-r", "-w", "-x"))
+
+
+def _actor_path_access_flags(
+    actor: str, path: Path, flags: Sequence[str]
+) -> bool:
+    if not flags or any(flag not in {"-r", "-w", "-x"} for flag in flags):
+        raise DoctorError("Unix access probe flags are invalid")
     current = pwd.getpwuid(os.geteuid()).pw_name
     if actor == current:
-        return os.access(path, os.R_OK | os.W_OK | os.X_OK)
-    return all(_run(["sudo", "-n", "-u", actor, "/usr/bin/test", flag, str(path)]).returncode == 0 for flag in ("-r", "-w", "-x"))
+        mask = {
+            "-r": os.R_OK,
+            "-w": os.W_OK,
+            "-x": os.X_OK,
+        }
+        return all(os.access(path, mask[flag]) for flag in flags)
+    return all(
+        _run(
+            ["sudo", "-n", "-u", actor, "/usr/bin/test", flag, str(path)]
+        ).returncode
+        == 0
+        for flag in flags
+    )
+
+
+_ACTIVE_CODING_WORKTREES_SQL = """
+SELECT COALESCE(json_agg(worktree), '[]'::json)::text
+FROM (
+    SELECT DISTINCT COALESCE(
+        payload_json->>'worktree',
+        payload_json#>>'{task_spec,worktree}',
+        CASE WHEN entity_id LIKE '/%' THEN entity_id END
+    ) AS worktree
+    FROM public.queue_jobs
+    WHERE state IN ('queued','leased','running')
+) AS active
+WHERE worktree IS NOT NULL
+"""
+
+
+def _active_coding_worktrees(paths: DoctorPaths) -> list[Path]:
+    """Return only worktrees with an in-flight local queue job."""
+    config = _coding_config(paths)
+    actor = _operator_actor()
+    if actor == "root":
+        actor = "codex"
+    current = pwd.getpwuid(os.geteuid()).pw_name
+    if actor != current:
+        result = _run(
+            [
+                "sudo",
+                "-n",
+                "-u",
+                actor,
+                "/usr/bin/psql",
+                f"--dbname={config['postgres_dsn']}",
+                "--no-align",
+                "--tuples-only",
+                "--command",
+                _ACTIVE_CODING_WORKTREES_SQL,
+            ],
+            timeout=30,
+        )
+        if result.returncode:
+            raise DoctorError(
+                result.stderr.strip() or "cannot read active coding worktrees"
+            )
+        raw: Any = result.stdout.strip()
+    else:
+        psycopg2, _extras = _postgres_driver()
+        with psycopg2.connect(config["postgres_dsn"]) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(_ACTIVE_CODING_WORKTREES_SQL)
+                raw = cursor.fetchone()[0]
+    values = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+        raise DoctorError("active coding worktree query returned malformed data")
+    root = paths.worktrees.resolve(strict=True)
+    worktrees: list[Path] = []
+    for value in values:
+        location = Path(value).resolve(strict=True)
+        if (
+            root not in location.parents
+            or re.fullmatch(r"todo-[0-9]+-plan-[0-9a-f]+", location.name) is None
+        ):
+            raise DoctorError(f"active coding worktree is outside the managed root: {value}")
+        worktrees.append(location)
+    return sorted(set(worktrees))
 
 
 def _shared_git_directory(path: Path, group_gid: int) -> dict[str, Any]:
@@ -1988,11 +2072,34 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
             paths, group.gr_gid, include_linked=False
         )
         protected_roots = _coding_support_roots(paths, group.gr_gid)
+        active_worktrees = _active_coding_worktrees(paths)
+        for name, actor_row in actors.items():
+            support_access = {}
+            for key, row in protected_roots.items():
+                flags = (
+                    ("-r", "-x")
+                    if key == "root_effect_root" and name != "db"
+                    else ("-r", "-w", "-x")
+                )
+                support_access[key] = _actor_path_access_flags(
+                    name, Path(row["path"]), flags
+                )
+            worktree_access = {
+                str(path): _actor_path_access(name, path)
+                for path in active_worktrees
+            }
+            actor_row["support_root_access"] = support_access
+            actor_row["active_worktree_access"] = worktree_access
+            actor_row["exact"] = (
+                actor_row["exact"]
+                and all(support_access.values())
+                and all(worktree_access.values())
+            )
         exact = all(row["exact"] for row in actors.values()) and all(row["exact"] for row in directories.values()) and shared_trees["exact"] and all(row["exact"] for row in protected_roots.values())
         return _check(
             "access.unix-group",
             "PASS" if exact else "FAIL",
-            "ordinary Unix tgw-coders access is exact for operator and workers" if exact else "ordinary Unix tgw-coders access or shared Git directories differ",
+            "ordinary Unix tgw-coders core, support-root, and in-flight worktree access is exact" if exact else "ordinary Unix tgw-coders access or shared Git directories differ",
             evidence={
                 "actor": actor,
                 "group": "tgw-coders",
@@ -2002,6 +2109,7 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
                 "directories": directories,
                 "shared_trees": shared_trees,
                 "protected_coding_roots": protected_roots,
+                "active_coding_worktrees": [str(path) for path in active_worktrees],
             },
             repair=None if exact else _privileged_repair_action(paths, "unix-git-access"),
         )
@@ -2821,7 +2929,7 @@ def _unit_state(unit: str) -> dict[str, Any]:
             "systemctl",
             "show",
             unit,
-            "--property=LoadState,ActiveState,SubState,FragmentPath,DropInPaths,ExecStart,MainPID,NeedDaemonReload,WorkingDirectory,ExecMainStartTimestampMonotonic",
+            "--property=LoadState,ActiveState,SubState,FragmentPath,DropInPaths,ExecStart,MainPID,NeedDaemonReload",
             "--no-pager",
         ]
     )
@@ -2951,56 +3059,23 @@ def _plan_render_process_runtime_identity(
     try:
         loaded = (proc_root / str(pid) / "cwd").resolve(strict=True)
     except OSError as exc:
-        # A normal tgw-coders operator cannot dereference another Unix user's
-        # /proc/<pid>/cwd on hardened hosts.  systemd's loaded working
-        # directory plus its monotonic process start still proves whether the
-        # worker was started after the exact immutable selector was installed.
-        selector = release.parent.parent / "current"
-        try:
-            working_directory = state.get("WorkingDirectory")
-            started_us = int(state.get("ExecMainStartTimestampMonotonic", "0"))
-            uptime = float((proc_root / "uptime").read_text(encoding="utf-8").split()[0])
-            selector_age = time.time() - selector.lstat().st_mtime
-            process_age = uptime - (started_us / 1_000_000)
-            selector_exact = (
-                selector.is_symlink()
-                and selector.resolve(strict=True) == release.resolve(strict=True)
-            )
-            timing_exact = (
-                started_us > 0
-                and process_age >= 0
-                and selector_age >= 0
-                and process_age <= selector_age + 1.0
-            )
-            fallback_exact = (
-                working_directory == str(selector)
-                and selector_exact
-                and timing_exact
-            )
-        except (OSError, ValueError) as fallback_exc:
+        # Hardened procfs prevents an ordinary operator from dereferencing the
+        # db worker's cwd.  Use the host's existing non-interactive local sudo
+        # only for exact read-only kernel cwd resolution; never substitute a
+        # mutable selector timestamp or the unit's configured pathname.
+        cwd = proc_root / str(pid) / "cwd"
+        result = _run(
+            ["sudo", "-n", "/usr/bin/readlink", "-e", str(cwd)], timeout=5
+        )
+        raw = result.stdout.strip()
+        if result.returncode or not raw or "\n" in raw or not Path(raw).is_absolute():
             evidence["reason"] = (
-                f"loaded process runtime is unreadable: {exc}; "
-                f"systemd start binding is unreadable: {fallback_exc}"
+                f"loaded process runtime is unreadable: {exc}; exact read-only "
+                "privileged cwd probe is unavailable"
             )
             return evidence
-        evidence.update(
-            {
-                "working_directory": working_directory,
-                "process_age_seconds": process_age,
-                "selector_age_seconds": selector_age,
-                "verification": "systemd-working-directory-and-monotonic-start",
-                "loaded_release": str(release.resolve(strict=True))
-                if fallback_exact
-                else None,
-                "exact": fallback_exact,
-            }
-        )
-        if not fallback_exact:
-            evidence["reason"] = (
-                "loaded process runtime is unreadable and the systemd start "
-                "binding does not prove the selected immutable runtime"
-            )
-        return evidence
+        loaded = Path(raw).resolve(strict=True)
+        evidence["verification"] = "privileged-read-only-proc-cwd"
     evidence["loaded_release"] = str(loaded)
     evidence["exact"] = loaded == release.resolve(strict=True)
     if not evidence["exact"]:

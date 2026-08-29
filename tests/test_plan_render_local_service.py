@@ -110,21 +110,17 @@ def test_plan_render_process_runtime_detects_stale_and_current_worker(tmp_path: 
     assert current["exact"] is True
 
 
-def test_plan_render_process_runtime_uses_systemd_start_when_proc_cwd_is_denied(
+def test_plan_render_process_runtime_uses_exact_readlink_when_proc_cwd_is_denied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime = tmp_path / "runtime"
-    selected = runtime / "releases" / ("a" * 40)
+    selected = tmp_path / "releases" / ("a" * 40)
+    previous = tmp_path / "releases" / ("b" * 40)
     selected.mkdir(parents=True)
-    selector = runtime / "current"
-    selector.symlink_to(Path("releases") / selected.name)
+    previous.mkdir(parents=True)
     proc = tmp_path / "proc"
     process = proc / "2374584"
     process.mkdir(parents=True)
     (process / "cwd").symlink_to(selected)
-    (proc / "uptime").write_text("200.0 400.0\n", encoding="utf-8")
-    selector_epoch = selector.lstat().st_mtime
-    monkeypatch.setattr(doctor_cli.time, "time", lambda: selector_epoch + 100.0)
     original_resolve = Path.resolve
 
     def deny_process_cwd(path: Path, *, strict: bool = False) -> Path:
@@ -133,23 +129,43 @@ def test_plan_render_process_runtime_uses_systemd_start_when_proc_cwd_is_denied(
         return original_resolve(path, strict=strict)
 
     monkeypatch.setattr(Path, "resolve", deny_process_cwd)
-    state = {
-        "MainPID": "2374584",
-        "WorkingDirectory": str(selector),
-        "ExecMainStartTimestampMonotonic": "150000000",
-    }
+    observed = []
+
+    def run(command, **kwargs):
+        observed.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, str(selected) + "\n", "")
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
 
     current = doctor_cli._plan_render_process_runtime_identity(
-        state, selected, proc_root=proc
+        {"MainPID": "2374584"}, selected, proc_root=proc
     )
-    state["ExecMainStartTimestampMonotonic"] = "50000000"
+    monkeypatch.setattr(
+        doctor_cli,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, str(previous) + "\n", ""
+        ),
+    )
     stale = doctor_cli._plan_render_process_runtime_identity(
-        state, selected, proc_root=proc
+        {"MainPID": "2374584"}, selected, proc_root=proc
     )
 
     assert current["exact"] is True
-    assert current["verification"] == "systemd-working-directory-and-monotonic-start"
+    assert current["verification"] == "privileged-read-only-proc-cwd"
     assert stale["exact"] is False
+    assert observed == [
+        (
+            [
+                "sudo",
+                "-n",
+                "/usr/bin/readlink",
+                "-e",
+                str(process / "cwd"),
+            ],
+            {"timeout": 5},
+        )
+    ]
 
 
 def test_doctor_reports_stopped_plan_render_service(tmp_path: Path, monkeypatch) -> None:
