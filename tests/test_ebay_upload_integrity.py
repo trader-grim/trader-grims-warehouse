@@ -17,8 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import tgw.workers.ebay_upload as ebay_upload
 import tgw.provider_effects as provider_effects
+import tgw.workers.ebay_upload as ebay_upload
 from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
 from tgw.quota import QuotaBudgetExceeded
