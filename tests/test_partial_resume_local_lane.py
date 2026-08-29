@@ -838,6 +838,153 @@ def test_local_coding_worker_persists_partial_before_compatibility_and_failure(t
     assert [item["outcome"] for item in history(root)] == ["partial", "failed"]
 
 
+def test_recordless_resume_preserves_projection_across_second_partial(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tgw.errors import TreatmentFailure
+    from tgw.workers.coding import CodingWorker
+
+    root, head, tree = _repo(tmp_path)
+    plan_binding = {
+        "plan_commit": "a" * 40,
+        "solution_hash": "sha256:" + "b" * 64,
+        "source_commit": head,
+        "worktree": str(root),
+        "worktree_identity": {},
+    }
+    payload = {
+        "treatment_id": "codex-implement",
+        "treatment_version": "1",
+        "todo_id": 1752,
+        "todo_agent": "codex",
+        "graph_id": "graph",
+        "object_generation": "generation",
+        "worktree": str(root),
+        "object_id": str(root),
+        "plan_binding": plan_binding,
+    }
+    config = {
+        "coding": {
+            "worktree_root": str(root.parent),
+            "repository_root": str(root),
+        }
+    }
+
+    def partial(_treatment, _payload, _worktree):
+        (root / "partial.py").write_text("partial = True\n")
+        return {
+            "outcome": "partial",
+            "established_conditions": [],
+            "artifacts": [{"kind": "recordless_partial"}],
+        }
+
+    first = CodingWorker("codex-implement", config, launcher=partial)
+    monkeypatch.setattr(
+        first, "_validated_plan_binding", lambda _payload, _worktree: plan_binding
+    )
+    with pytest.raises(TreatmentFailure, match="reported partial"):
+        first.handle(
+            {"job_id": "job-1", "attempt_count": 1, "payload_json": payload}
+        )
+    fixed = (root / "implementation-receipt.json").read_bytes()
+    state = classify(
+        root,
+        {
+            **_binding(root, head, tree),
+            "job_id": None,
+            "attempt_count": None,
+        },
+    )
+    resumed = {
+        **payload,
+        "resume_of": state["resume_of"],
+        "resume_fingerprint": state["fingerprint"],
+    }
+    second = CodingWorker("codex-implement", config, launcher=partial)
+    monkeypatch.setattr(
+        second, "_validated_plan_binding", lambda _payload, _worktree: plan_binding
+    )
+    with pytest.raises(TreatmentFailure, match="reported partial") as failure:
+        second.handle(
+            {"job_id": "job-2", "attempt_count": 2, "payload_json": resumed}
+        )
+
+    attempts = history(root)
+    assert (root / "implementation-receipt.json").read_bytes() == fixed
+    assert [item["outcome"] for item in attempts] == ["partial", "partial"]
+    assert failure.value.result["implementation_attempt_hash"] == attempts[-1][
+        "attempt_hash"
+    ]
+    assert "coding_lifecycle" not in failure.value.result
+
+
+@pytest.mark.parametrize(("old_lifecycle", "new_lifecycle"), [(None, {}), ({}, None)])
+def test_recordless_receipt_preservation_cannot_cross_lifecycle_boundary(
+    tmp_path: Path,
+    old_lifecycle,
+    new_lifecycle,
+) -> None:
+    from tgw.errors import HardFailure
+    from tgw.workers.coding import _write_receipt
+
+    predecessor = "sha256:" + "1" * 64
+    plan = {"plan_commit": "a" * 40, "worktree": str(tmp_path)}
+    prior = {
+        "status": "FAIL",
+        "treatment_id": "codex-implement",
+        "outcome": "partial",
+        "implementation_attempt_hash": predecessor,
+        "plan_binding": plan,
+        "object_id": str(tmp_path),
+    }
+    replacement = {
+        **prior,
+        "implementation_attempt_hash": "sha256:" + "2" * 64,
+    }
+    if old_lifecycle is not None:
+        prior["coding_lifecycle"] = old_lifecycle
+    if new_lifecycle is not None:
+        replacement["coding_lifecycle"] = new_lifecycle
+    path = tmp_path / "implementation-receipt.json"
+    path.write_text(json.dumps(prior, sort_keys=True) + "\n")
+    fixed = path.read_bytes()
+
+    with pytest.raises(
+        HardFailure,
+        match="does not bind the archived generation",
+    ):
+        _write_receipt(path, replacement, predecessor=predecessor)
+    assert path.read_bytes() == fixed
+
+
+def test_recordless_receipt_preservation_rejects_forged_predecessor(
+    tmp_path: Path,
+) -> None:
+    from tgw.errors import HardFailure
+    from tgw.workers.coding import _write_receipt
+
+    predecessor = "sha256:" + "1" * 64
+    plan = {"plan_commit": "a" * 40, "worktree": str(tmp_path)}
+    prior = {
+        "status": "FAIL",
+        "treatment_id": "codex-implement",
+        "outcome": "partial",
+        "implementation_attempt_hash": "sha256:" + "f" * 64,
+        "plan_binding": plan,
+        "object_id": str(tmp_path),
+    }
+    path = tmp_path / "implementation-receipt.json"
+    path.write_text(json.dumps(prior, sort_keys=True) + "\n")
+    fixed = path.read_bytes()
+
+    with pytest.raises(
+        HardFailure,
+        match="does not bind the archived generation",
+    ):
+        _write_receipt(path, dict(prior), predecessor=predecessor)
+    assert path.read_bytes() == fixed
+
+
 def test_exact_1747_migration_uses_copy_and_binds_both_jobs(tmp_path: Path, monkeypatch) -> None:
     from tgw.development import partial_resume
 

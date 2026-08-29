@@ -301,8 +301,13 @@ def _archive_prior_implementation_receipt(
     *,
     receipt: dict[str, Any],
     predecessor: str,
-) -> None:
-    """Archive one exact prior negative projection before replacing it."""
+) -> bool:
+    """Validate the prior projection and say whether it must be replaced.
+
+    Lifecycle-bound generations rotate their exact fenced receipt. The older
+    record-less lane deliberately keeps its first negative projection while
+    append-only attempt history and the queue retain later outcomes.
+    """
 
     try:
         existing_bytes = _regular_file_bytes(path)
@@ -327,6 +332,20 @@ def _archive_prior_implementation_receipt(
         or existing.get("outcome") not in {OUTCOME_PARTIAL, OUTCOME_FAILED}
         or existing.get("implementation_attempt_hash") != predecessor
         or existing.get("plan_binding") != receipt.get("plan_binding")
+        or existing.get("object_id") != receipt.get("object_id")
+    ):
+        raise HardFailure(
+            "prior coding implementation receipt does not bind the archived generation"
+        )
+    old_has_lifecycle = "coding_lifecycle" in existing
+    new_has_lifecycle = "coding_lifecycle" in receipt
+    if not old_has_lifecycle and not new_has_lifecycle:
+        # Compatibility is deliberately preservation-only. It cannot replace
+        # a projection, cross into a lifecycle generation, or authorize a
+        # lifecycle supervisor transition.
+        return False
+    if (
+        old_has_lifecycle != new_has_lifecycle
         or not isinstance(old_lifecycle, dict)
         or not isinstance(new_lifecycle, dict)
         or any(
@@ -371,6 +390,7 @@ def _archive_prior_implementation_receipt(
             os.fsync(directory)
         finally:
             os.close(directory)
+    return True
 
 
 def _write_receipt(
@@ -386,11 +406,13 @@ def _write_receipt(
             or predecessor is None
         ):
             return
-        _archive_prior_implementation_receipt(
+        replace_prior = _archive_prior_implementation_receipt(
             path,
             receipt=receipt,
             predecessor=predecessor,
         )
+        if not replace_prior:
+            return
     descriptor, temporary_text = tempfile.mkstemp(
         prefix=path.name + ".", dir=path.parent
     )

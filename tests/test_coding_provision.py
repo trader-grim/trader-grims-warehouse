@@ -8,6 +8,7 @@ import contextlib
 import inspect
 import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,38 @@ def test_coding_defaults_use_shared_development_repository() -> None:
 
     assert coding_execution.DEFAULT_REPOSITORY_ROOT == expected
     assert coding_worker.DEFAULT_REPOSITORY_ROOT == expected
+
+
+def test_deployed_wrapper_and_candidate_parser_expose_coding_resume() -> None:
+    wrapper = Path("/usr/local/bin/tgw").read_text(encoding="utf-8")
+    assert "exec /opt/TGW/tgw-lib/bin/tgw-coding" in wrapper
+
+    deployed = subprocess.run(
+        ["/usr/local/bin/tgw", "coding", "resume", "--help"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert deployed.returncode == 0, deployed.stderr
+    assert "usage: tgw coding resume" in deployed.stdout
+    assert "TODO_ID" in deployed.stdout
+
+    repository = Path(__file__).resolve().parents[1]
+    candidate = subprocess.run(
+        [sys.executable, "-m", "tgw.coding_cli", "resume", "--help"],
+        cwd=repository,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(repository / "src"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert candidate.returncode == 0, candidate.stderr
+    assert "usage: tgw coding resume" in candidate.stdout
+    assert "TODO_ID" in candidate.stdout
     assert "/opt/TGW/src/trader-grims-warehouse" not in {
         str(coding_execution.DEFAULT_REPOSITORY_ROOT),
         str(coding_worker.DEFAULT_REPOSITORY_ROOT),
