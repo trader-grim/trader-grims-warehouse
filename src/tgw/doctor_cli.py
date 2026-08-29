@@ -1926,6 +1926,24 @@ def _context_probe_actor(paths: DoctorPaths) -> str:
     return actor
 
 
+def _ordinary_coding_probe_actor(paths: DoctorPaths) -> str:
+    """Resolve the ordinary actor for coding checks.
+
+    Interactive ``sudo`` preserves the invoking actor in ``SUDO_USER``.  The
+    fixed exact bootstrap intentionally sanitizes that environment, so its
+    post-repair diagnosis must instead use the already-bound durable task
+    actor.  The Context helper validates that this fallback is an existing
+    ordinary member of ``tgw-coders``; it grants no new authority.
+    """
+
+    actor = _operator_actor()
+    if actor == "root":
+        actor = _context_probe_actor(paths)
+    if actor == "root":
+        raise DoctorError("ordinary coding probe actor is unavailable")
+    return actor
+
+
 def _actor_path_access(actor: str, path: Path) -> bool:
     return _actor_path_access_flags(actor, path, ("-r", "-w", "-x"))
 
@@ -2037,9 +2055,7 @@ def _validate_active_coding_worktree_rows(
 def _active_coding_worktrees(paths: DoctorPaths) -> list[Path]:
     """Return only worktrees with an in-flight local queue job."""
     config = _coding_config(paths)
-    actor = _operator_actor()
-    if actor == "root":
-        actor = "codex"
+    actor = _ordinary_coding_probe_actor(paths)
     current = pwd.getpwuid(os.geteuid()).pw_name
     if actor != current:
         result = _run(
@@ -2094,7 +2110,7 @@ def _shared_git_directory(path: Path, group_gid: int) -> dict[str, Any]:
 
 def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
     try:
-        actor = _operator_actor()
+        actor = _ordinary_coding_probe_actor(paths)
         group = grp.getgrnam("tgw-coders")
         git_common = paths.repository / ".git"
         actors = {}
@@ -2188,7 +2204,7 @@ WHERE status_note IS NOT NULL
 
 def _todo_binding_rows(paths: DoctorPaths) -> list[dict[str, Any]]:
     config = _coding_config(paths)
-    actor = _operator_actor()
+    actor = _ordinary_coding_probe_actor(paths)
     current = pwd.getpwuid(os.geteuid()).pw_name
     if actor != current:
         result = _run(
@@ -2910,8 +2926,9 @@ SELECT json_build_object(
 """
 
 
-def _database_observation(config: Mapping[str, Any]) -> tuple[dict[str, Any], int]:
-    actor = _operator_actor()
+def _database_observation(
+    config: Mapping[str, Any], actor: str
+) -> tuple[dict[str, Any], int]:
     current = pwd.getpwuid(os.geteuid()).pw_name
     if actor != current:
         result = _run(
@@ -2952,7 +2969,9 @@ def check_database(paths: DoctorPaths) -> dict[str, Any]:
     repair = _privileged_repair_action(paths, "database")
     try:
         config = _coding_config(paths)
-        row, active = _database_observation(config)
+        row, active = _database_observation(
+            config, _ordinary_coding_probe_actor(paths)
+        )
         required = (
             "database_connect",
             "schema_usage",

@@ -2446,6 +2446,101 @@ def test_root_context_probe_uses_durable_task_actor_without_sudo_environment(
     assert actor == "codex"
 
 
+def _bind_direct_root_coding_probe(
+    paths: doctor_cli.DoctorPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = json.loads(paths.context_task.read_text(encoding="utf-8"))
+    task.update({"actor": "codex", "receiver": "codex"})
+    _write_json(paths.context_task, task)
+    target = SimpleNamespace(pw_name="codex", pw_uid=1004, pw_gid=1004)
+    coding_group = SimpleNamespace(gr_name="tgw-coders", gr_gid=983)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    monkeypatch.setattr(
+        doctor_cli.pwd,
+        "getpwuid",
+        lambda _uid: SimpleNamespace(pw_name="root"),
+    )
+    monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _actor: target)
+    monkeypatch.setattr(doctor_cli.grp, "getgrnam", lambda _group: coding_group)
+    monkeypatch.setattr(doctor_cli.os, "getgrouplist", lambda *_args: [1004, 983])
+    monkeypatch.setattr(
+        doctor_cli,
+        "_postgres_driver",
+        lambda: (_ for _ in ()).throw(AssertionError("root driver must not load")),
+    )
+
+
+def test_direct_root_todo_binding_uses_durable_actor_without_sudo_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    _bind_direct_root_coding_probe(paths, monkeypatch)
+    observed = {}
+    rows = [{"id": 1921, "agent": "codex", "status_note": "bound"}]
+
+    def run(command, **_kwargs):
+        observed["command"] = command
+        return subprocess.CompletedProcess(command, 0, json.dumps(rows) + "\n", "")
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
+
+    assert doctor_cli._todo_binding_rows(paths) == rows
+    assert observed["command"][:5] == [
+        "sudo",
+        "-n",
+        "-u",
+        "codex",
+        "/usr/bin/psql",
+    ]
+
+
+def test_direct_root_database_check_uses_durable_actor_without_sudo_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    _bind_direct_root_coding_probe(paths, monkeypatch)
+    observed = {}
+    database = {
+        "actor": "codex",
+        "database_connect": True,
+        "schema_usage": True,
+        "role_member": True,
+        "todo_access": True,
+        "queue_access": True,
+        "history_access": True,
+        "todo_sequence_access": True,
+        "history_sequence_access": True,
+        "claim_function_access": True,
+        "recovery_function_access": True,
+        "progress_note_column": True,
+        "active_jobs": 0,
+    }
+
+    def run(command, **_kwargs):
+        observed["command"] = command
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps(database) + "\n", ""
+        )
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
+
+    result = doctor_cli.check_database(paths)
+
+    assert result["state"] == "PASS"
+    assert result["evidence"]["actor"] == "codex"
+    assert observed["command"][:5] == [
+        "sudo",
+        "-n",
+        "-u",
+        "codex",
+        "/usr/bin/psql",
+    ]
+
+
 def test_context_probe_rejects_task_actor_receiver_mismatch(tmp_path: Path) -> None:
     task = tmp_path / "current-task.json"
     _write_json(task, {"actor": "codex", "receiver": "claude"})
@@ -5613,7 +5708,11 @@ def test_database_check_fails_until_progress_note_exists(tmp_path, monkeypatch) 
         )
     }
     observation.update(actor="codex", progress_note_column=False)
-    monkeypatch.setattr(doctor_cli, "_database_observation", lambda _config: (observation, 0))
+    monkeypatch.setattr(
+        doctor_cli,
+        "_database_observation",
+        lambda _config, _actor: (observation, 0),
+    )
 
     result = doctor_cli.check_database(paths)
 
