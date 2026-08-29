@@ -49,6 +49,8 @@ def test_database_roles_are_universal_and_peer_mapped() -> None:
     assert "CREATE ROLE db LOGIN" not in sql
     assert "CREATE ROLE codex LOGIN" not in sql
     assert "DROP ROLE" in sql
+    assert "pg_shdepend" in sql
+    assert "relacl::text LIKE" not in sql
     assert "public.todo_items, public.queue_jobs" in sql
     assert "GRANT SELECT, INSERT, UPDATE, DELETE" in sql
     assert "ALL TABLES" not in sql

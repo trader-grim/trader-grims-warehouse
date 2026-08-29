@@ -59,6 +59,13 @@ GRANT EXECUTE ON FUNCTION public.recover_expired_jobs()
 -- the dependency explicitly before rerunning the repair.  Membership in the
 -- universal ``tgw_coding`` role itself is revoked by this migration and is
 -- therefore not a blocking dependency.
+--
+-- ACL dependencies are inventoried cluster-wide through ``pg_shdepend``, the
+-- same dependency view ``DROP ROLE`` uses, so privileges granted to the
+-- obsolete role inside *other* databases are reported even though this
+-- migration connects to one database.  Such cross-database privileges cannot
+-- be revoked from this connection: the operator clears them per-database (or
+-- drops the obsolete test database) and reruns the repair.
 DO $$
 DECLARE
     obsolete CONSTANT text[] := ARRAY['db', 'codex'];
@@ -87,6 +94,9 @@ BEGIN
             SELECT 'owns function ' || p.oid::regprocedure::text
               FROM pg_proc p WHERE p.proowner = r.oid
             UNION ALL
+            SELECT 'owns tablespace ' || spcname::text
+              FROM pg_tablespace WHERE spcowner = r.oid
+            UNION ALL
             SELECT 'member of ' || g.rolname::text
               FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
              WHERE m.member = r.oid AND g.rolname <> 'tgw_coding'
@@ -95,17 +105,30 @@ BEGIN
               FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.member
              WHERE m.roleid = r.oid
             UNION ALL
-            SELECT 'ACL reference in table ' || quote_ident(c.relname)
-              FROM pg_class c WHERE c.relacl::text LIKE '%' || r.oid::text || '%'
+            SELECT 'ACL dependency: privileges in database ' || COALESCE(d.datname, '<shared>')
+                   || CASE
+                        WHEN s.classid = 'pg_database'::regclass THEN ' on the database'
+                        WHEN s.classid = 'pg_namespace'::regclass
+                             AND ns.oid IS NOT NULL THEN ' on schema ' || quote_ident(ns.nspname)
+                        WHEN c.oid IS NOT NULL
+                             THEN ' on ' || c.relkind::text || ' ' || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+                        ELSE ' on catalog ' || s.classid::regclass::text
+                      END
+              FROM pg_shdepend s
+              LEFT JOIN pg_database d ON d.oid = s.dbid
+              LEFT JOIN pg_class c
+                     ON s.classid = 'pg_class'::regclass AND s.objid = c.oid
+                    AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+              LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+              LEFT JOIN pg_namespace ns
+                     ON s.classid = 'pg_namespace'::regclass AND s.objid = ns.oid
+                    AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+             WHERE s.refclassid = 'pg_authid'::regclass
+               AND s.refobjid = r.oid
+               AND s.deptype = 'a'
             UNION ALL
-            SELECT 'ACL reference in database ' || datname::text
-              FROM pg_database WHERE datacl::text LIKE '%' || r.oid::text || '%'
-            UNION ALL
-            SELECT 'ACL reference in schema ' || quote_ident(n.nspname)
-              FROM pg_namespace n WHERE n.nspacl::text LIKE '%' || r.oid::text || '%'
-            UNION ALL
-            SELECT 'ACL reference in function ' || p.oid::regprocedure::text
-              FROM pg_proc p WHERE p.proacl::text LIKE '%' || r.oid::text || '%'
+            SELECT 'owns default ACLs in database ' || current_database()
+              FROM pg_default_acl WHERE defaclrole = r.oid
           ) AS d(line);
         IF inventory IS NOT NULL THEN
             RAISE EXCEPTION
