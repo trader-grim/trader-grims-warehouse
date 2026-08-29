@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fnmatch
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -123,6 +125,21 @@ def _validate_barriers(value: Any) -> None:
             or item["commit"] not in refs.values()
         ):
             raise ManifestError(f"invalid git ref map {repo}")
+        try:
+            commit_object = base64.b64decode(item.get("commit_object", ""), validate=True)
+        except (TypeError, ValueError) as exc:
+            raise ManifestError(f"invalid git commit object {repo}") from exc
+        algorithm = "sha1" if len(item["commit"]) == 40 else "sha256"
+        header = f"commit {len(commit_object)}\0".encode()
+        if hashlib.new(algorithm, header + commit_object).hexdigest() != item["commit"]:
+            raise ManifestError(f"git commit object OID differs: {repo}")
+        first_line = commit_object.splitlines()[0] if commit_object else b""
+        try:
+            object_tree = first_line.removeprefix(b"tree ").decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ManifestError(f"invalid git commit tree: {repo}") from exc
+        if not first_line.startswith(b"tree ") or object_tree != item["tree"]:
+            raise ManifestError(f"git commit/tree relation differs: {repo}")
         _time(item.get("captured_at"), f"git_refs.{repo}.captured_at")
     pg = value.get("postgresql")
     if not isinstance(pg, dict) or not LSN.fullmatch(str(pg.get("start_lsn", ""))) or not LSN.fullmatch(str(pg.get("stop_lsn", ""))):
@@ -282,9 +299,9 @@ def verify_receipt(path: Path, object_root: Path, trusted_key: Ed25519PublicKey,
     validate_generation(receipt, object_root, verify_objects=True)
 
 
-def _run(argv: list[str]) -> str | None:
+def _run(argv: list[str], timeout: float = 10) -> str | None:
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=10, check=False)
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return result.stdout.strip() if result.returncode == 0 else None
@@ -309,8 +326,66 @@ def _mount(path: Path) -> dict[str, Any]:
 def _git(path: Path) -> dict[str, Any] | None:
     if not (path / ".git").exists() and not (path / "HEAD").exists():
         return None
-    annex = _run(["git", "-C", str(path), "annex", "info", "--json"])
+    has_annex = _run(["git", "-C", str(path), "show-ref", "--verify", "refs/heads/git-annex"])
+    annex = _run(["git", "-C", str(path), "annex", "info", "--json"]) if has_annex else None
     return {"object_sizes": _run(["git", "-C", str(path), "count-objects", "-v"]), "annex_state": json.loads(annex) if annex else None}
+
+
+def _git_refs(path: Path) -> dict[str, str] | None:
+    raw = _run(["git", "-C", str(path), "for-each-ref", "--format=%(refname) %(objectname)"])
+    if raw is None:
+        return None
+    refs: dict[str, str] = {}
+    for line in raw.splitlines():
+        try:
+            name, oid = line.split(" ", 1)
+        except ValueError:
+            return None
+        refs[name] = oid
+    return refs
+
+
+def _worktrees(path: Path) -> list[dict[str, Any]] | None:
+    raw = _run(["git", "-C", str(path), "worktree", "list", "--porcelain"])
+    if raw is None:
+        return None
+    records: list[dict[str, Any]] = []
+    for block in raw.split("\n\n"):
+        fields: dict[str, Any] = {}
+        for line in block.splitlines():
+            key, _, value = line.partition(" ")
+            fields[key] = value if value else True
+        location = fields.get("worktree")
+        if not isinstance(location, str):
+            continue
+        records.append(fields)
+    def observe(fields: dict[str, Any]) -> None:
+        # Worktrees are independent bounded surfaces; inspect them concurrently.
+        dirty = _run(["git", "-C", fields["worktree"], "status", "--porcelain=v1", "--untracked-files=all"], timeout=2)
+        fields["dirty_state"] = dirty
+        fields["dirty_state_observed"] = dirty is not None
+        fields["preservation_required"] = bool(dirty)
+
+    with ThreadPoolExecutor(max_workers=min(16, max(1, len(records)))) as pool:
+        list(pool.map(observe, records))
+    return records
+
+
+def _matching_files(roots: Iterable[Path], patterns: tuple[str, ...], max_depth: int = 1) -> dict[str, Any]:
+    """Hash bounded manifest candidates without walking bulk object/cache trees."""
+    records: list[dict[str, Any]] = []
+    pruned_names = {".git", "objects", "cache", "caches", "thumbnails", "catalog"}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for current, directories, filenames in os.walk(root):
+            relative_depth = len(Path(current).relative_to(root).parts)
+            directories[:] = [] if relative_depth >= max_depth else [name for name in directories if name.lower() not in pruned_names]
+            for filename in filenames:
+                if any(fnmatch.fnmatch(filename.lower(), pattern.lower()) for pattern in patterns):
+                    path = Path(current) / filename
+                    records.append({"path": str(path), "size": path.stat().st_size, "sha256": sha256_file(path)})
+    return {"records": sorted(records, key=lambda item: item["path"]), "max_depth": max_depth, "pruned_names": sorted(pruned_names)}
 
 
 def inventory(paths: Iterable[Path], projected_generation_bytes: int = 0, replicas: Iterable[Path] = ()) -> dict[str, Any]:
@@ -365,18 +440,37 @@ def inventory(paths: Iterable[Path], projected_generation_bytes: int = 0, replic
         item: dict[str, Any] = {"name": name, "classification": classification, "path": str(path), "exists": path.exists(), "recovery_requirement": requirement}
         if name in {"standalone_plan_git", "canonical_source_git"}:
             item["git"] = _git(path)
-            item["refs"] = _run(["git", "-C", str(path), "for-each-ref", "--format=%(refname) %(objectname)"])
+            item["refs"] = _git_refs(path)
             item["head_commit"] = _run(["git", "-C", str(path), "rev-parse", "HEAD"])
             item["head_tree"] = _run(["git", "-C", str(path), "rev-parse", "HEAD^{tree}"])
+            item["observed_complete"] = bool(item["exists"] and item["refs"] and item["head_commit"] and item["head_tree"])
         if name == "todo_branches_worktrees":
-            item["worktrees"] = _run(["git", "-C", str(path), "worktree", "list", "--porcelain"])
-            item["dirty_state"] = _run(["git", "-C", str(path), "status", "--porcelain=v1", "--untracked-files=all"])
+            item["branches"] = _git_refs(path)
+            item["worktrees"] = _worktrees(path)
+            item["observed_complete"] = item["branches"] is not None and item["worktrees"] is not None and all(worktree["dirty_state_observed"] for worktree in item["worktrees"])
+        if name == "library_plan_materializations_runbooks_archive":
+            item["archive_manifests"] = _matching_files((path,), ("*manifest*.json", "*manifest*.sha256"))
+            item["observed_complete"] = item["exists"] and bool(item["archive_manifests"]["records"])
+        if name == "master_itemdata_media_history_annex":
+            media_roots = [candidate for candidate in (Path("/opt/TGW/data"), Path("/opt/TGW/library")) if candidate.exists()]
+            item["media_roots"] = [str(candidate) for candidate in media_roots]
+            annex_repositories = [(candidate, _git(candidate)) for candidate in media_roots]
+            item["annex_repositories"] = [{"path": str(candidate), "git": evidence} for candidate, evidence in annex_repositories if evidence]
+            item["archive_manifests"] = _matching_files(media_roots, ("*manifest*.json", "*.annex"))
+            item["observed_complete"] = bool(media_roots) and bool(item["annex_repositories"] or item["archive_manifests"]["records"])
         if name == "unix_users_groups_ownership":
-            item["identity_sources"] = ["/etc/passwd", "/etc/group"]
+            item["identity_sources"] = [object_record(candidate, Path("/")) for candidate in (Path("/etc/passwd"), Path("/etc/group")) if candidate.is_file()]
             item["metadata_required"] = ["uid", "gid", "mode", "ACL", "xattr", "hardlinks"]
+            item["observed_complete"] = len(item["identity_sources"]) == 2
         if name == "encrypted_secrets_operator_custody":
             item["custody"] = "operator-held-offline"
             item["plaintext_must_be_excluded"] = True
+            item["custody_evidence_observed"] = False
+            item["observed_complete"] = False
+        if name == "backup_health_receipts_alerts":
+            item["replicas"] = replica_state
+            item["observed_complete"] = bool(replica_state) and all(replica["receipt_count"] > 0 and replica["age_seconds"] is not None for replica in replica_state)
+        item.setdefault("observed_complete", item["exists"])
         surfaces.append(item)
     return {
         "schema": "tgw-lib-recovery-inventory/v2",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -21,6 +22,12 @@ def generation(root: Path) -> dict:
     tiers["encrypted_secrets"].update({"encryption": "age", "key_custody": "operator-held-offline", "plaintext_excluded": True})
     captured = "2026-08-29T18:00:30Z"
     digest = "sha256:" + "a" * 64
+    git_refs = {}
+    for name, char in (("source", "a"), ("plan", "b")):
+        tree = char * 40
+        body = f"tree {tree}\n\na test commit\n".encode()
+        commit = hashlib.sha1(f"commit {len(body)}\0".encode() + body).hexdigest()
+        git_refs[name] = {"commit": commit, "tree": tree, "commit_object": base64.b64encode(body).decode(), "refs": {"refs/heads/main": commit}, "captured_at": captured}
     manifest = {
         "schema": "tgw-lib-recovery-generation/v2",
         "generation": "20260829T180000Z-test",
@@ -30,7 +37,7 @@ def generation(root: Path) -> dict:
         "retention_class": "daily",
         "tools": {"git": "2.45", "postgresql": "16"},
         "barriers": {
-            "git_refs": {name: {"commit": char * 40, "tree": char * 40, "refs": {"refs/heads/main": char * 40}, "captured_at": captured} for name, char in (("source", "a"), ("plan", "b"))},
+            "git_refs": git_refs,
             "postgresql": {"start_lsn": "0/123", "stop_lsn": "0/456", "timeline": 1, "wal_contiguous": True, "schema_sha256": digest, "migration_identity": "alembic:123", "captured_at": captured},
             "filesystems": {"library": {"method": "bounded-walk", "barrier_id": "walk-1", "manifest_sha256": digest, "captured_at": captured}},
         },
@@ -174,6 +181,15 @@ def test_git_refs_are_a_related_ref_oid_map(tmp_path: Path, signing_key: Ed25519
     for replica in manifest["replicas"].values():
         replica["manifest_sha256"] = manifest["object_manifest_sha256"]
     with pytest.raises(ManifestError, match="git ref map"):
+        seal_generation(staging, manifest, tmp_path / "receipts", signing_key, "operator-2026")
+
+
+def test_git_commit_object_must_prove_recorded_tree(tmp_path: Path, signing_key: Ed25519PrivateKey) -> None:
+    staging = tmp_path / "objects"
+    staging.mkdir()
+    manifest = generation(staging)
+    manifest["barriers"]["git_refs"]["source"]["tree"] = "f" * 40
+    with pytest.raises(ManifestError, match="commit/tree relation"):
         seal_generation(staging, manifest, tmp_path / "receipts", signing_key, "operator-2026")
 
 
