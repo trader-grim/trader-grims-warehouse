@@ -6032,10 +6032,15 @@ def test_repair_workers_replays_durable_restart_obligation_after_failure(
         paths, unit, commit=commit, tree=tree
     ) is not None
 
+    generation = 2
+
     def succeed(
         command: list[str], **_kwargs: object
     ) -> subprocess.CompletedProcess[str]:
+        nonlocal generation
         commands.append(command)
+        if command == ["systemctl", "restart", unit]:
+            generation += 1
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(doctor_cli, "_run", succeed)
@@ -6051,12 +6056,16 @@ def test_repair_workers_replays_durable_restart_obligation_after_failure(
             "SubState": "running"
             if observed_unit in doctor_cli._ACTIVE_CODING_UNITS
             else "dead",
-            "MainPID": "2002" if observed_unit.endswith(".service") else "0",
-            "InvocationID": "2" * 32
+            "MainPID": str(2000 + generation)
+            if observed_unit.endswith(".service")
+            else "0",
+            "InvocationID": f"{generation:032x}"
             if observed_unit in doctor_cli._ACTIVE_CODING_UNITS
             else "",
             "ExecMainStartTimestampMonotonic": (
-                "20002" if observed_unit.endswith(".service") else "0"
+                str(20000 + generation)
+                if observed_unit.endswith(".service")
+                else "0"
             ),
         },
     )
@@ -6071,7 +6080,7 @@ def test_repair_workers_replays_durable_restart_obligation_after_failure(
     ) is None
 
 
-def test_repair_workers_keeps_debt_when_restart_does_not_change_invocation(
+def test_repair_workers_compares_noop_restart_to_immediate_action_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paths, commit, unit, commands = _stub_worker_repair(
@@ -6087,6 +6096,21 @@ def test_repair_workers_keeps_debt_when_restart_does_not_change_invocation(
         tree=tree,
         reasons=["unit-definition-change"],
         state=doctor_cli._unit_state(unit),
+    )
+    original_state = doctor_cli._unit_state
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda observed_unit: (
+            {
+                **original_state(observed_unit),
+                "MainPID": "2002",
+                "InvocationID": "2" * 32,
+                "ExecMainStartTimestampMonotonic": "20002",
+            }
+            if observed_unit == unit
+            else original_state(observed_unit)
+        ),
     )
 
     def no_op_restart(
