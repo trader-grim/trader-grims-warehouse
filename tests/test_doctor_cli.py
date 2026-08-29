@@ -5696,15 +5696,20 @@ def _stub_worker_repair(
         repository=tmp_path / "repository",
         runtime_root=tmp_path / "runtime",
         systemd_install_root=tmp_path / "systemd",
+        receipts=tmp_path / "doctor-receipts",
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
     )
     (paths.runtime_root / "releases" / commit).mkdir(parents=True)
     paths.repository.mkdir()
     paths.systemd_install_root.mkdir()
+    paths.receipts.mkdir()
     stale_unit = "tgw-codex-implement-worker.service"
     runtime_status = {
         unit: initial_status if unit == stale_unit else "EXACT"
         for unit in doctor_cli._ACTIVE_CODING_UNITS
     }
+    generations = {unit: 1 for unit in doctor_cli._ACTIVE_CODING_UNITS}
     commands: list[list[str]] = []
 
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
@@ -5721,15 +5726,21 @@ def _stub_worker_repair(
     monkeypatch.setattr(
         doctor_cli, "_unit_destination_bytes_exact", lambda *_args: True
     )
-    monkeypatch.setattr(
-        doctor_cli,
-        "_unit_state",
-        lambda unit: {
+    def unit_state(unit: str) -> dict[str, str]:
+        generation = generations.get(unit, 0)
+        return {
             "Unit": unit,
             "LoadState": "loaded",
             "ActiveState": "active" if unit in doctor_cli._ACTIVE_CODING_UNITS else "inactive",
-        },
-    )
+            "SubState": "running" if unit in doctor_cli._ACTIVE_CODING_UNITS else "dead",
+            "MainPID": str(1000 + generation) if unit.endswith(".service") else "0",
+            "InvocationID": f"{generation:032x}" if generation else "",
+            "ExecMainStartTimestampMonotonic": (
+                str(10000 + generation) if unit.endswith(".service") else "0"
+            ),
+        }
+
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
     monkeypatch.setattr(
         doctor_cli,
         "_unit_definition",
@@ -5759,6 +5770,12 @@ def _stub_worker_repair(
             if restart_fails:
                 return subprocess.CompletedProcess(command, 1, "", "restart failed")
             runtime_status[stale_unit] = "EXACT"
+        if (
+            len(command) == 3
+            and command[:2] in (["systemctl", "restart"], ["systemctl", "start"])
+            and command[2] in generations
+        ):
+            generations[command[2]] += 1
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(doctor_cli, "_run", run)
@@ -5845,6 +5862,376 @@ def test_active_coding_service_units_bind_selected_immutable_runtime() -> None:
         assert (
             "Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src"
             not in text
+        )
+
+
+def test_restart_obligation_is_root_bound_canonical_and_single_generation(
+    tmp_path: Path,
+) -> None:
+    paths = replace(
+        doctor_cli.DoctorPaths(),
+        receipts=tmp_path / "receipts",
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+    paths.receipts.mkdir()
+    unit = "tgw-codex-implement-worker.service"
+    commit = "a" * 40
+    tree = "b" * 40
+
+    written = doctor_cli._write_restart_obligation(
+        paths,
+        unit,
+        commit=commit,
+        tree=tree,
+        reasons=["unit-definition-change"],
+        state={"MainPID": "123", "InvocationID": "c" * 32},
+    )
+    path = doctor_cli._restart_obligation_path(paths, unit)
+
+    assert doctor_cli._read_restart_obligation(
+        paths, unit, commit=commit, tree=tree
+    ) == written
+    assert stat.S_IMODE(path.stat().st_mode) == 0o400
+    assert path.stat().st_uid == os.getuid()
+    assert path.stat().st_gid == os.getgid()
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o711
+    with pytest.raises(doctor_cli.DoctorError, match="binding is invalid"):
+        doctor_cli._read_restart_obligation(
+            paths, unit, commit="d" * 40, tree=tree
+        )
+
+    doctor_cli._clear_restart_obligation(
+        paths, unit, commit=commit, tree=tree
+    )
+    assert not path.exists()
+
+
+def test_restart_obligation_carries_debt_across_candidate_generations(
+    tmp_path: Path,
+) -> None:
+    paths = replace(
+        doctor_cli.DoctorPaths(),
+        receipts=tmp_path / "receipts",
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+    paths.receipts.mkdir()
+    unit = "tgw-codex-implement-worker.service"
+    first = doctor_cli._write_restart_obligation(
+        paths,
+        unit,
+        commit="a" * 40,
+        tree="b" * 40,
+        reasons=["unit-definition-change"],
+        state={"ActiveState": "inactive"},
+    )
+
+    successor = doctor_cli._write_restart_obligation(
+        paths,
+        unit,
+        commit="c" * 40,
+        tree="d" * 40,
+        reasons=["unit-definition-change"],
+        state={
+            "ActiveState": "active",
+            "SubState": "running",
+            "MainPID": "42",
+            "InvocationID": "e" * 32,
+            "ExecMainStartTimestampMonotonic": "4242",
+        },
+    )
+
+    assert successor["predecessor_obligation_hash"] == first["obligation_hash"]
+    assert "carried-forward-restart-debt" in successor["reasons"]
+    assert doctor_cli._read_restart_obligation(
+        paths, unit, commit="c" * 40, tree="d" * 40
+    ) == successor
+    with pytest.raises(doctor_cli.DoctorError, match="binding is invalid"):
+        doctor_cli._read_restart_obligation(
+            paths, unit, commit="a" * 40, tree="b" * 40
+        )
+
+
+def test_doctor_reports_root_owned_restart_obligation_to_ordinary_actor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = replace(
+        doctor_cli.DoctorPaths(),
+        receipts=tmp_path / "receipts",
+        runtime_root=tmp_path / "runtime",
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+    paths.receipts.mkdir()
+    desired = "a" * 40
+    unit = "tgw-codex-implement-worker.service"
+    doctor_cli._write_restart_obligation(
+        paths,
+        unit,
+        commit=desired,
+        tree="b" * 40,
+        reasons=["unit-definition-change"],
+        state={"ActiveState": "inactive"},
+    )
+    monkeypatch.setattr(doctor_cli, "_privileged_repair_action", lambda *_args: "repair")
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda observed_unit: {
+            "Unit": observed_unit,
+            "LoadState": "loaded",
+            "ActiveState": "active"
+            if observed_unit in doctor_cli._ACTIVE_CODING_UNITS
+            else "inactive",
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_definition",
+        lambda *_args, **_kwargs: {
+            "exact": True,
+            "desired_commit": desired,
+            "reasons": [],
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_service_process_runtime_identity",
+        lambda *_args, **_kwargs: {"exact": True, "status": "EXACT"},
+    )
+
+    result = doctor_cli.check_units(paths, desired_commit=desired)
+
+    assert result["state"] == "FAIL"
+    assert result["evidence"]["units"][unit]["restart_obligation"]["status"] == "PRESENT"
+
+
+def test_repair_workers_replays_durable_restart_obligation_after_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commit, unit, commands = _stub_worker_repair(
+        tmp_path,
+        monkeypatch,
+        restart_fails=True,
+        initial_status="EXACT",
+    )
+    tree = "b" * 40
+    doctor_cli._write_restart_obligation(
+        paths,
+        unit,
+        commit=commit,
+        tree=tree,
+        reasons=["unit-definition-change"],
+        state=doctor_cli._unit_state(unit),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="restart failed"):
+        doctor_cli.repair_workers(paths, desired_commit=commit)
+    assert doctor_cli._read_restart_obligation(
+        paths, unit, commit=commit, tree=tree
+    ) is not None
+
+    def succeed(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(doctor_cli, "_run", succeed)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda observed_unit: {
+            "Unit": observed_unit,
+            "LoadState": "loaded",
+            "ActiveState": "active"
+            if observed_unit in doctor_cli._ACTIVE_CODING_UNITS
+            else "inactive",
+            "SubState": "running"
+            if observed_unit in doctor_cli._ACTIVE_CODING_UNITS
+            else "dead",
+            "MainPID": "2002" if observed_unit.endswith(".service") else "0",
+            "InvocationID": "2" * 32
+            if observed_unit in doctor_cli._ACTIVE_CODING_UNITS
+            else "",
+            "ExecMainStartTimestampMonotonic": (
+                "20002" if observed_unit.endswith(".service") else "0"
+            ),
+        },
+    )
+    commands.clear()
+    result = doctor_cli.repair_workers(paths, desired_commit=commit)
+
+    assert result["restart_obligations"] == [unit]
+    assert ["systemctl", "daemon-reload"] in commands
+    assert ["systemctl", "restart", unit] in commands
+    assert doctor_cli._read_restart_obligation(
+        paths, unit, commit=commit, tree=tree
+    ) is None
+
+
+def test_repair_workers_keeps_debt_when_restart_does_not_change_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commit, unit, commands = _stub_worker_repair(
+        tmp_path,
+        monkeypatch,
+        initial_status="EXACT",
+    )
+    tree = "b" * 40
+    doctor_cli._write_restart_obligation(
+        paths,
+        unit,
+        commit=commit,
+        tree=tree,
+        reasons=["unit-definition-change"],
+        state=doctor_cli._unit_state(unit),
+    )
+
+    def no_op_restart(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(doctor_cli, "_run", no_op_restart)
+
+    with pytest.raises(doctor_cli.DoctorError, match="did not load a new invocation"):
+        doctor_cli.repair_workers(paths, desired_commit=commit)
+    assert doctor_cli._read_restart_obligation(
+        paths, unit, commit=commit, tree=tree
+    ) is not None
+
+
+def test_repair_workers_replays_debt_after_daemon_reload_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commit, unit, _commands = _stub_worker_repair(
+        tmp_path,
+        monkeypatch,
+        initial_status="EXACT",
+    )
+    tree = "b" * 40
+    doctor_cli._write_restart_obligation(
+        paths,
+        unit,
+        commit=commit,
+        tree=tree,
+        reasons=["unit-definition-change"],
+        state=doctor_cli._unit_state(unit),
+    )
+    successful_run = doctor_cli._run
+
+    def fail_reload(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if command == ["systemctl", "daemon-reload"]:
+            return subprocess.CompletedProcess(command, 1, "", "reload failed")
+        return successful_run(command, **kwargs)
+
+    monkeypatch.setattr(doctor_cli, "_run", fail_reload)
+    with pytest.raises(doctor_cli.DoctorError, match="reload failed"):
+        doctor_cli.repair_workers(paths, desired_commit=commit)
+    assert doctor_cli._read_restart_obligation(
+        paths, unit, commit=commit, tree=tree
+    ) is not None
+
+    monkeypatch.setattr(doctor_cli, "_run", successful_run)
+    result = doctor_cli.repair_workers(paths, desired_commit=commit)
+
+    assert f"restart:{unit}" in result["service_actions"]
+    assert doctor_cli._read_restart_obligation(
+        paths, unit, commit=commit, tree=tree
+    ) is None
+
+
+def test_repair_workers_keeps_transient_debt_until_old_invocation_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commit, _unit, _commands = _stub_worker_repair(
+        tmp_path,
+        monkeypatch,
+        initial_status="EXACT",
+    )
+    tree = "b" * 40
+    transient = "tgw-coding-runtime-restart.service"
+    original_state = doctor_cli._unit_state
+    doctor_cli._write_restart_obligation(
+        paths,
+        transient,
+        commit=commit,
+        tree=tree,
+        reasons=["unit-definition-change"],
+        state={"ActiveState": "activating", "SubState": "start"},
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda unit: (
+            {
+                "Unit": unit,
+                "LoadState": "loaded",
+                "ActiveState": "activating",
+                "SubState": "start",
+            }
+            if unit == transient
+            else original_state(unit)
+        ),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="transient coding unit remains active"):
+        doctor_cli.repair_workers(paths, desired_commit=commit)
+    assert doctor_cli._read_restart_obligation(
+        paths, transient, commit=commit, tree=tree
+    ) is not None
+
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda unit: (
+            {
+                "Unit": unit,
+                "LoadState": "loaded",
+                "ActiveState": "inactive",
+                "SubState": "dead",
+            }
+            if unit == transient
+            else original_state(unit)
+        ),
+    )
+    result = doctor_cli.repair_workers(paths, desired_commit=commit)
+
+    assert transient in result["restart_obligations"]
+    assert doctor_cli._read_restart_obligation(
+        paths, transient, commit=commit, tree=tree
+    ) is None
+
+
+def test_restart_obligation_unsafe_metadata_fails_closed(tmp_path: Path) -> None:
+    paths = replace(
+        doctor_cli.DoctorPaths(),
+        receipts=tmp_path / "receipts",
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
+    )
+    paths.receipts.mkdir()
+    unit = "tgw-codex-implement-worker.service"
+    commit = "a" * 40
+    tree = "b" * 40
+    doctor_cli._write_restart_obligation(
+        paths,
+        unit,
+        commit=commit,
+        tree=tree,
+        reasons=["unit-definition-change"],
+        state={},
+    )
+    doctor_cli._restart_obligation_path(paths, unit).chmod(0o600)
+
+    with pytest.raises(doctor_cli.DoctorError, match="metadata is unsafe"):
+        doctor_cli._read_restart_obligation(
+            paths, unit, commit=commit, tree=tree
         )
 
 
