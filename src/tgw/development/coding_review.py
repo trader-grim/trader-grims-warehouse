@@ -344,7 +344,8 @@ def _validate_bound_review_artifact(
         != ["git-diff-check"]
         or any(
             not isinstance(item, Mapping)
-            or item.get("returncode") != 0
+            or not isinstance(item.get("returncode"), int)
+            or (passed and item.get("returncode") != 0)
             or _SHA256.fullmatch(str(item.get("output_sha256", ""))) is None
             for item in checks
         )

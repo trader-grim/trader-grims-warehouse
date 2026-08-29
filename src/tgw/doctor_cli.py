@@ -4690,8 +4690,11 @@ def repair_context(
     head, tree, status = _source_identity(paths)
     if status:
         raise DoctorError("context repair refuses a dirty canonical source")
-    task = dict(before["task"])
-    cursor = dict(before["cursor"])
+    # The receipt retains ``before`` verbatim.  Reconciliation mutates nested
+    # source/cursor structures, so both working projections must be detached
+    # recursively rather than with a shallow dict copy.
+    task = json.loads(json.dumps(before["task"]))
+    cursor = json.loads(json.dumps(before["cursor"]))
     task_source = task.get("implementation", {}).get("development_source", {}).get("commit")
     if task_source != head:
         if not explicit_source_reconciliation or desired_commit != head:

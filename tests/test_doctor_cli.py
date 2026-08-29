@@ -4190,6 +4190,13 @@ def test_explicit_exact_context_repair_reconciles_stale_task_source_without_auth
     reconciliation = dict(history[-1])
     claimed_hash = reconciliation.pop("reconciliation_hash")
     assert claimed_hash == doctor_cli._hash(reconciliation)
+    repair_receipt = json.loads(Path(result["receipt"]).read_text())
+    assert repair_receipt["before"]["task"]["source"] == {
+        "repository": str(paths.repository),
+        "commit": stale_commit,
+        "tree": stale_tree,
+        "canonical_working_tree_clean": True,
+    }
     assert repaired_cursor["source_commit"] == head
     assert repaired_cursor["source_tree"] == tree
 

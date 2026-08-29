@@ -829,6 +829,28 @@ def test_review_runner_and_both_receipt_boundaries_require_semantic_pass(
     assert failed_artifact["report"]["findings"][0]["message"] == (
         "bounded task behavior is incomplete"
     )
+    fixed_check_failed = run_local_review(
+        payload,
+        worktree,
+        runner=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 1, "", "fixed check failed"
+        ),
+        semantic_backend=semantic_backend,
+    )
+    fixed_check_artifact = validate_failed_review_artifact(
+        fixed_check_failed,
+        payload=payload,
+        worktree=worktree,
+        expected_job_id="review-job",
+    )
+    assert fixed_check_artifact["report"]["findings"] == [
+        {
+            "severity": "high",
+            "path": "pyproject.toml",
+            "line": 1,
+            "message": "fixed independent check failed: git-diff-check",
+        }
+    ]
     with pytest.raises(ReviewRunnerError, match="outcome conditions"):
         validate_review_artifact(
             failed,
