@@ -128,6 +128,34 @@ def _jobs(todo_id: int | None = None, *, limit: int = 50) -> list[dict[str, Any]
             return [dict(row) for row in cursor.fetchall()]
 
 
+def _job_state_counts(todo_id: int | None = None) -> dict[str, int]:
+    """Count local coding jobs without loading their durable payloads."""
+
+    where = "queue_name = ANY(%s)"
+    params: list[Any] = [list(_LOCAL_QUEUES)]
+    if todo_id is not None:
+        where += " AND payload_json->>'todo_id' = %s"
+        params.append(str(todo_id))
+    with state_machine._conn() as connection:
+        with connection.cursor(
+            cursor_factory=psycopg2.extras.RealDictCursor
+        ) as cursor:
+            cursor.execute(
+                f"""
+                SELECT state::text AS state, COUNT(*)::bigint AS job_count
+                  FROM queue_jobs
+                 WHERE {where}
+                 GROUP BY state
+                 ORDER BY state
+                """,
+                params,
+            )
+            return {
+                str(row["state"]): int(row["job_count"])
+                for row in cursor.fetchall()
+            }
+
+
 def _todo_id(value: Any) -> int:
     try:
         result = int(value)
@@ -1814,22 +1842,19 @@ def access_status(
 
     _initialize(config_path)
     result = status_command(argparse.Namespace(config=Path(config_path)))
-    jobs = _jobs(todo_id)
-    state_counts: dict[str, int] = {}
-    for job in jobs:
-        state = str(job.get("state") or "unknown")
-        state_counts[state] = state_counts.get(state, 0) + 1
+    state_counts = _job_state_counts(todo_id)
+    job_count = sum(state_counts.values())
     result.update(
         {
             "schema": "tgw-local-coding-access-status/v1",
             "todo_id": todo_id,
             "job_state_counts": dict(sorted(state_counts.items())),
-            "job_count": len(jobs),
+            "job_count": job_count,
             "jobs_included": full_jobs,
         }
     )
     if full_jobs:
-        result["jobs"] = jobs
+        result["jobs"] = _jobs(todo_id, limit=max(1, job_count))
     return result
 
 

@@ -1728,7 +1728,17 @@ def test_coding_cli_access_status_compacts_jobs_unless_explicitly_requested(
             "dependencies": {"tgw_prod": False},
         },
     )
-    monkeypatch.setattr(coding_cli, "_jobs", lambda todo_id: jobs)
+    monkeypatch.setattr(
+        coding_cli,
+        "_job_state_counts",
+        lambda todo_id: {"dead_letter": 1, "succeeded": 2},
+    )
+    observed_limits = []
+    monkeypatch.setattr(
+        coding_cli,
+        "_jobs",
+        lambda todo_id, *, limit: observed_limits.append((todo_id, limit)) or jobs,
+    )
 
     compact = coding_cli.access_status(1915, config_path="disposable")
     assert compact["schema"] == "tgw-local-coding-access-status/v1"
@@ -1736,12 +1746,14 @@ def test_coding_cli_access_status_compacts_jobs_unless_explicitly_requested(
     assert compact["job_state_counts"] == {"dead_letter": 1, "succeeded": 2}
     assert compact["jobs_included"] is False
     assert "jobs" not in compact
+    assert observed_limits == []
 
     full = coding_cli.access_status(
         1915, config_path="disposable", full_jobs=True
     )
     assert full["jobs_included"] is True
     assert full["jobs"] == jobs
+    assert observed_limits == [(1915, 3)]
 
     parsed = coding_cli.parser().parse_args(
         ["access-status", "1915", "--full-jobs"]
