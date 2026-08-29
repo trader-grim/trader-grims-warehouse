@@ -7875,7 +7875,9 @@ def _restart_obligation_transition(
         unit, action_before
     )
     after_exact = _restart_obligation_service_identity_exact(unit, after)
-    before_active = action_before["ActiveState"] == "active"
+    action_active_state = action_before["ActiveState"]
+    before_active = action_active_state == "active"
+    stable_action_state = action_active_state in {"active", "inactive", "failed"}
     invocation_changed = (
         not before_active
         or (
@@ -7891,7 +7893,8 @@ def _restart_obligation_transition(
         )
     )
     exact = (
-        action_before_exact
+        stable_action_state
+        and action_before_exact
         and after["ActiveState"] == "active"
         and after_exact
         and invocation_changed
@@ -7903,6 +7906,18 @@ def _restart_obligation_transition(
         "after": after,
         "invocation_changed": invocation_changed,
     }
+
+
+def _restart_obligation_operation(unit: str, state: Mapping[str, Any]) -> str:
+    active_state = str(state.get("ActiveState", ""))
+    if active_state == "active":
+        return "restart"
+    if active_state in {"inactive", "failed"}:
+        return "start"
+    raise DoctorError(
+        f"refusing restart-obligation action for {unit}: "
+        f"service state is {active_state or 'unreadable'}"
+    )
 
 
 def _clear_restart_obligation(
@@ -8067,10 +8082,8 @@ def repair_workers(
         if unit in obligations:
             action_state = _unit_state(unit)
             action_states[unit] = dict(action_state)
-            operation = (
-                "restart"
-                if action_state.get("ActiveState") == "active"
-                else "start"
+            operation = _restart_obligation_operation(
+                unit, action_state
             )
         result = _run(["systemctl", operation, unit], timeout=30)
         if result.returncode:
@@ -8362,10 +8375,8 @@ def repair_plan_render_worker(
         action_state = state
         if obligation is not None:
             action_state = _unit_state(_PLAN_RENDER_UNIT)
-            action = (
-                "restart"
-                if action_state.get("ActiveState") == "active"
-                else "start"
+            action = _restart_obligation_operation(
+                _PLAN_RENDER_UNIT, action_state
             )
         result = _run(["systemctl", action, _PLAN_RENDER_UNIT], timeout=30)
         if result.returncode:
