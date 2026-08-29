@@ -722,6 +722,119 @@ def test_context_transition_review_binding_rejects_conflicting_subjects(
         )
 
 
+@pytest.mark.parametrize(
+    "quoted_subject",
+    [
+        "```text\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n```\n",
+        "~~~~\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n~~~~\n",
+        "````text\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n",
+        "    - Candidate commit: `{commit}`\n"
+        "    - Candidate tree: `{tree}`\n",
+        "\t- Candidate commit: `{commit}`\n"
+        "\t- Candidate tree: `{tree}`\n",
+        "> - Candidate commit: `{commit}`\n"
+        "> - Candidate tree: `{tree}`\n",
+        "> prior diagnostic\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n",
+        "<!--\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n-->\n",
+        "<pre>\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n</pre>\n",
+        "<details>\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n</details>\n",
+    ],
+    ids=(
+        "backtick-fence",
+        "tilde-fence",
+        "unclosed-fence",
+        "space-indented",
+        "tab-indented",
+        "blockquote",
+        "lazy-blockquote",
+        "html-comment",
+        "pre-container",
+        "details-container",
+    ),
+)
+def test_context_transition_review_binding_rejects_quoted_only_subject(
+    tmp_path: Path,
+    quoted_subject: str,
+) -> None:
+    commit = "a" * 40
+    tree = "b" * 40
+    report = tmp_path / "review.md"
+    report.write_text(
+        quoted_subject.format(commit=commit, tree=tree),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        doctor_cli.DoctorError,
+        match="must name one unique candidate subject",
+    ):
+        doctor_cli._context_transition_review_binding(
+            report,
+            commit=commit,
+            tree=tree,
+        )
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "Exact candidate:\n\n- Commit: `{commit}`\n- Tree: `{tree}`\n",
+        "- Immutable bindings: `{commit}` are exact and tree `{tree}`\n",
+    ],
+    ids=("exact-candidate", "immutable-bindings"),
+)
+def test_context_transition_review_binding_accepts_supported_top_level_subjects(
+    tmp_path: Path,
+    subject: str,
+) -> None:
+    commit = "a" * 40
+    tree = "b" * 40
+    report = tmp_path / "review.md"
+    report.write_text(subject.format(commit=commit, tree=tree), encoding="utf-8")
+
+    binding = doctor_cli._context_transition_review_binding(
+        report,
+        commit=commit,
+        tree=tree,
+    )
+
+    assert binding["candidate_commit"] == commit
+    assert binding["candidate_tree"] == tree
+
+
+def test_context_transition_review_binding_ignores_quoted_decoy(
+    tmp_path: Path,
+) -> None:
+    commit = "a" * 40
+    tree = "b" * 40
+    report = tmp_path / "review.md"
+    report.write_text(
+        f"- Candidate commit: `{commit}`\n"
+        f"- Candidate tree: `{tree}`\n\n"
+        "```text\n"
+        f"- Candidate commit: `{'c' * 40}`\n"
+        f"- Candidate tree: `{'d' * 40}`\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    binding = doctor_cli._context_transition_review_binding(
+        report,
+        commit=commit,
+        tree=tree,
+    )
+
+    assert binding["candidate_commit"] == commit
+    assert binding["candidate_tree"] == tree
+
+
 def test_failed_receipt_publication_removes_visible_success_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

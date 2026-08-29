@@ -799,6 +799,177 @@ def _require_review_file(
         raise DoctorError(f"current task {label} review evidence is unavailable or stale")
 
 
+def _top_level_review_lines(text: str) -> list[str | None]:
+    """Return root Markdown lines, using ``None`` for quoted boundaries."""
+
+    eligible: list[str | None] = []
+    fence_character: str | None = None
+    fence_length = 0
+    lazy_blockquote = False
+    html_comment = False
+    html_container: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if fence_character is not None:
+            closing = re.match(
+                rf"^ {{0,3}}{re.escape(fence_character)}"
+                rf"{{{fence_length},}}[ \t]*$",
+                line,
+            )
+            if closing is not None:
+                fence_character = None
+                fence_length = 0
+            eligible.append(None)
+            continue
+        if html_comment:
+            if "-->" in line:
+                html_comment = False
+            eligible.append(None)
+            continue
+        if html_container is not None:
+            if re.search(rf"</{html_container}\s*>", line, re.IGNORECASE):
+                html_container = None
+            eligible.append(None)
+            continue
+        if lazy_blockquote:
+            if not stripped:
+                lazy_blockquote = False
+            eligible.append(None)
+            continue
+
+        opening = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if opening is not None:
+            marker = opening.group(1)
+            fence_character = marker[0]
+            fence_length = len(marker)
+            eligible.append(None)
+            continue
+        if re.match(r"^(?: {4,}| {0,3}\t)", line) is not None:
+            eligible.append(None)
+            continue
+        if re.match(r"^ {0,3}>", line) is not None:
+            lazy_blockquote = True
+            eligible.append(None)
+            continue
+        if "<!--" in line:
+            if "-->" not in line.split("<!--", 1)[1]:
+                html_comment = True
+            eligible.append(None)
+            continue
+        container = re.match(
+            r"^ {0,3}<(blockquote|pre|code|details)(?:\s|>)",
+            line,
+            re.IGNORECASE,
+        )
+        if container is not None:
+            tag = container.group(1).lower()
+            if re.search(rf"</{tag}\s*>", line, re.IGNORECASE) is None:
+                html_container = tag
+            eligible.append(None)
+            continue
+        # Review subjects are deliberately accepted only at the document root.
+        if line[:1].isspace() and stripped:
+            eligible.append(None)
+            continue
+        eligible.append(line)
+    return eligible
+
+
+def _top_level_review_subjects(text: str) -> list[tuple[str, str]]:
+    """Parse complete, unquoted root-level review-subject declarations."""
+
+    lines = _top_level_review_lines(text)
+    candidate_commit = re.compile(
+        r"^(?:[-*] )?Candidate commit:\s*`?([0-9a-f]{40})`?\s*$",
+        re.IGNORECASE,
+    )
+    candidate_tree = re.compile(
+        r"^(?:[-*] )?Candidate tree:\s*`?([0-9a-f]{40})`?\s*$",
+        re.IGNORECASE,
+    )
+    exact_commit = re.compile(
+        r"^[-*] Commit:\s*`?([0-9a-f]{40})`?\s*$", re.IGNORECASE
+    )
+    exact_tree = re.compile(
+        r"^[-*] Tree:\s*`?([0-9a-f]{40})`?\s*$", re.IGNORECASE
+    )
+    immutable = re.compile(
+        r"^[-*] Immutable bindings:\s*`([0-9a-f]{40})`"
+        r"[^\n]*?\band tree\s*`([0-9a-f]{40})`\s*$",
+        re.IGNORECASE,
+    )
+
+    def next_nonblank(index: int) -> int | None:
+        index += 1
+        while index < len(lines) and lines[index] == "":
+            index += 1
+        if index >= len(lines) or lines[index] is None:
+            return None
+        return index
+
+    subjects: list[tuple[str, str]] = []
+    explicit_pairs = 0
+    incomplete = False
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line is None or line == "":
+            index += 1
+            continue
+        commit_match = candidate_commit.fullmatch(line)
+        tree_match = candidate_tree.fullmatch(line)
+        immutable_match = immutable.fullmatch(line)
+        if commit_match is not None:
+            tree_index = next_nonblank(index)
+            adjacent_tree = (
+                candidate_tree.fullmatch(lines[tree_index])
+                if tree_index is not None
+                else None
+            )
+            if adjacent_tree is None:
+                incomplete = True
+                index += 1
+                continue
+            subjects.append((commit_match.group(1), adjacent_tree.group(1)))
+            explicit_pairs += 1
+            index = tree_index + 1
+            continue
+        if tree_match is not None:
+            incomplete = True
+            index += 1
+            continue
+        if re.fullmatch(r"Exact candidate:\s*", line, re.IGNORECASE):
+            commit_index = next_nonblank(index)
+            commit_value = (
+                exact_commit.fullmatch(lines[commit_index])
+                if commit_index is not None
+                else None
+            )
+            tree_index = next_nonblank(commit_index) if commit_index is not None else None
+            tree_value = (
+                exact_tree.fullmatch(lines[tree_index])
+                if tree_index is not None
+                else None
+            )
+            if commit_value is None or tree_value is None:
+                incomplete = True
+                index += 1
+                continue
+            subjects.append((commit_value.group(1), tree_value.group(1)))
+            index = tree_index + 1
+            continue
+        if immutable_match is not None:
+            subjects.append((immutable_match.group(1), immutable_match.group(2)))
+            index += 1
+            continue
+        index += 1
+    if incomplete or explicit_pairs > 1:
+        raise DoctorError(
+            "Context transition review evidence has ambiguous candidate fields"
+        )
+    return subjects
+
+
 def _context_transition_review_binding(
     path: Path,
     *,
@@ -826,42 +997,12 @@ def _context_transition_review_binding(
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise DoctorError("Context transition review evidence is not UTF-8") from exc
-    explicit_commit = re.findall(
-        r"(?im)^\s*[-*]?\s*Candidate commit:\s*`?([0-9a-f]{40})`?\s*$",
-        text,
-    )
-    explicit_tree = re.findall(
-        r"(?im)^\s*[-*]?\s*Candidate tree:\s*`?([0-9a-f]{40})`?\s*$",
-        text,
-    )
-    exact_sections = re.findall(
-        r"(?ims)^\s*Exact candidate:\s*$"
-        r"(?:(?!^\s*#{1,6}\s).{0,500}?)"
-        r"^\s*[-*]\s*Commit:\s*`?([0-9a-f]{40})`?\s*$"
-        r"(?:(?!^\s*#{1,6}\s).{0,500}?)"
-        r"^\s*[-*]\s*Tree:\s*`?([0-9a-f]{40})`?\s*$",
-        text,
-    )
-    immutable_bindings = re.findall(
-        r"(?im)^\s*[-*]\s*Immutable bindings:\s*`([0-9a-f]{40})`"
-        r"[^\n]*?\band tree\s*`([0-9a-f]{40})`",
-        text,
-    )
-    subjects: list[tuple[str, str]] = []
-    if explicit_commit or explicit_tree:
-        if len(explicit_commit) != 1 or len(explicit_tree) != 1:
-            raise DoctorError(
-                "Context transition review evidence has ambiguous candidate fields"
-            )
-        subjects.append((explicit_commit[0], explicit_tree[0]))
-    subjects.extend(exact_sections)
-    subjects.extend(immutable_bindings)
-    unique_subjects = set(subjects)
-    if len(unique_subjects) != 1:
+    subjects = _top_level_review_subjects(text)
+    if len(subjects) != 1:
         raise DoctorError(
             "Context transition review evidence must name one unique candidate subject"
         )
-    candidate_commit, candidate_tree = next(iter(unique_subjects))
+    candidate_commit, candidate_tree = subjects[0]
     if (candidate_commit, candidate_tree) != (commit, tree):
         raise DoctorError(
             "Context transition review evidence subject differs from the exact commit/tree"
@@ -6119,61 +6260,121 @@ def _rollback_context_generation_pointer(
     selected_generation: Path,
     selected_pointer: Mapping[str, Any],
     prior_pointer: Mapping[str, Any],
+    *,
+    retained_prior_pointer: Path,
+    selected_pointer_descriptor: int,
+    prior_pointer_descriptor: int,
 ) -> None:
-    """CAS-restore the pointer selected before a failed live-shim probe."""
+    """CAS-restore the exact displaced pointer retained by the cutover."""
     if prior_pointer.get("kind") != "symlink":
         raise DoctorError("post-cutover rollback has no captured prior generation pointer")
     expected_target = str(Path("generations") / selected_generation.name)
+    live_pointer = _surface_snapshot(paths.context_generation_pointer)
+    retained_pointer = _surface_snapshot(retained_prior_pointer)
+    if retained_prior_pointer.parent != paths.context_generation_pointer.parent:
+        raise DoctorError("post-cutover rollback pointer is outside the pointer directory")
     if (
         selected_pointer.get("kind") != "symlink"
         or selected_pointer.get("target") != expected_target
-        or not _same_link_identity(
-            _surface_snapshot(paths.context_generation_pointer),
-            selected_pointer,
+        or not _same_link_identity(live_pointer, selected_pointer)
+        or not _descriptor_matches_link_surface(
+            selected_pointer_descriptor, live_pointer
+        )
+        or not _same_link_identity(retained_pointer, prior_pointer)
+        or not _descriptor_matches_link_surface(
+            prior_pointer_descriptor, retained_pointer
         )
     ):
         raise DoctorError("post-cutover rollback refused a concurrent pointer change")
-    temporary = paths.context_generation_pointer.with_name(
-        "." + paths.context_generation_pointer.name + ".rollback"
-    )
-    if _lexists(temporary):
-        raise DoctorError("post-cutover rollback staging path already exists")
-    temporary.symlink_to(prior_pointer["target"])
     parent = os.open(
         paths.context_generation_pointer.parent,
-        os.O_RDONLY | os.O_DIRECTORY,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
     )
-    exchanged = False
     try:
-        _rename_exchange(parent, temporary.name, paths.context_generation_pointer.name)
-        exchanged = True
+        _rename_exchange(
+            parent,
+            retained_prior_pointer.name,
+            paths.context_generation_pointer.name,
+        )
+        restored = _surface_snapshot(paths.context_generation_pointer)
         displaced_state = os.stat(
-            temporary.name,
+            retained_prior_pointer.name,
             dir_fd=parent,
             follow_symlinks=False,
         )
         displaced = {
             "kind": "symlink",
-            "target": os.readlink(temporary.name, dir_fd=parent),
+            "target": os.readlink(retained_prior_pointer.name, dir_fd=parent),
             "uid": displaced_state.st_uid,
             "gid": displaced_state.st_gid,
             "mode": stat.S_IMODE(displaced_state.st_mode),
             "device": displaced_state.st_dev,
             "inode": displaced_state.st_ino,
         }
-        if not _same_link_identity(displaced, selected_pointer):
-            _rename_exchange(parent, temporary.name, paths.context_generation_pointer.name)
-            exchanged = False
-            raise DoctorError("post-cutover rollback refused a concurrent pointer change")
-        os.unlink(temporary.name, dir_fd=parent)
-        exchanged = False
+        if (
+            not _same_link_identity(restored, prior_pointer)
+            or not _descriptor_matches_link_surface(
+                prior_pointer_descriptor, restored
+            )
+            or not _same_link_identity(displaced, selected_pointer)
+            or not _descriptor_matches_link_surface(
+                selected_pointer_descriptor, displaced
+            )
+        ):
+            raise DoctorError(
+                "post-cutover rollback did not restore the captured pointer identity"
+            )
+        os.unlink(retained_prior_pointer.name, dir_fd=parent)
+        os.fsync(parent)
+        final_pointer = _surface_snapshot(paths.context_generation_pointer)
+        if (
+            not _same_link_identity(final_pointer, prior_pointer)
+            or not _descriptor_matches_link_surface(
+                prior_pointer_descriptor, final_pointer
+            )
+        ):
+            raise DoctorError(
+                "post-cutover rollback lost the restored pointer identity"
+            )
+    finally:
+        os.close(parent)
+
+
+def _finalize_context_generation_pointer(
+    paths: DoctorPaths,
+    selected_pointer: Mapping[str, Any],
+    prior_pointer: Mapping[str, Any],
+    *,
+    retained_prior_pointer: Path,
+    selected_pointer_descriptor: int,
+    prior_pointer_descriptor: int,
+) -> None:
+    """Durably discard the displaced pointer after receipt publication."""
+
+    live_pointer = _surface_snapshot(paths.context_generation_pointer)
+    retained_pointer = _surface_snapshot(retained_prior_pointer)
+    if (
+        retained_prior_pointer.parent != paths.context_generation_pointer.parent
+        or not _same_link_identity(live_pointer, selected_pointer)
+        or not _descriptor_matches_link_surface(
+            selected_pointer_descriptor, live_pointer
+        )
+        or not _same_link_identity(retained_pointer, prior_pointer)
+        or not _descriptor_matches_link_surface(
+            prior_pointer_descriptor, retained_pointer
+        )
+    ):
+        raise DoctorError(
+            "post-cutover cleanup refused a concurrent pointer change"
+        )
+    parent = os.open(
+        paths.context_generation_pointer.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        os.unlink(retained_prior_pointer.name, dir_fd=parent)
         os.fsync(parent)
     finally:
-        if not exchanged:
-            try:
-                os.unlink(temporary.name, dir_fd=parent)
-            except FileNotFoundError:
-                pass
         os.close(parent)
 
 
@@ -6276,6 +6477,12 @@ def repair_context_launcher(
     migration_old_generation: Path | None = None
     post_cutover_probe_failed = False
     pointer_switch_unproven = False
+    pointer_cutover_active = False
+    selected_pointer_descriptor: int | None = None
+    prior_pointer_descriptor: int | None = None
+    pointer_tmp: Path | None = None
+    retained_displaced_pointer: dict[str, Any] | None = None
+    pointer_cleanup_warning: str | None = None
     try:
         if _context_artifact_signature(
             _repair_context_artifacts(
@@ -6518,9 +6725,11 @@ def repair_context_launcher(
                 raise DoctorError(
                     "Context generation pointer descriptors differ before switch"
                 )
+            selected_pointer_descriptor = os.dup(staged_pointer_descriptor)
+            prior_pointer_descriptor = os.dup(captured_pointer_descriptor)
             parent = os.open(
                 paths.context_generation_pointer.parent,
-                os.O_RDONLY | os.O_DIRECTORY,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
             )
             try:
                 # Retained O_PATH descriptors prevent an unlink/recreate ABA
@@ -6538,20 +6747,21 @@ def repair_context_launcher(
                 )
                 displaced = _surface_snapshot(pointer_tmp)
                 if (
-                    not _descriptor_matches_link_surface(
-                        staged_pointer_descriptor, selected_pointer
-                    )
+                    not _same_link_identity(selected_pointer, staged_pointer)
                     or not _descriptor_matches_link_surface(
-                        captured_pointer_descriptor, displaced
+                        staged_pointer_descriptor, staged_pointer
+                    )
+                    or not _same_link_identity(displaced, captured_pointer)
+                    or not _descriptor_matches_link_surface(
+                        captured_pointer_descriptor, captured_pointer
                     )
                 ):
                     raise DoctorError(
                         "Context generation pointer CAS observed an unproven "
                         "concurrent surface"
                     )
+                pointer_cutover_active = True
                 pointer_switch_unproven = False
-                pointer_tmp.unlink()
-                _context_repair_phase("displaced-pointer-unlink", paths)
                 os.fsync(parent)
                 _context_repair_phase("parent-fsync", paths)
             finally:
@@ -6584,12 +6794,24 @@ def repair_context_launcher(
         except Exception as probe_exc:
             post_cutover_probe_failed = True
             try:
+                if (
+                    pointer_tmp is None
+                    or selected_pointer_descriptor is None
+                    or prior_pointer_descriptor is None
+                ):
+                    raise DoctorError(
+                        "post-cutover rollback lacks retained pointer descriptors"
+                    )
                 _rollback_context_generation_pointer(
                     paths,
                     generation,
-                    selected_pointer,
+                    staged_pointer,
                     captured_pointer,
+                    retained_prior_pointer=pointer_tmp,
+                    selected_pointer_descriptor=selected_pointer_descriptor,
+                    prior_pointer_descriptor=prior_pointer_descriptor,
                 )
+                pointer_cutover_active = False
             except Exception as rollback_exc:
                 raise DoctorError(
                     f"installed Context shim cold probe failed: {probe_exc}; "
@@ -6616,12 +6838,24 @@ def repair_context_launcher(
             # shim path and the one-time legacy migration path.
             post_cutover_probe_failed = True
             try:
+                if (
+                    pointer_tmp is None
+                    or selected_pointer_descriptor is None
+                    or prior_pointer_descriptor is None
+                ):
+                    raise DoctorError(
+                        "post-cutover rollback lacks retained pointer descriptors"
+                    )
                 _rollback_context_generation_pointer(
                     paths,
                     generation,
-                    selected_pointer,
+                    staged_pointer,
                     captured_pointer,
+                    retained_prior_pointer=pointer_tmp,
+                    selected_pointer_descriptor=selected_pointer_descriptor,
+                    prior_pointer_descriptor=prior_pointer_descriptor,
                 )
+                pointer_cutover_active = False
             except Exception as rollback_exc:
                 raise DoctorError(
                     "Context launcher receipt publication failed after cutover: "
@@ -6631,7 +6865,65 @@ def repair_context_launcher(
                 "Context launcher receipt publication failed after cutover; "
                 f"prior generation restored: {receipt_exc}"
             ) from receipt_exc
+        # Receipt publication is the durable commit point.  Never restore the
+        # prior pointer after this line: that would leave success evidence for
+        # a cutover that is no longer live.  Cleanup is separately observable
+        # and replayable if it cannot finish now.
+        pointer_cutover_active = False
+        if (
+            pointer_tmp is None
+            or selected_pointer_descriptor is None
+            or prior_pointer_descriptor is None
+        ):
+            raise DoctorError(
+                "post-cutover cleanup lacks retained pointer descriptors"
+            )
+        try:
+            _finalize_context_generation_pointer(
+                paths,
+                staged_pointer,
+                captured_pointer,
+                retained_prior_pointer=pointer_tmp,
+                selected_pointer_descriptor=selected_pointer_descriptor,
+                prior_pointer_descriptor=prior_pointer_descriptor,
+            )
+            _context_repair_phase("displaced-pointer-unlink", paths)
+        except Exception as cleanup_exc:
+            pointer_cleanup_warning = str(cleanup_exc)
+            retained_displaced_pointer = {
+                "path": str(pointer_tmp),
+                "reason": (
+                    "retained after committed Context cutover because durable "
+                    "pointer cleanup did not complete"
+                ),
+                "identity": _surface_snapshot(pointer_tmp),
+            }
     except Exception as exc:
+        if pointer_cutover_active:
+            try:
+                if (
+                    pointer_tmp is None
+                    or selected_pointer_descriptor is None
+                    or prior_pointer_descriptor is None
+                ):
+                    raise DoctorError(
+                        "failure rollback lacks retained pointer descriptors"
+                    )
+                _rollback_context_generation_pointer(
+                    paths,
+                    generation,
+                    staged_pointer,
+                    captured_pointer,
+                    retained_prior_pointer=pointer_tmp,
+                    selected_pointer_descriptor=selected_pointer_descriptor,
+                    prior_pointer_descriptor=prior_pointer_descriptor,
+                )
+                pointer_cutover_active = False
+            except Exception as rollback_exc:
+                raise DoctorError(
+                    f"Context launcher repair failed: {exc}; "
+                    f"pointer rollback failed: {rollback_exc}"
+                ) from exc
         if (
             regular
             and migration_old_generation is not None
@@ -6668,6 +6960,11 @@ def repair_context_launcher(
                     f"Context launcher repair failed: {exc}; rollback failed: {rollback_exc}"
                 ) from exc
         raise DoctorError(f"Context launcher repair failed before a proven generation switch: {exc}") from exc
+    finally:
+        if prior_pointer_descriptor is not None:
+            os.close(prior_pointer_descriptor)
+        if selected_pointer_descriptor is not None:
+            os.close(selected_pointer_descriptor)
     restart_report = _context_restart_report(paths)
     return {
         "ok": True,
@@ -6684,6 +6981,8 @@ def repair_context_launcher(
         "runtime_source": str(selected["runtime_source"]),
         "runtime_hashes": selected["hashes"],
         "receipt": receipt,
+        "retained_displaced_pointer": retained_displaced_pointer,
+        "pointer_cleanup_warning": pointer_cleanup_warning,
         "post_cutover_cold_stdio_probe": probe,
         **restart_report,
     }

@@ -753,6 +753,28 @@ def _selected(tmp_path: Path) -> dict[str, Any]:
     return selected
 
 
+def _different_selected(tmp_path: Path, commit_character: str = "c") -> dict[str, Any]:
+    selected = _selected(tmp_path)
+    selected["commit"] = commit_character * 40
+    selected["launcher"].chmod(0o755)
+    selected["launcher"].write_bytes(
+        f"#!/bin/sh\n# generation {commit_character}\nexit 0\n".encode()
+    )
+    selected["launcher"].chmod(0o555)
+    required = {
+        "launcher": selected["launcher"],
+        "publisher": selected["publisher"],
+        **selected["modules"],
+    }
+    selected["hashes"] = {
+        name: doctor_cli._file_hash(path) for name, path in required.items()
+    }
+    selected["runtime_inventory"] = doctor_cli._context_runtime_inventory(
+        selected["runtime_source"], uid=os.getuid(), gid=os.getgid()
+    )
+    return selected
+
+
 def _doctor_paths(tmp_path: Path) -> doctor_cli.DoctorPaths:
     installed = tmp_path / "bin/tgw-context-mcp"
     installed.parent.mkdir(exist_ok=True)
@@ -1489,6 +1511,162 @@ def test_context_launcher_shim_receipt_failure_restores_prior_generation(
     )
     assert paths.context_generation_pointer.resolve(strict=True) == prior_generation
     assert set(paths.receipts.glob("*-context-launcher.json")) == prior_receipts
+
+
+def test_context_launcher_probe_failure_restores_prior_pointer_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _selected(tmp_path / "first")
+    paths = _doctor_paths(tmp_path)
+    selected = {"value": first}
+    monkeypatch.setattr(
+        doctor_cli,
+        "_selected_context_artifacts",
+        lambda _paths: selected["value"],
+    )
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_context_processes", lambda _paths: [])
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
+    doctor_cli.repair_context_launcher(paths)
+    prior_pointer = doctor_cli._surface_snapshot(
+        paths.context_generation_pointer
+    )
+    pointer_tmp = paths.context_generation_pointer.with_name(
+        "." + paths.context_generation_pointer.name + ".new"
+    )
+
+    selected["value"] = _different_selected(tmp_path / "second")
+
+    def failed_probe(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        assert doctor_cli._same_link_identity(
+            doctor_cli._surface_snapshot(pointer_tmp), prior_pointer
+        )
+        raise doctor_cli.DoctorError("injected cold probe failure")
+
+    monkeypatch.setattr(doctor_cli, "_probe_context_stdio", failed_probe)
+    with pytest.raises(
+        doctor_cli.DoctorError,
+        match="cold probe failed.*prior generation restored",
+    ):
+        doctor_cli.repair_context_launcher(paths)
+
+    assert doctor_cli._same_link_identity(
+        doctor_cli._surface_snapshot(paths.context_generation_pointer),
+        prior_pointer,
+    )
+    assert not doctor_cli._lexists(pointer_tmp)
+
+
+def test_context_launcher_retains_prior_pointer_until_success_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _selected(tmp_path / "first")
+    paths = _doctor_paths(tmp_path)
+    selected = {"value": first}
+    monkeypatch.setattr(
+        doctor_cli,
+        "_selected_context_artifacts",
+        lambda _paths: selected["value"],
+    )
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_context_processes", lambda _paths: [])
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
+    doctor_cli.repair_context_launcher(paths)
+    prior_pointer = doctor_cli._surface_snapshot(
+        paths.context_generation_pointer
+    )
+    pointer_tmp = paths.context_generation_pointer.with_name(
+        "." + paths.context_generation_pointer.name + ".new"
+    )
+
+    selected["value"] = _different_selected(tmp_path / "second")
+    observations: list[str] = []
+    original_receipt = doctor_cli._receipt
+
+    def observed_probe(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        assert doctor_cli._same_link_identity(
+            doctor_cli._surface_snapshot(pointer_tmp), prior_pointer
+        )
+        observations.append("probe")
+        return {"generation": "CURRENT"}
+
+    def observed_receipt(_paths, operation, *args, **kwargs):
+        if operation == "context-launcher":
+            assert doctor_cli._same_link_identity(
+                doctor_cli._surface_snapshot(pointer_tmp), prior_pointer
+            )
+            observations.append("receipt")
+        return original_receipt(_paths, operation, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli, "_probe_context_stdio", observed_probe)
+    monkeypatch.setattr(doctor_cli, "_receipt", observed_receipt)
+    result = doctor_cli.repair_context_launcher(paths)
+
+    assert observations == ["probe", "receipt"]
+    assert result["ok"] is True
+    assert Path(result["receipt"]).is_file()
+    assert result["retained_displaced_pointer"] is None
+    assert result["pointer_cleanup_warning"] is None
+    assert not doctor_cli._lexists(pointer_tmp)
+
+
+def test_context_launcher_post_receipt_cleanup_failure_never_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _selected(tmp_path / "first")
+    paths = _doctor_paths(tmp_path)
+    selected = {"value": first}
+    monkeypatch.setattr(
+        doctor_cli,
+        "_selected_context_artifacts",
+        lambda _paths: selected["value"],
+    )
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_context_processes", lambda _paths: [])
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
+    doctor_cli.repair_context_launcher(paths)
+    prior_pointer = doctor_cli._surface_snapshot(
+        paths.context_generation_pointer
+    )
+    second = _different_selected(tmp_path / "second")
+    selected["value"] = second
+    candidate_name = doctor_cli._context_generation_name(second)
+
+    monkeypatch.setattr(
+        doctor_cli,
+        "_finalize_context_generation_pointer",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("injected retained-pointer cleanup failure")
+        ),
+    )
+    result = doctor_cli.repair_context_launcher(paths)
+
+    assert result["ok"] is True
+    assert Path(result["receipt"]).is_file()
+    assert "cleanup failure" in result["pointer_cleanup_warning"]
+    assert result["retained_displaced_pointer"] is not None
+    assert not doctor_cli._same_link_identity(
+        doctor_cli._surface_snapshot(paths.context_generation_pointer),
+        prior_pointer,
+    )
+    assert os.readlink(paths.context_generation_pointer) == str(
+        Path("generations") / candidate_name
+    )
 
 
 def test_generation_pointer_is_the_only_pair_visibility_boundary(
