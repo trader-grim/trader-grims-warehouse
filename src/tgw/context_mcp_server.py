@@ -26,8 +26,8 @@ from urllib.request import Request, urlopen
 
 from mcp.server import FastMCP
 
-from tgw.code_graph import CodeGraphService, build_snapshot
 from tgw.bounded_context import BoundedContextService
+from tgw.code_graph import CodeGraphService, build_snapshot
 from tgw.context_source_guard import (
     ContextSourceGuardError,
     closed_git_environment,
