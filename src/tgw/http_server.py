@@ -9275,7 +9275,14 @@ def items_browse_form():
 
 @app.get("/form/operator/items/{sku}")
 def operator_item_form(sku: str):
-    """Thin item client: render only the current published API object."""
+    """Render the complete operator item editor."""
+
+    return _item_detail_form_response(sku)
+
+
+@app.get("/form/operator-object/items/{sku}")
+def operator_item_object_form(sku: str):
+    """Thin diagnostic client for the published operator-object contract."""
     from fastapi.responses import HTMLResponse
 
     if ".." in sku or not sku:
@@ -9289,23 +9296,15 @@ def operator_item_form(sku: str):
 
 @app.get("/form/items/{sku}")
 def item_detail_form(sku: str):
-    """Retired direct-action detail URL; canonical UI is the thin adapter."""
-    from fastapi.responses import HTMLResponse
+    """Render the complete operator item editor from the legacy stable URL."""
 
-    if ".." in sku:
+    return _item_detail_form_response(sku)
+
+
+def _item_detail_form_response(sku: str):
+    """Build the full inventory, listing, media, and action-console page."""
+    if ".." in sku or not sku:
         return HTMLResponse("<h2>invalid sku</h2>", status_code=400)
-    return RedirectResponse(
-        url=f"/form/operator/items/{urllib.parse.quote(sku, safe='')}",
-        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
-        headers={"Cache-Control": "no-store, no-cache"},
-    )
-
-
-def _retired_item_detail_form_source(sku: str):  # pragma: no cover
-    """Unrouted migration reference for fields not yet represented by W13."""
-    # Historical server-rendered implementation retained temporarily as dead
-    # source for field-edit migration archaeology. It has no registered route
-    # or reachable branch after W13 and cannot issue commands.
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
         return HTMLResponse(f"<h2>SKU not found: {sku}</h2>", status_code=404)

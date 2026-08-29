@@ -2626,6 +2626,24 @@ def _retired_test_item_detail_no_stale_dole_cycle_claim(env):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("route", ["/form/items/{sku}", "/form/operator/items/{sku}"])
+def test_item_routes_render_complete_operator_editor(env, route):
+    """The canonical item URLs must never regress to the reduced object client."""
+    _login(env["client"])
+
+    response = env["client"].get(route.format(sku=SKU_B))
+
+    assert response.status_code == 200
+    assert not response.history
+    assert '<div class="gallery">' in response.text
+    assert 'id="dl-category"' in response.text
+    assert 'id="dl-condition-select"' in response.text
+    assert 'id="aspects-form"' in response.text
+    assert 'id="action-line"' in response.text
+    assert "Inventory Record" in response.text
+    assert "eBay Listing" in response.text
+
+
 def _retired_test_item_detail_ebay_deeplinks_active(env):
     """View on eBay, Seller Hub, and Messages links appear for an active listing."""
     _login(env["client"])
@@ -3909,12 +3927,13 @@ def test_item_detail_no_cache_header(client, env):
     assert "no-store" in r.headers.get("cache-control", "")
 
 
-def test_item_detail_legacy_route_redirects_to_thin_operator_adapter(client, env):
+def test_item_detail_legacy_route_stays_on_complete_editor(client, env):
     _login(client)
     response = client.get(f"/form/items/{SKU_A}", follow_redirects=False)
 
-    assert response.status_code == 307
-    assert response.headers["location"] == f"/form/operator/items/{SKU_A}"
+    assert response.status_code == 200
+    assert 'id="dl-category"' in response.text
+    assert 'id="action-line"' in response.text
 
 
 # ---------------------------------------------------------------------------

@@ -420,7 +420,7 @@ def test_thin_web_item_page_uses_only_published_object_and_command_contract(monk
     client = TestClient(http_server.app)
     http_server._sessions["operator-object-browser"] = float("inf")
     client.cookies.set("tgw_session", "operator-object-browser")
-    response = client.get("/form/operator/items/sku-1")
+    response = client.get("/form/operator-object/items/sku-1")
     assert response.status_code == 200
     assert "/api/operator/items/" in response.text
     assert "data-command" in response.text
@@ -445,7 +445,7 @@ def test_shipped_browser_command_generation_submits_only_dirty_controls(monkeypa
     client = TestClient(http_server.app)
     http_server._sessions["operator-object-js"] = float("inf")
     client.cookies.set("tgw_session", "operator-object-js")
-    response = client.get("/form/operator/items/sku-1")
+    response = client.get("/form/operator-object/items/sku-1")
     script = response.text.split("<script>", 1)[1].split("</script>", 1)[0]
     harness = r"""
 function capturedListing(){try{return{value:commandValues('save-listing-draft')}}catch(e){return{error:e.message}}}
