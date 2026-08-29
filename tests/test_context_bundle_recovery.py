@@ -1669,6 +1669,226 @@ def test_context_launcher_post_receipt_cleanup_failure_never_rolls_back(
     )
 
 
+def test_context_launcher_ambiguous_success_receipt_preserves_cutover_for_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _selected(tmp_path / "first")
+    paths = _doctor_paths(tmp_path)
+    selected = {"value": first}
+    monkeypatch.setattr(
+        doctor_cli,
+        "_selected_context_artifacts",
+        lambda _paths: selected["value"],
+    )
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_context_processes", lambda _paths: [])
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
+    doctor_cli.repair_context_launcher(paths)
+    prior = doctor_cli._surface_snapshot(paths.context_generation_pointer)
+    selected["value"] = _different_selected(tmp_path / "second")
+    candidate_name = doctor_cli._context_generation_name(selected["value"])
+    retained = paths.context_generation_pointer.with_name(
+        "." + paths.context_generation_pointer.name + ".new"
+    )
+    original_receipt = doctor_cli._receipt
+
+    def ambiguous_receipt(observed_paths, operation, *args, **kwargs):
+        receipt = original_receipt(observed_paths, operation, *args, **kwargs)
+        if operation == "context-launcher":
+            raise doctor_cli._ReceiptPublicationAmbiguous(
+                Path(receipt), "injected ambiguous visible success receipt"
+            )
+        return receipt
+
+    monkeypatch.setattr(doctor_cli, "_receipt", ambiguous_receipt)
+
+    with pytest.raises(
+        doctor_cli._ReceiptPublicationAmbiguous,
+        match="ambiguous visible success receipt",
+    ):
+        doctor_cli.repair_context_launcher(paths)
+
+    assert os.readlink(paths.context_generation_pointer) == str(
+        Path("generations") / candidate_name
+    )
+    assert doctor_cli._same_link_identity(
+        doctor_cli._surface_snapshot(retained), prior
+    )
+    assert list(paths.receipts.glob("*-context-launcher.json"))
+
+
+def test_context_launcher_finalizer_guard_preserves_prior_on_live_pointer_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _selected(tmp_path / "first")
+    paths = _doctor_paths(tmp_path)
+    selected = {"value": first}
+    monkeypatch.setattr(
+        doctor_cli,
+        "_selected_context_artifacts",
+        lambda _paths: selected["value"],
+    )
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_context_processes", lambda _paths: [])
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
+    doctor_cli.repair_context_launcher(paths)
+    prior = doctor_cli._surface_snapshot(paths.context_generation_pointer)
+    selected["value"] = _different_selected(tmp_path / "second")
+    retained = paths.context_generation_pointer.with_name(
+        "." + paths.context_generation_pointer.name + ".new"
+    )
+    concurrent_target = "generations/context-concurrent-finalizer"
+    real_unlink = doctor_cli._durably_unlink_bound_symlink
+
+    def race_before_bound_cleanup(*args, **kwargs):
+        paths.context_generation_pointer.unlink()
+        paths.context_generation_pointer.symlink_to(concurrent_target)
+        return real_unlink(*args, **kwargs)
+
+    monkeypatch.setattr(
+        doctor_cli, "_durably_unlink_bound_symlink", race_before_bound_cleanup
+    )
+
+    result = doctor_cli.repair_context_launcher(paths)
+
+    assert result["ok"] is True
+    assert "cleanup guard changed" in result["pointer_cleanup_warning"]
+    assert os.readlink(paths.context_generation_pointer) == concurrent_target
+    assert doctor_cli._same_link_identity(
+        doctor_cli._surface_snapshot(retained), prior
+    )
+
+
+def test_descriptor_bound_symlink_cleanup_detects_pre_unlink_hardlink_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "pointers"
+    parent.mkdir()
+    pointer = parent / ".current.new"
+    pointer.symlink_to("generations/prior")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    parent_descriptor = os.open(
+        parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    )
+    pointer_descriptor = os.open(
+        pointer.name,
+        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=parent_descriptor,
+    )
+    expected = doctor_cli._link_surface_from_descriptor(pointer_descriptor)
+    real_unlink = os.unlink
+
+    def hardlink_then_unlink(path, *args, **kwargs):
+        directory = kwargs.get("dir_fd")
+        if path == "bound-link" and directory is not None:
+            os.link(
+                "bound-link",
+                outside / "alias",
+                src_dir_fd=directory,
+                follow_symlinks=False,
+            )
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "unlink", hardlink_then_unlink)
+    try:
+        with pytest.raises(
+            doctor_cli.DoctorError,
+            match="acquired another link during cleanup",
+        ):
+            doctor_cli._durably_unlink_bound_symlink(
+                pointer,
+                expected,
+                pointer_descriptor,
+                parent_descriptor=parent_descriptor,
+            )
+        assert not doctor_cli._lexists(pointer)
+        assert os.readlink(outside / "alias") == "generations/prior"
+        assert os.fstat(pointer_descriptor).st_nlink == 1
+    finally:
+        os.close(pointer_descriptor)
+        os.close(parent_descriptor)
+
+
+def test_context_pointer_rollback_detects_parent_replacement_at_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "entrypoints"
+    parent.mkdir()
+    generations = parent / "generations"
+    generations.mkdir()
+    selected_generation = generations / "selected"
+    selected_generation.mkdir()
+    current = parent / "current"
+    retained = parent / ".current.new"
+    current.symlink_to("generations/selected")
+    retained.symlink_to("generations/prior")
+    paths = replace(
+        doctor_cli.DoctorPaths(),
+        context_generation_pointer=current,
+    )
+    parent_descriptor = os.open(
+        parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    )
+    selected_descriptor = os.open(
+        current.name,
+        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=parent_descriptor,
+    )
+    prior_descriptor = os.open(
+        retained.name,
+        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=parent_descriptor,
+    )
+    selected = doctor_cli._link_surface_from_descriptor(selected_descriptor)
+    prior = doctor_cli._link_surface_from_descriptor(prior_descriptor)
+    detached = tmp_path / "entrypoints-detached"
+    real_unlink = os.unlink
+    replaced = False
+
+    def replace_parent_then_unlink(path, *args, **kwargs):
+        nonlocal replaced
+        if path == "bound-link" and not replaced:
+            replaced = True
+            parent.rename(detached)
+            parent.mkdir()
+            (parent / "current").symlink_to("generations/concurrent")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "unlink", replace_parent_then_unlink)
+    try:
+        with pytest.raises(
+            doctor_cli.DoctorError,
+            match="lost the restored pointer identity",
+        ):
+            doctor_cli._rollback_context_generation_pointer(
+                paths,
+                selected_generation,
+                selected,
+                prior,
+                retained_prior_pointer=retained,
+                pointer_parent_descriptor=parent_descriptor,
+                selected_pointer_descriptor=selected_descriptor,
+                prior_pointer_descriptor=prior_descriptor,
+            )
+        assert os.readlink(parent / "current") == "generations/concurrent"
+        assert os.readlink(detached / "current") == "generations/prior"
+    finally:
+        os.close(prior_descriptor)
+        os.close(selected_descriptor)
+        os.close(parent_descriptor)
+
+
 def test_generation_pointer_is_the_only_pair_visibility_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1971,14 +2191,13 @@ def test_context_launcher_exchange_wrapper_exception_preserves_and_replays_exact
         return {"generation": "CURRENT"}
 
     monkeypatch.setattr(doctor_cli, "_probe_context_stdio", cold_probe)
-    replay = doctor_cli.repair_context_launcher(paths)
-    replacement = doctor_cli._surface_snapshot(pointer_tmp)
+    with pytest.raises(
+        doctor_cli.DoctorError,
+        match="interrupted Context pointer pair changed after cold probe",
+    ):
+        doctor_cli.repair_context_launcher(paths)
 
     assert cold_probes == [paths.context_launcher]
-    assert replay["changed"] is False
-    assert replay["receipt"] is None
-    assert replay["retained_displaced_pointer"]["identity"] == replacement
-    assert "installed-shim cold proof" in replay["retained_displaced_pointer"]["reason"]
     assert os.readlink(pointer_tmp) == concurrent_target
     assert os.readlink(paths.context_generation_pointer) == str(
         Path("generations") / candidate_name

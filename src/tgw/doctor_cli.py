@@ -189,6 +189,14 @@ class DoctorError(RuntimeError):
     """The requested diagnosis or repair cannot be performed safely."""
 
 
+class _ReceiptPublicationAmbiguous(DoctorError):
+    """Receipt bytes may be durable; callers must preserve committed state."""
+
+    def __init__(self, path: Path, detail: str) -> None:
+        super().__init__(detail)
+        self.path = path
+
+
 def _preserve_primary_with_cleanup_failure(
     primary: Exception,
     cleanup: Exception,
@@ -776,12 +784,12 @@ def _require_git_commit_tree(
         raise DoctorError(f"current task {label} commit/tree binding is stale")
 
 
-def _require_review_file(
+def _review_surface_binding(
     path_value: Any,
     hash_value: Any,
     *,
     label: str,
-) -> None:
+) -> dict[str, Any]:
     if (
         not isinstance(path_value, str)
         or not path_value
@@ -797,6 +805,63 @@ def _require_review_file(
         or surface.get("sha256") != hash_value
     ):
         raise DoctorError(f"current task {label} review evidence is unavailable or stale")
+    return {
+        "path": str(path_value),
+        "sha256": str(hash_value),
+        "surface": surface,
+        "label": label,
+    }
+
+
+def _require_review_file(
+    path_value: Any,
+    hash_value: Any,
+    *,
+    label: str,
+) -> None:
+    _review_surface_binding(path_value, hash_value, label=label)
+
+
+def _context_projection_review_bindings(
+    task: Mapping[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    """Bind every diagnostic review surface referenced by one projection."""
+
+    implementation = _required_projection(
+        task, "implementation", "implementation"
+    )
+    development = _required_projection(
+        implementation, "development_source", "development source"
+    )
+    tracks = _required_projection(task, "tracks", "tracks")
+    coding = _required_projection(tracks, "coding_lifecycle", "coding lifecycle")
+    item = _required_projection(tracks, "item_workflow", "item workflow")
+    plan = _required_projection(task, "plan", "Plan")
+    todo_1916 = _required_projection(plan, "todo_1916", "Todo 1916 Plan")
+    bindings: list[dict[str, Any]] = []
+    if coding.get("review_state") != _CONTEXT_TRANSITION_REVIEW_PENDING_STATE:
+        bindings.append(
+            _review_surface_binding(
+                development.get("review"),
+                development.get("review_sha256"),
+                label="coding review",
+            )
+        )
+    bindings.extend(
+        (
+            _review_surface_binding(
+                item.get("review_path"),
+                item.get("review_sha256"),
+                label="item workflow review",
+            ),
+            _review_surface_binding(
+                todo_1916.get("review_path"),
+                todo_1916.get("review_sha256"),
+                label="Todo 1916 Plan review",
+            ),
+        )
+    )
+    return tuple(bindings)
 
 
 def _top_level_review_lines(text: str) -> list[str | None]:
@@ -808,6 +873,32 @@ def _top_level_review_lines(text: str) -> list[str | None]:
     lazy_blockquote = False
     html_comment = False
     html_container: str | None = None
+    html_block_until_blank = False
+    html_block_pattern = (
+        r"(address|article|aside|base|basefont|blockquote|body|caption|center|code|"
+        r"col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|"
+        r"footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|"
+        r"link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|"
+        r"section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)"
+    )
+
+    def comment_remains_open(value: str, *, initially_open: bool) -> bool:
+        source = ("<!--" if initially_open else "") + value
+        position = 0
+        open_comment = False
+        while True:
+            if not open_comment:
+                opening = source.find("<!--", position)
+                if opening < 0:
+                    return False
+                open_comment = True
+                position = opening + 4
+            closing = source.find("-->", position)
+            if closing < 0:
+                return True
+            open_comment = False
+            position = closing + 3
+
     for line in text.splitlines():
         stripped = line.strip()
         if fence_character is not None:
@@ -822,13 +913,32 @@ def _top_level_review_lines(text: str) -> list[str | None]:
             eligible.append(None)
             continue
         if html_comment:
-            if "-->" in line:
-                html_comment = False
+            html_comment = comment_remains_open(line, initially_open=True)
+            eligible.append(None)
+            continue
+        if html_block_until_blank:
+            if not stripped:
+                html_block_until_blank = False
             eligible.append(None)
             continue
         if html_container is not None:
-            if re.search(rf"</{html_container}\s*>", line, re.IGNORECASE):
+            closing = re.search(rf"</{html_container}\s*>", line, re.IGNORECASE)
+            if closing is not None:
                 html_container = None
+                remainder = line[closing.end() :]
+                reopened = re.search(
+                    r"<(script|style|pre|textarea)(?:\s|>)",
+                    remainder,
+                    re.IGNORECASE,
+                )
+                if reopened is not None:
+                    html_container = reopened.group(1).lower()
+                elif re.search(
+                    rf"<{html_block_pattern}(?:\s|>)",
+                    remainder,
+                    re.IGNORECASE,
+                ) is not None:
+                    html_block_until_blank = True
             eligible.append(None)
             continue
         if lazy_blockquote:
@@ -852,19 +962,42 @@ def _top_level_review_lines(text: str) -> list[str | None]:
             eligible.append(None)
             continue
         if "<!--" in line:
-            if "-->" not in line.split("<!--", 1)[1]:
-                html_comment = True
+            html_comment = comment_remains_open(line, initially_open=False)
             eligible.append(None)
             continue
         container = re.match(
-            r"^ {0,3}<(blockquote|pre|code|details)(?:\s|>)",
+            r"^ {0,3}<(script|style|pre|textarea)(?:\s|>)",
             line,
             re.IGNORECASE,
         )
         if container is not None:
             tag = container.group(1).lower()
-            if re.search(rf"</{tag}\s*>", line, re.IGNORECASE) is None:
+            closing = re.search(rf"</{tag}\s*>", line, re.IGNORECASE)
+            if closing is None:
                 html_container = tag
+            else:
+                remainder = line[closing.end() :]
+                reopened = re.search(
+                    r"<(script|style|pre|textarea)(?:\s|>)",
+                    remainder,
+                    re.IGNORECASE,
+                )
+                if reopened is not None:
+                    html_container = reopened.group(1).lower()
+                elif re.search(
+                    rf"<{html_block_pattern}(?:\s|>)",
+                    remainder,
+                    re.IGNORECASE,
+                ) is not None:
+                    html_block_until_blank = True
+            eligible.append(None)
+            continue
+        if re.match(
+            rf"^ {{0,3}}<{html_block_pattern}(?:\s|>)",
+            line,
+            re.IGNORECASE,
+        ) is not None:
+            html_block_until_blank = True
             eligible.append(None)
             continue
         # Review subjects are deliberately accepted only at the document root.
@@ -880,32 +1013,43 @@ def _top_level_review_subjects(text: str) -> list[tuple[str, str]]:
 
     lines = _top_level_review_lines(text)
     candidate_commit = re.compile(
-        r"^(?:[-*] )?Candidate commit:\s*`?([0-9a-f]{40})`?\s*$",
+        r"^(?:[-*] )?Candidate commit:\s*"
+        r"(?:`([0-9a-f]{40})`|([0-9a-f]{40}))\s*$",
         re.IGNORECASE,
     )
     candidate_tree = re.compile(
-        r"^(?:[-*] )?Candidate tree:\s*`?([0-9a-f]{40})`?\s*$",
+        r"^(?:[-*] )?Candidate tree:\s*"
+        r"(?:`([0-9a-f]{40})`|([0-9a-f]{40}))\s*$",
         re.IGNORECASE,
     )
     exact_commit = re.compile(
-        r"^[-*] Commit:\s*`?([0-9a-f]{40})`?\s*$", re.IGNORECASE
+        r"^[-*] Commit:\s*(?:`([0-9a-f]{40})`|([0-9a-f]{40}))\s*$",
+        re.IGNORECASE,
     )
     exact_tree = re.compile(
-        r"^[-*] Tree:\s*`?([0-9a-f]{40})`?\s*$", re.IGNORECASE
+        r"^[-*] Tree:\s*(?:`([0-9a-f]{40})`|([0-9a-f]{40}))\s*$",
+        re.IGNORECASE,
     )
     immutable = re.compile(
         r"^[-*] Immutable bindings:\s*`([0-9a-f]{40})`"
-        r"[^\n]*?\band tree\s*`([0-9a-f]{40})`\s*$",
+        r"[^\n]*?\band tree\s*`([0-9a-f]{40})`[^\n]*$",
         re.IGNORECASE,
     )
 
     def next_nonblank(index: int) -> int | None:
         index += 1
-        while index < len(lines) and lines[index] == "":
+        while (
+            index < len(lines)
+            and isinstance(lines[index], str)
+            and not lines[index].strip()
+        ):
             index += 1
         if index >= len(lines) or lines[index] is None:
             return None
         return index
+
+    def matched_hash(match: re.Match[str]) -> str:
+        return match.group(1) or match.group(2)
 
     subjects: list[tuple[str, str]] = []
     explicit_pairs = 0
@@ -930,7 +1074,9 @@ def _top_level_review_subjects(text: str) -> list[tuple[str, str]]:
                 incomplete = True
                 index += 1
                 continue
-            subjects.append((commit_match.group(1), adjacent_tree.group(1)))
+            subjects.append(
+                (matched_hash(commit_match), matched_hash(adjacent_tree))
+            )
             explicit_pairs += 1
             index = tree_index + 1
             continue
@@ -955,13 +1101,25 @@ def _top_level_review_subjects(text: str) -> list[tuple[str, str]]:
                 incomplete = True
                 index += 1
                 continue
-            subjects.append((commit_value.group(1), tree_value.group(1)))
+            subjects.append(
+                (matched_hash(commit_value), matched_hash(tree_value))
+            )
             index = tree_index + 1
             continue
         if immutable_match is not None:
             subjects.append((immutable_match.group(1), immutable_match.group(2)))
             index += 1
             continue
+        if re.match(
+            r"^(?:[-*] )?(?:Candidate commit|Candidate tree|Immutable bindings)\b",
+            line,
+            re.IGNORECASE,
+        ) is not None or re.match(
+            r"^Exact candidate\b",
+            line,
+            re.IGNORECASE,
+        ) is not None:
+            incomplete = True
         index += 1
     if incomplete or explicit_pairs > 1:
         raise DoctorError(
@@ -6207,13 +6365,35 @@ def _receipt(paths: DoctorPaths, operation: str, before: Any, after: Any) -> str
         except Exception as cleanup_exc:
             cleanup_error = cleanup_exc
         if cleanup_error is not None:
-            raise _preserve_primary_with_cleanup_failure(
-                exc,
-                cleanup_error,
-                resource="failed Doctor success receipt",
-            ).with_traceback(exc.__traceback__)
+            raise _ReceiptPublicationAmbiguous(
+                path,
+                "Doctor success receipt publication is ambiguous after "
+                f"write failure ({exc}) and cleanup failure ({cleanup_error})",
+            ) from exc
         raise
     return str(path)
+
+
+def _remove_exact_receipt(
+    path: Path,
+    expected: Mapping[str, Any],
+) -> None:
+    """Durably remove only the exact success receipt just published here."""
+
+    current = _surface_snapshot(path)
+    if current != expected or current.get("kind") != "file":
+        raise DoctorError("Context success receipt changed before rollback cleanup")
+    parent = os.open(
+        path.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        os.unlink(path.name, dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+    if _surface_snapshot(path).get("kind") != "missing":
+        raise DoctorError("Context success receipt remains after rollback cleanup")
 
 
 def _context_artifact_signature(selected: Mapping[str, Any]) -> dict[str, Any]:
@@ -6262,6 +6442,7 @@ def _rollback_context_generation_pointer(
     prior_pointer: Mapping[str, Any],
     *,
     retained_prior_pointer: Path,
+    pointer_parent_descriptor: int,
     selected_pointer_descriptor: int,
     prior_pointer_descriptor: int,
 ) -> None:
@@ -6269,74 +6450,182 @@ def _rollback_context_generation_pointer(
     if prior_pointer.get("kind") != "symlink":
         raise DoctorError("post-cutover rollback has no captured prior generation pointer")
     expected_target = str(Path("generations") / selected_generation.name)
-    live_pointer = _surface_snapshot(paths.context_generation_pointer)
-    retained_pointer = _surface_snapshot(retained_prior_pointer)
     if retained_prior_pointer.parent != paths.context_generation_pointer.parent:
         raise DoctorError("post-cutover rollback pointer is outside the pointer directory")
-    if (
-        selected_pointer.get("kind") != "symlink"
-        or selected_pointer.get("target") != expected_target
-        or not _same_link_identity(live_pointer, selected_pointer)
-        or not _descriptor_matches_link_surface(
-            selected_pointer_descriptor, live_pointer
-        )
-        or not _same_link_identity(retained_pointer, prior_pointer)
-        or not _descriptor_matches_link_surface(
-            prior_pointer_descriptor, retained_pointer
-        )
-    ):
-        raise DoctorError("post-cutover rollback refused a concurrent pointer change")
-    parent = os.open(
-        paths.context_generation_pointer.parent,
-        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    parent = os.dup(pointer_parent_descriptor)
+    quarantine = (
+        f".{retained_prior_pointer.name}.rollback-"
+        f"{os.getpid()}-{secrets.token_hex(8)}"
     )
+    quarantine_descriptor = -1
+    isolated = False
     try:
-        _rename_exchange(
-            parent,
-            retained_prior_pointer.name,
-            paths.context_generation_pointer.name,
-        )
-        restored = _surface_snapshot(paths.context_generation_pointer)
-        displaced_state = os.stat(
-            retained_prior_pointer.name,
-            dir_fd=parent,
-            follow_symlinks=False,
-        )
-        displaced = {
-            "kind": "symlink",
-            "target": os.readlink(retained_prior_pointer.name, dir_fd=parent),
-            "uid": displaced_state.st_uid,
-            "gid": displaced_state.st_gid,
-            "mode": stat.S_IMODE(displaced_state.st_mode),
-            "device": displaced_state.st_dev,
-            "inode": displaced_state.st_ino,
-        }
-        if (
-            not _same_link_identity(restored, prior_pointer)
-            or not _descriptor_matches_link_surface(
-                prior_pointer_descriptor, restored
+        if not _directory_descriptor_matches_path(
+            parent, paths.context_generation_pointer.parent
+        ):
+            raise DoctorError(
+                "post-cutover rollback pointer directory changed concurrently"
             )
-            or not _same_link_identity(displaced, selected_pointer)
+        live_pointer = _link_surface_at(
+            parent, paths.context_generation_pointer.name
+        )
+        retained_pointer = _link_surface_at(parent, retained_prior_pointer.name)
+        if (
+            selected_pointer.get("kind") != "symlink"
+            or selected_pointer.get("target") != expected_target
+            or not _same_link_identity(live_pointer, selected_pointer)
             or not _descriptor_matches_link_surface(
-                selected_pointer_descriptor, displaced
+                selected_pointer_descriptor, live_pointer
+            )
+            or not _same_link_identity(retained_pointer, prior_pointer)
+            or not _descriptor_matches_link_surface(
+                prior_pointer_descriptor, retained_pointer
             )
         ):
             raise DoctorError(
-                "post-cutover rollback did not restore the captured pointer identity"
+                "post-cutover rollback refused a concurrent pointer change"
             )
-        os.unlink(retained_prior_pointer.name, dir_fd=parent)
-        os.fsync(parent)
-        final_pointer = _surface_snapshot(paths.context_generation_pointer)
+        os.mkdir(quarantine, mode=0o700, dir_fd=parent)
+        quarantine_descriptor = os.open(
+            quarantine,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent,
+        )
+        _rename_noreplace_at(
+            parent,
+            retained_prior_pointer.name,
+            quarantine_descriptor,
+            "bound-link",
+        )
+        isolated = True
+        quarantined_prior = _link_surface_at(quarantine_descriptor, "bound-link")
         if (
-            not _same_link_identity(final_pointer, prior_pointer)
+            not _same_link_identity(quarantined_prior, prior_pointer)
             or not _descriptor_matches_link_surface(
-                prior_pointer_descriptor, final_pointer
+                prior_pointer_descriptor, prior_pointer
             )
+        ):
+            if _link_surface_at(parent, retained_prior_pointer.name).get(
+                "kind"
+            ) == "missing":
+                _rename_noreplace_at(
+                    quarantine_descriptor,
+                    "bound-link",
+                    parent,
+                    retained_prior_pointer.name,
+                )
+                isolated = False
+                os.fsync(parent)
+            raise DoctorError(
+                "post-cutover rollback retained pointer changed before isolation"
+            )
+        visible_selected = _link_surface_at(
+            parent, paths.context_generation_pointer.name
+        )
+        if (
+            not _same_link_identity(visible_selected, selected_pointer)
+            or not _descriptor_matches_link_surface(
+                selected_pointer_descriptor, selected_pointer
+            )
+        ):
+            _rename_noreplace_at(
+                quarantine_descriptor,
+                "bound-link",
+                parent,
+                retained_prior_pointer.name,
+            )
+            isolated = False
+            os.fsync(parent)
+            raise DoctorError(
+                "post-cutover rollback live pointer changed before exchange"
+            )
+
+        exchange_error: Exception | None = None
+        try:
+            _rename_exchange_at(
+                quarantine_descriptor,
+                "bound-link",
+                parent,
+                paths.context_generation_pointer.name,
+            )
+        except Exception as exc:
+            exchange_error = exc
+        restored = _link_surface_at(parent, paths.context_generation_pointer.name)
+        displaced = _link_surface_at(quarantine_descriptor, "bound-link")
+        if (
+            _same_link_identity(restored, prior_pointer)
+            and _descriptor_matches_link_surface(
+                prior_pointer_descriptor, prior_pointer
+            )
+            and _same_link_identity(displaced, selected_pointer)
+            and _descriptor_matches_link_surface(
+                selected_pointer_descriptor, selected_pointer
+            )
+        ):
+            if not _directory_descriptor_matches_path(
+                parent, paths.context_generation_pointer.parent
+            ):
+                os.fsync(quarantine_descriptor)
+                os.fsync(parent)
+                raise DoctorError(
+                    "post-cutover rollback directory changed after exchange; "
+                    "both pointer identities were preserved"
+                )
+            os.unlink("bound-link", dir_fd=quarantine_descriptor)
+            if os.fstat(selected_pointer_descriptor).st_nlink != 0:
+                os.fsync(quarantine_descriptor)
+                os.fsync(parent)
+                raise DoctorError(
+                    "post-cutover rollback selected pointer acquired another "
+                    "link during cleanup"
+                )
+            isolated = False
+            os.fsync(quarantine_descriptor)
+            os.fsync(parent)
+        elif (
+            _same_link_identity(restored, selected_pointer)
+            and _same_link_identity(displaced, prior_pointer)
+        ):
+            _rename_noreplace_at(
+                quarantine_descriptor,
+                "bound-link",
+                parent,
+                retained_prior_pointer.name,
+            )
+            isolated = False
+            os.fsync(parent)
+            raise DoctorError(
+                "post-cutover rollback exchange did not occur"
+            ) from exchange_error
+        else:
+            os.fsync(quarantine_descriptor)
+            os.fsync(parent)
+            raise DoctorError(
+                "post-cutover rollback exchange was ambiguous; isolated state "
+                f"preserved at {retained_prior_pointer.parent / quarantine}"
+            ) from exchange_error
+        final_pointer = _link_surface_at(
+            parent, paths.context_generation_pointer.name
+        )
+        if (
+            not _directory_descriptor_matches_path(
+                parent, paths.context_generation_pointer.parent
+            )
+            or not _same_link_identity(final_pointer, prior_pointer)
         ):
             raise DoctorError(
                 "post-cutover rollback lost the restored pointer identity"
             )
     finally:
+        if quarantine_descriptor >= 0:
+            os.close(quarantine_descriptor)
+        if not isolated:
+            try:
+                os.rmdir(quarantine, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
         os.close(parent)
 
 
@@ -6346,34 +6635,60 @@ def _finalize_context_generation_pointer(
     prior_pointer: Mapping[str, Any],
     *,
     retained_prior_pointer: Path,
+    pointer_parent_descriptor: int,
     selected_pointer_descriptor: int,
     prior_pointer_descriptor: int,
 ) -> None:
     """Durably discard the displaced pointer after receipt publication."""
 
-    live_pointer = _surface_snapshot(paths.context_generation_pointer)
-    retained_pointer = _surface_snapshot(retained_prior_pointer)
-    if (
-        retained_prior_pointer.parent != paths.context_generation_pointer.parent
-        or not _same_link_identity(live_pointer, selected_pointer)
-        or not _descriptor_matches_link_surface(
-            selected_pointer_descriptor, live_pointer
-        )
-        or not _same_link_identity(retained_pointer, prior_pointer)
-        or not _descriptor_matches_link_surface(
-            prior_pointer_descriptor, retained_pointer
-        )
-    ):
-        raise DoctorError(
-            "post-cutover cleanup refused a concurrent pointer change"
-        )
-    parent = os.open(
-        paths.context_generation_pointer.parent,
-        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-    )
+    parent = os.dup(pointer_parent_descriptor)
     try:
-        os.unlink(retained_prior_pointer.name, dir_fd=parent)
-        os.fsync(parent)
+        live_pointer = _link_surface_at(
+            parent, paths.context_generation_pointer.name
+        )
+        retained_pointer = _link_surface_at(parent, retained_prior_pointer.name)
+        if (
+            retained_prior_pointer.parent
+            != paths.context_generation_pointer.parent
+            or not _directory_descriptor_matches_path(
+                parent, paths.context_generation_pointer.parent
+            )
+            or not _same_link_identity(live_pointer, selected_pointer)
+            or not _descriptor_matches_link_surface(
+                selected_pointer_descriptor, live_pointer
+            )
+            or not _same_link_identity(retained_pointer, prior_pointer)
+            or not _descriptor_matches_link_surface(
+                prior_pointer_descriptor, retained_pointer
+            )
+        ):
+            raise DoctorError(
+                "post-cutover cleanup refused a concurrent pointer change"
+            )
+        _durably_unlink_bound_symlink(
+            retained_prior_pointer,
+            prior_pointer,
+            prior_pointer_descriptor,
+            parent_descriptor=parent,
+            guard_path=paths.context_generation_pointer,
+            guard_expected=selected_pointer,
+            guard_descriptor=selected_pointer_descriptor,
+        )
+        live_after = _link_surface_at(
+            parent, paths.context_generation_pointer.name
+        )
+        if (
+            not _directory_descriptor_matches_path(
+                parent, paths.context_generation_pointer.parent
+            )
+            or not _same_link_identity(live_after, selected_pointer)
+            or not _descriptor_matches_link_surface(
+                selected_pointer_descriptor, selected_pointer
+            )
+        ):
+            raise DoctorError(
+                "post-cutover cleanup completed but the live pointer changed concurrently"
+            )
     finally:
         os.close(parent)
 
@@ -6384,7 +6699,16 @@ def _surface_semantics(surface: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _same_link_identity(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    keys = ("kind", "target", "uid", "gid", "mode", "device", "inode")
+    keys = (
+        "kind",
+        "target",
+        "uid",
+        "gid",
+        "mode",
+        "device",
+        "inode",
+        "nlink",
+    )
     return all(left.get(key) == right.get(key) for key in keys)
 
 
@@ -6403,7 +6727,215 @@ def _descriptor_matches_link_surface(
         and observed.st_uid == surface.get("uid")
         and observed.st_gid == surface.get("gid")
         and stat.S_IMODE(observed.st_mode) == surface.get("mode")
+        and observed.st_nlink == surface.get("nlink")
         and os.readlink("", dir_fd=descriptor) == surface.get("target")
+    )
+
+
+def _link_surface_from_descriptor(descriptor: int) -> dict[str, Any]:
+    """Capture one symlink identity from an already-open O_PATH descriptor."""
+
+    observed = os.fstat(descriptor)
+    if not stat.S_ISLNK(observed.st_mode):
+        raise DoctorError("Context generation pointer descriptor is not a symlink")
+    return {
+        "kind": "symlink",
+        "target": os.readlink("", dir_fd=descriptor),
+        "uid": observed.st_uid,
+        "gid": observed.st_gid,
+        "mode": stat.S_IMODE(observed.st_mode),
+        "device": observed.st_dev,
+        "inode": observed.st_ino,
+        "nlink": observed.st_nlink,
+    }
+
+
+def _link_surface_at(directory_descriptor: int, name: str) -> dict[str, Any]:
+    try:
+        observed = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return {"kind": "missing"}
+    if not stat.S_ISLNK(observed.st_mode):
+        return {"kind": "unsupported"}
+    return {
+        "kind": "symlink",
+        "target": os.readlink(name, dir_fd=directory_descriptor),
+        "uid": observed.st_uid,
+        "gid": observed.st_gid,
+        "mode": stat.S_IMODE(observed.st_mode),
+        "device": observed.st_dev,
+        "inode": observed.st_ino,
+        "nlink": observed.st_nlink,
+    }
+
+
+def _directory_descriptor_matches_path(descriptor: int, path: Path) -> bool:
+    """Prove that a retained directory descriptor is still the public path."""
+
+    try:
+        retained = os.fstat(descriptor)
+        visible = path.stat(follow_symlinks=False)
+    except (FileNotFoundError, OSError):
+        return False
+    return (
+        stat.S_ISDIR(retained.st_mode)
+        and stat.S_ISDIR(visible.st_mode)
+        and (retained.st_dev, retained.st_ino) == (visible.st_dev, visible.st_ino)
+    )
+
+
+def _durably_unlink_bound_symlink(
+    path: Path,
+    expected: Mapping[str, Any],
+    descriptor: int,
+    *,
+    parent_descriptor: int,
+    guard_path: Path | None = None,
+    guard_expected: Mapping[str, Any] | None = None,
+    guard_descriptor: int | None = None,
+) -> None:
+    """Move one exact symlink into a private directory before unlinking it."""
+
+    if path.name in {"", ".", ".."}:
+        raise DoctorError("descriptor-bound symlink cleanup path is unsafe")
+    parent = os.dup(parent_descriptor)
+    quarantine = f".{path.name}.remove-{os.getpid()}-{secrets.token_hex(8)}"
+    quarantine_descriptor = -1
+    moved = False
+    try:
+        if not _directory_descriptor_matches_path(parent, path.parent):
+            raise DoctorError(
+                "descriptor-bound symlink cleanup parent changed concurrently"
+            )
+        os.mkdir(quarantine, mode=0o700, dir_fd=parent)
+        quarantine_descriptor = os.open(
+            quarantine,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent,
+        )
+        _rename_noreplace_at(parent, path.name, quarantine_descriptor, "bound-link")
+        moved = True
+        isolated = _link_surface_at(quarantine_descriptor, "bound-link")
+        if (
+            not _same_link_identity(isolated, expected)
+            or not _descriptor_matches_link_surface(descriptor, expected)
+        ):
+            if _link_surface_at(parent, path.name).get("kind") != "missing":
+                raise DoctorError(
+                    "descriptor-bound symlink changed and its original name was reused; "
+                    f"preserved at {path.parent / quarantine / 'bound-link'}"
+                )
+            _rename_noreplace_at(
+                quarantine_descriptor,
+                "bound-link",
+                parent,
+                path.name,
+            )
+            moved = False
+            os.fsync(quarantine_descriptor)
+            os.fsync(parent)
+            raise DoctorError(
+                "descriptor-bound symlink changed before cleanup; replacement restored"
+            )
+        guard_values = (guard_path, guard_expected, guard_descriptor)
+        if any(value is not None for value in guard_values):
+            if not all(value is not None for value in guard_values):
+                raise DoctorError("descriptor-bound symlink cleanup guard is incomplete")
+            assert guard_path is not None
+            assert guard_expected is not None
+            assert guard_descriptor is not None
+            if guard_path.parent != path.parent:
+                raise DoctorError(
+                    "descriptor-bound symlink cleanup guard is outside the bound parent"
+                )
+            guarded = _link_surface_at(parent, guard_path.name)
+            if (
+                not _directory_descriptor_matches_path(parent, path.parent)
+                or
+                not _same_link_identity(guarded, guard_expected)
+                or not _descriptor_matches_link_surface(
+                    guard_descriptor, guard_expected
+                )
+            ):
+                if _link_surface_at(parent, path.name).get("kind") != "missing":
+                    raise DoctorError(
+                        "descriptor-bound cleanup guard changed and the retained "
+                        "pointer name was reused; exact prior preserved at "
+                        f"{path.parent / quarantine / 'bound-link'}"
+                    )
+                _rename_noreplace_at(
+                    quarantine_descriptor,
+                    "bound-link",
+                    parent,
+                    path.name,
+                )
+                moved = False
+                os.fsync(quarantine_descriptor)
+                os.fsync(parent)
+                raise DoctorError(
+                    "descriptor-bound cleanup guard changed; exact prior restored"
+                )
+        os.unlink("bound-link", dir_fd=quarantine_descriptor)
+        if os.fstat(descriptor).st_nlink != 0:
+            os.fsync(quarantine_descriptor)
+            os.fsync(parent)
+            raise DoctorError(
+                "descriptor-bound symlink acquired another link during cleanup"
+            )
+        moved = False
+        os.fsync(quarantine_descriptor)
+        os.close(quarantine_descriptor)
+        quarantine_descriptor = -1
+        os.rmdir(quarantine, dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        if quarantine_descriptor >= 0:
+            os.close(quarantine_descriptor)
+        if not moved:
+            try:
+                os.rmdir(quarantine, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                # A non-empty quarantine is deliberate failure evidence.
+                pass
+        os.close(parent)
+
+
+def _context_pointer_pair_exact(
+    paths: DoctorPaths,
+    retained_prior_pointer: Path,
+    selected_pointer: Mapping[str, Any],
+    prior_pointer: Mapping[str, Any],
+    pointer_parent_descriptor: int,
+    selected_pointer_descriptor: int,
+    prior_pointer_descriptor: int,
+) -> bool:
+    return (
+        _directory_descriptor_matches_path(
+            pointer_parent_descriptor, paths.context_generation_pointer.parent
+        )
+        and
+        _same_link_identity(
+            _link_surface_at(
+                pointer_parent_descriptor,
+                paths.context_generation_pointer.name,
+            ),
+            selected_pointer,
+        )
+        and _descriptor_matches_link_surface(
+            selected_pointer_descriptor, selected_pointer
+        )
+        and _same_link_identity(
+            _link_surface_at(
+                pointer_parent_descriptor,
+                retained_prior_pointer.name,
+            ),
+            prior_pointer,
+        )
+        and _descriptor_matches_link_surface(
+            prior_pointer_descriptor, prior_pointer
+        )
     )
 
 
@@ -6480,9 +7012,12 @@ def repair_context_launcher(
     pointer_cutover_active = False
     selected_pointer_descriptor: int | None = None
     prior_pointer_descriptor: int | None = None
+    pointer_parent_descriptor: int | None = None
     pointer_tmp: Path | None = None
     retained_displaced_pointer: dict[str, Any] | None = None
     pointer_cleanup_warning: str | None = None
+    receipt_publication_warning: str | None = None
+    receipt_commit_ambiguous = False
     try:
         if _context_artifact_signature(
             _repair_context_artifacts(
@@ -6492,6 +7027,15 @@ def repair_context_launcher(
             raise DoctorError("selected Context runtime changed before repair")
         paths.context_generation_pointer.parent.mkdir(parents=True, exist_ok=True)
         paths.context_generation_root.mkdir(parents=True, exist_ok=True)
+        pointer_parent_descriptor = os.open(
+            paths.context_generation_pointer.parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        if not _directory_descriptor_matches_path(
+            pointer_parent_descriptor,
+            paths.context_generation_pointer.parent,
+        ):
+            raise DoctorError("Context pointer directory changed during binding")
         os.chmod(paths.context_generation_pointer.parent, 0o755)
         os.chmod(paths.context_generation_root, 0o555)
 
@@ -6657,21 +7201,199 @@ def repair_context_launcher(
                 )
             ) != signature:
                 raise DoctorError("selected Context runtime changed during repair replay")
+            if _lexists(pointer_tmp):
+                if _surface_snapshot(pointer_tmp).get("kind") != "symlink":
+                    raise DoctorError(
+                        "interrupted Context pointer replay has an unsafe retained path"
+                    )
+                selected_descriptor = os.open(
+                    paths.context_generation_pointer.name,
+                    os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=pointer_parent_descriptor,
+                )
+                try:
+                    selected_surface = _link_surface_from_descriptor(
+                        selected_descriptor
+                    )
+                    prior_descriptor = os.open(
+                        pointer_tmp.name,
+                        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=pointer_parent_descriptor,
+                    )
+                    try:
+                        prior_surface = _link_surface_from_descriptor(
+                            prior_descriptor
+                        )
+                        expected_target = str(
+                            Path("generations") / generation_name
+                        )
+                        prior_target = Path(str(prior_surface["target"]))
+                        if (
+                            not _same_link_identity(
+                                _surface_snapshot(
+                                    paths.context_generation_pointer
+                                ),
+                                selected_surface,
+                            )
+                            or not _same_link_identity(
+                                _surface_snapshot(pointer_tmp), prior_surface
+                            )
+                            or selected_surface.get("target") != expected_target
+                            or prior_target.is_absolute()
+                            or len(prior_target.parts) != 2
+                            or prior_target.parts[0] != "generations"
+                            or prior_target.name == generation_name
+                        ):
+                            raise DoctorError(
+                                "interrupted Context pointer replay is not one exact exchange pair"
+                            )
+                        prior_generation = pointer_tmp.parent / prior_target
+                        _validate_context_generation(prior_generation, paths)
+                        probe = _probe_context_stdio(
+                            paths.context_launcher,
+                            _context_probe_actor(paths),
+                            _selected_context_probe_expected(paths, selected),
+                        )
+                        if not _context_pointer_pair_exact(
+                            paths,
+                            pointer_tmp,
+                            selected_surface,
+                            prior_surface,
+                            pointer_parent_descriptor,
+                            selected_descriptor,
+                            prior_descriptor,
+                        ):
+                            raise DoctorError(
+                                "interrupted Context pointer pair changed after cold probe"
+                            )
+                        replay_receipt_warning: str | None = None
+                        try:
+                            receipt = _receipt(
+                                paths,
+                                "context-launcher",
+                                {
+                                    "generation": prior_generation.name,
+                                    "recovered_interrupted_exchange": True,
+                                },
+                                {
+                                    "generation": generation_name,
+                                    "runtime_commit": desired,
+                                    "runtime_hashes": selected["hashes"],
+                                },
+                            )
+                            if not _context_pointer_pair_exact(
+                                paths,
+                                pointer_tmp,
+                                selected_surface,
+                                prior_surface,
+                                pointer_parent_descriptor,
+                                selected_descriptor,
+                                prior_descriptor,
+                            ):
+                                receipt_path = Path(receipt)
+                                receipt_surface = _surface_snapshot(receipt_path)
+                                try:
+                                    _remove_exact_receipt(
+                                        receipt_path, receipt_surface
+                                    )
+                                except Exception as cleanup_exc:
+                                    raise _ReceiptPublicationAmbiguous(
+                                        receipt_path,
+                                        "interrupted Context pointer pair changed "
+                                        "during receipt publication; receipt cleanup "
+                                        f"is ambiguous: {cleanup_exc}",
+                                    ) from cleanup_exc
+                                raise DoctorError(
+                                    "interrupted Context pointer pair changed during "
+                                    "receipt publication; success receipt removed"
+                                )
+                        except _ReceiptPublicationAmbiguous as receipt_exc:
+                            receipt_commit_ambiguous = True
+                            replay_receipt_warning = str(receipt_exc)
+                            retained_displaced_pointer = {
+                                "path": str(pointer_tmp),
+                                "reason": (
+                                    "retained because interrupted-cutover receipt "
+                                    "publication is ambiguous"
+                                ),
+                                "identity": _surface_snapshot(pointer_tmp),
+                            }
+                            raise
+                        except Exception as receipt_exc:
+                            try:
+                                _rollback_context_generation_pointer(
+                                    paths,
+                                    generation,
+                                    selected_surface,
+                                    prior_surface,
+                                    retained_prior_pointer=pointer_tmp,
+                                    pointer_parent_descriptor=pointer_parent_descriptor,
+                                    selected_pointer_descriptor=selected_descriptor,
+                                    prior_pointer_descriptor=prior_descriptor,
+                                )
+                            except Exception as rollback_exc:
+                                raise DoctorError(
+                                    "interrupted Context replay receipt failed: "
+                                    f"{receipt_exc}; pointer rollback failed: "
+                                    f"{rollback_exc}"
+                                ) from receipt_exc
+                            raise DoctorError(
+                                "interrupted Context replay receipt failed; exact "
+                                f"prior pointer restored: {receipt_exc}"
+                            ) from receipt_exc
+                        if replay_receipt_warning is None:
+                            try:
+                                _finalize_context_generation_pointer(
+                                    paths,
+                                    selected_surface,
+                                    prior_surface,
+                                    retained_prior_pointer=pointer_tmp,
+                                    pointer_parent_descriptor=pointer_parent_descriptor,
+                                    selected_pointer_descriptor=selected_descriptor,
+                                    prior_pointer_descriptor=prior_descriptor,
+                                )
+                            except Exception as cleanup_exc:
+                                pointer_cleanup_warning = str(cleanup_exc)
+                                retained_displaced_pointer = {
+                                    "path": str(pointer_tmp),
+                                    "reason": (
+                                        "retained after receipted interrupted Context "
+                                        "cutover recovery because cleanup did not complete"
+                                    ),
+                                    "identity": _surface_snapshot(pointer_tmp),
+                                }
+                    finally:
+                        os.close(prior_descriptor)
+                finally:
+                    os.close(selected_descriptor)
+                restart_report = _context_restart_report(paths)
+                return {
+                    "ok": True,
+                    "operation": "context-launcher",
+                    "changed": True,
+                    "recovered_interrupted_cutover": True,
+                    "generation": generation_name,
+                    "runtime_commit": desired,
+                    "source": str(selected["launcher"]),
+                    "installed": str(paths.context_launcher),
+                    "sha256": selected["hashes"]["launcher"],
+                    "publisher_source": str(selected["publisher"]),
+                    "publisher_installed": str(paths.context_publisher),
+                    "publisher_sha256": selected["hashes"]["publisher"],
+                    "runtime_source": str(selected["runtime_source"]),
+                    "runtime_hashes": selected["hashes"],
+                    "receipt": receipt,
+                    "retained_displaced_pointer": retained_displaced_pointer,
+                    "pointer_cleanup_warning": pointer_cleanup_warning,
+                    "receipt_publication_warning": replay_receipt_warning,
+                    "post_cutover_cold_stdio_probe": probe,
+                    **restart_report,
+                }
             probe = _probe_context_stdio(
                 paths.context_launcher,
                 _context_probe_actor(paths),
                 _selected_context_probe_expected(paths, selected),
             )
-            retained_displaced_pointer = None
-            if _lexists(pointer_tmp):
-                retained_displaced_pointer = {
-                    "path": str(pointer_tmp),
-                    "reason": (
-                        "retained after installed-shim cold proof; cleanup requires "
-                        "a separately proven pointer identity"
-                    ),
-                    "identity": _surface_snapshot(pointer_tmp),
-                }
             restart_report = _context_restart_report(paths)
             return {
                 "ok": True,
@@ -6688,7 +7410,8 @@ def repair_context_launcher(
                 "runtime_source": str(selected["runtime_source"]),
                 "runtime_hashes": selected["hashes"],
                 "receipt": None,
-                "retained_displaced_pointer": retained_displaced_pointer,
+                "retained_displaced_pointer": None,
+                "pointer_cleanup_warning": None,
                 "post_cutover_cold_stdio_probe": probe,
                 **restart_report,
             }
@@ -6704,70 +7427,83 @@ def repair_context_launcher(
             _fsync_parent(pointer_tmp)
         pointer_tmp.symlink_to(Path("generations") / generation_name)
         _context_repair_phase("staged-pointer", paths)
-        staged_pointer = _surface_snapshot(pointer_tmp)
         if _surface_snapshot(paths.context_generation_pointer) != captured_pointer:
             pointer_tmp.unlink()
             raise DoctorError("Context generation pointer changed concurrently during switch")
         staged_pointer_descriptor = os.open(
-            pointer_tmp,
+            pointer_tmp.name,
             os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
-        )
-        captured_pointer_descriptor = os.open(
-            paths.context_generation_pointer,
-            os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=pointer_parent_descriptor,
         )
         try:
-            if not _descriptor_matches_link_surface(
-                staged_pointer_descriptor, staged_pointer
-            ) or not _descriptor_matches_link_surface(
-                captured_pointer_descriptor, captured_pointer
-            ):
-                raise DoctorError(
-                    "Context generation pointer descriptors differ before switch"
-                )
-            selected_pointer_descriptor = os.dup(staged_pointer_descriptor)
-            prior_pointer_descriptor = os.dup(captured_pointer_descriptor)
-            parent = os.open(
-                paths.context_generation_pointer.parent,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            staged_pointer = _link_surface_from_descriptor(
+                staged_pointer_descriptor
+            )
+            captured_pointer_descriptor = os.open(
+                paths.context_generation_pointer.name,
+                os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=pointer_parent_descriptor,
             )
             try:
-                # Retained O_PATH descriptors prevent an unlink/recreate ABA
-                # from reusing either symlink inode while the exchange is being
-                # verified.
-                pointer_switch_unproven = True
-                _rename_exchange(
-                    parent,
-                    pointer_tmp.name,
-                    paths.context_generation_pointer.name,
+                switch_captured_pointer = _link_surface_from_descriptor(
+                    captured_pointer_descriptor
                 )
-                _context_repair_phase("exchange", paths)
-                selected_pointer = _surface_snapshot(
-                    paths.context_generation_pointer
-                )
-                displaced = _surface_snapshot(pointer_tmp)
                 if (
-                    not _same_link_identity(selected_pointer, staged_pointer)
-                    or not _descriptor_matches_link_surface(
-                        staged_pointer_descriptor, staged_pointer
+                    not _same_link_identity(
+                        _surface_snapshot(pointer_tmp), staged_pointer
                     )
-                    or not _same_link_identity(displaced, captured_pointer)
-                    or not _descriptor_matches_link_surface(
-                        captured_pointer_descriptor, captured_pointer
+                    or not _same_link_identity(
+                        _surface_snapshot(paths.context_generation_pointer),
+                        switch_captured_pointer,
+                    )
+                    or not _same_link_identity(
+                        switch_captured_pointer, captured_pointer
                     )
                 ):
                     raise DoctorError(
-                        "Context generation pointer CAS observed an unproven "
-                        "concurrent surface"
+                        "Context generation pointer descriptors differ before switch"
                     )
-                pointer_cutover_active = True
-                pointer_switch_unproven = False
-                os.fsync(parent)
-                _context_repair_phase("parent-fsync", paths)
+                captured_pointer = switch_captured_pointer
+                selected_pointer_descriptor = os.dup(staged_pointer_descriptor)
+                prior_pointer_descriptor = os.dup(captured_pointer_descriptor)
+                parent = os.dup(pointer_parent_descriptor)
+                try:
+                    # Capture surfaces from retained descriptors before the
+                    # exchange, then prove both visible names against them.
+                    pointer_switch_unproven = True
+                    _rename_exchange(
+                        parent,
+                        pointer_tmp.name,
+                        paths.context_generation_pointer.name,
+                    )
+                    _context_repair_phase("exchange", paths)
+                    selected_pointer = _surface_snapshot(
+                        paths.context_generation_pointer
+                    )
+                    displaced = _surface_snapshot(pointer_tmp)
+                    if (
+                        not _same_link_identity(selected_pointer, staged_pointer)
+                        or not _descriptor_matches_link_surface(
+                            staged_pointer_descriptor, staged_pointer
+                        )
+                        or not _same_link_identity(displaced, captured_pointer)
+                        or not _descriptor_matches_link_surface(
+                            captured_pointer_descriptor, captured_pointer
+                        )
+                    ):
+                        raise DoctorError(
+                            "Context generation pointer CAS observed an unproven "
+                            "concurrent surface"
+                        )
+                    pointer_cutover_active = True
+                    pointer_switch_unproven = False
+                    os.fsync(parent)
+                    _context_repair_phase("parent-fsync", paths)
+                finally:
+                    os.close(parent)
             finally:
-                os.close(parent)
+                os.close(captured_pointer_descriptor)
         finally:
-            os.close(captured_pointer_descriptor)
             os.close(staged_pointer_descriptor)
         if _resolved_context_generation(paths) != generation:
             raise DoctorError("Context pointer switch did not select the captured generation")
@@ -6796,6 +7532,7 @@ def repair_context_launcher(
             try:
                 if (
                     pointer_tmp is None
+                    or pointer_parent_descriptor is None
                     or selected_pointer_descriptor is None
                     or prior_pointer_descriptor is None
                 ):
@@ -6808,6 +7545,7 @@ def repair_context_launcher(
                     staged_pointer,
                     captured_pointer,
                     retained_prior_pointer=pointer_tmp,
+                    pointer_parent_descriptor=pointer_parent_descriptor,
                     selected_pointer_descriptor=selected_pointer_descriptor,
                     prior_pointer_descriptor=prior_pointer_descriptor,
                 )
@@ -6821,6 +7559,18 @@ def repair_context_launcher(
                 f"installed Context shim cold probe failed after cutover; "
                 f"prior generation restored: {probe_exc}"
             ) from probe_exc
+        if not _context_pointer_pair_exact(
+            paths,
+            pointer_tmp,
+            staged_pointer,
+            captured_pointer,
+            pointer_parent_descriptor,
+            selected_pointer_descriptor,
+            prior_pointer_descriptor,
+        ):
+            raise DoctorError(
+                "Context pointer pair changed after cold probe and before receipt"
+            )
         try:
             receipt = _receipt(
                 paths,
@@ -6832,6 +7582,46 @@ def repair_context_launcher(
                     "runtime_hashes": selected["hashes"],
                 },
             )
+            if not _context_pointer_pair_exact(
+                paths,
+                pointer_tmp,
+                staged_pointer,
+                captured_pointer,
+                pointer_parent_descriptor,
+                selected_pointer_descriptor,
+                prior_pointer_descriptor,
+            ):
+                receipt_path = Path(receipt)
+                receipt_surface = _surface_snapshot(receipt_path)
+                try:
+                    _remove_exact_receipt(receipt_path, receipt_surface)
+                except Exception as cleanup_exc:
+                    raise _ReceiptPublicationAmbiguous(
+                        receipt_path,
+                        "Context pointer pair changed during receipt publication; "
+                        f"receipt cleanup is ambiguous: {cleanup_exc}",
+                    ) from cleanup_exc
+                raise DoctorError(
+                    "Context pointer pair changed during receipt publication; "
+                    "success receipt removed"
+                )
+        except _ReceiptPublicationAmbiguous as receipt_exc:
+            # Exact success bytes may already be durable.  Preserve the
+            # selected live pointer and both descriptor-bound identities for a
+            # deterministic replay; never pair that receipt with a rollback or
+            # report a terminal success whose receipt visibility is unknown.
+            receipt_commit_ambiguous = True
+            receipt_publication_warning = str(receipt_exc)
+            pointer_cutover_active = False
+            retained_displaced_pointer = {
+                "path": str(pointer_tmp),
+                "reason": (
+                    "retained because Context receipt publication is ambiguous; "
+                    "selected generation remains live"
+                ),
+                "identity": _surface_snapshot(pointer_tmp),
+            }
+            raise
         except Exception as receipt_exc:
             # A cutover without durable success evidence is not a completed
             # transaction. Restore the exact prior pointer for both the normal
@@ -6840,6 +7630,7 @@ def repair_context_launcher(
             try:
                 if (
                     pointer_tmp is None
+                    or pointer_parent_descriptor is None
                     or selected_pointer_descriptor is None
                     or prior_pointer_descriptor is None
                 ):
@@ -6852,6 +7643,7 @@ def repair_context_launcher(
                     staged_pointer,
                     captured_pointer,
                     retained_prior_pointer=pointer_tmp,
+                    pointer_parent_descriptor=pointer_parent_descriptor,
                     selected_pointer_descriptor=selected_pointer_descriptor,
                     prior_pointer_descriptor=prior_pointer_descriptor,
                 )
@@ -6872,37 +7664,41 @@ def repair_context_launcher(
         pointer_cutover_active = False
         if (
             pointer_tmp is None
+            or pointer_parent_descriptor is None
             or selected_pointer_descriptor is None
             or prior_pointer_descriptor is None
         ):
             raise DoctorError(
                 "post-cutover cleanup lacks retained pointer descriptors"
             )
-        try:
-            _finalize_context_generation_pointer(
-                paths,
-                staged_pointer,
-                captured_pointer,
-                retained_prior_pointer=pointer_tmp,
-                selected_pointer_descriptor=selected_pointer_descriptor,
-                prior_pointer_descriptor=prior_pointer_descriptor,
-            )
-            _context_repair_phase("displaced-pointer-unlink", paths)
-        except Exception as cleanup_exc:
-            pointer_cleanup_warning = str(cleanup_exc)
-            retained_displaced_pointer = {
-                "path": str(pointer_tmp),
-                "reason": (
-                    "retained after committed Context cutover because durable "
-                    "pointer cleanup did not complete"
-                ),
-                "identity": _surface_snapshot(pointer_tmp),
-            }
+        if receipt_publication_warning is None:
+            try:
+                _finalize_context_generation_pointer(
+                    paths,
+                    staged_pointer,
+                    captured_pointer,
+                    retained_prior_pointer=pointer_tmp,
+                    pointer_parent_descriptor=pointer_parent_descriptor,
+                    selected_pointer_descriptor=selected_pointer_descriptor,
+                    prior_pointer_descriptor=prior_pointer_descriptor,
+                )
+                _context_repair_phase("displaced-pointer-unlink", paths)
+            except Exception as cleanup_exc:
+                pointer_cleanup_warning = str(cleanup_exc)
+                retained_displaced_pointer = {
+                    "path": str(pointer_tmp),
+                    "reason": (
+                        "retained after committed Context cutover because durable "
+                        "pointer cleanup did not complete"
+                    ),
+                    "identity": _surface_snapshot(pointer_tmp),
+                }
     except Exception as exc:
         if pointer_cutover_active:
             try:
                 if (
                     pointer_tmp is None
+                    or pointer_parent_descriptor is None
                     or selected_pointer_descriptor is None
                     or prior_pointer_descriptor is None
                 ):
@@ -6915,6 +7711,7 @@ def repair_context_launcher(
                     staged_pointer,
                     captured_pointer,
                     retained_prior_pointer=pointer_tmp,
+                    pointer_parent_descriptor=pointer_parent_descriptor,
                     selected_pointer_descriptor=selected_pointer_descriptor,
                     prior_pointer_descriptor=prior_pointer_descriptor,
                 )
@@ -6924,11 +7721,17 @@ def repair_context_launcher(
                     f"Context launcher repair failed: {exc}; "
                     f"pointer rollback failed: {rollback_exc}"
                 ) from exc
+        if receipt_commit_ambiguous:
+            # The success receipt may be durable.  The inner transaction has
+            # deliberately retained both pointer identities and disabled
+            # rollback; preserve the typed outcome for deterministic replay.
+            raise
         if (
             regular
             and migration_old_generation is not None
             and not post_cutover_probe_failed
             and not pointer_switch_unproven
+            and not receipt_commit_ambiguous
         ):
             try:
                 for key, surface, _entrypoint in surfaces:
@@ -6965,6 +7768,8 @@ def repair_context_launcher(
             os.close(prior_pointer_descriptor)
         if selected_pointer_descriptor is not None:
             os.close(selected_pointer_descriptor)
+        if pointer_parent_descriptor is not None:
+            os.close(pointer_parent_descriptor)
     restart_report = _context_restart_report(paths)
     return {
         "ok": True,
@@ -6983,6 +7788,7 @@ def repair_context_launcher(
         "receipt": receipt,
         "retained_displaced_pointer": retained_displaced_pointer,
         "pointer_cleanup_warning": pointer_cleanup_warning,
+        "receipt_publication_warning": receipt_publication_warning,
         "post_cutover_cold_stdio_probe": probe,
         **restart_report,
     }
@@ -7157,7 +7963,7 @@ def repair_context(
         or not isinstance(task.get("next_bindings"), Mapping)
     )
     if review_binding is not None or transition_projection_required:
-        migration_changes, transition_review_bindings = (
+        migration_changes, _migration_review_bindings = (
             _stage_context_transition_projections(
                 paths,
                 task,
@@ -7195,6 +8001,10 @@ def repair_context(
         source_commit=head,
         source_tree=tree,
     )
+    # Publication always fences the complete successor projection.  Migration
+    # is only one way these review paths can enter the task; an already-current
+    # task must receive the same byte-level transactional protection.
+    transition_review_bindings = _context_projection_review_bindings(task)
     paths.context_cursor.parent.mkdir(parents=True, exist_ok=True)
     task_fd, task_text = tempfile.mkstemp(
         prefix=paths.context_task.name + ".doctor-stage.",
@@ -7416,7 +8226,56 @@ def repair_context(
                 before,
                 {"task": task, "cursor": cursor, "snapshot": after},
             )
+            receipt_path = Path(receipt)
+            receipt_surface = _surface_snapshot(receipt_path)
+            try:
+                if (
+                    _surface_snapshot(paths.context_task) != committed_task
+                    or _surface_snapshot(paths.context_cursor) != committed_cursor
+                    or _surface_snapshot(paths.context_snapshot) != committed_snapshot
+                ):
+                    raise DoctorError(
+                        "Context transaction changed during receipt publication"
+                    )
+                receipted_head, receipted_tree, receipted_status = _source_identity(
+                    paths
+                )
+                if receipted_status or (receipted_head, receipted_tree) != (
+                    head,
+                    tree,
+                ):
+                    raise DoctorError(
+                        "canonical source changed during Context receipt publication"
+                    )
+                if _plan_evidence_identity(paths, task) != current_plan_evidence:
+                    raise DoctorError(
+                        "current Plan evidence changed during Context receipt publication"
+                    )
+                for binding in transition_review_bindings:
+                    if (
+                        _surface_snapshot(Path(str(binding["path"])))
+                        != binding["surface"]
+                    ):
+                        raise DoctorError(
+                            f"{binding['label']} changed during Context receipt publication"
+                        )
+            except Exception as evidence_exc:
+                try:
+                    _remove_exact_receipt(receipt_path, receipt_surface)
+                except Exception as cleanup_exc:
+                    raise _ReceiptPublicationAmbiguous(
+                        receipt_path,
+                        "Context changed during success receipt publication "
+                        f"({evidence_exc}); exact receipt cleanup is ambiguous "
+                        f"({cleanup_exc})",
+                    ) from evidence_exc
+                raise
         except Exception as exc:
+            if isinstance(exc, _ReceiptPublicationAmbiguous):
+                # Success bytes may already be durable.  Keep the exact
+                # task/cursor/snapshot transaction paired with those bytes and
+                # fail explicitly so replay can establish a terminal result.
+                raise
             rollback_errors: list[str] = []
             rollback_states: list[str] = []
             for label, path, committed, original in (
@@ -8066,7 +8925,12 @@ def _authenticate_pre_ledger_preservation(worktree: Path, descriptor: int, group
             os.close(receipt_identity_fd)
 
 
-def _rename_exchange(directory_descriptor: int, first: str, second: str) -> None:
+def _rename_exchange_at(
+    first_directory_descriptor: int,
+    first: str,
+    second_directory_descriptor: int,
+    second: str,
+) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
@@ -8080,15 +8944,24 @@ def _rename_exchange(directory_descriptor: int, first: str, second: str) -> None
     ]
     renameat2.restype = ctypes.c_int
     result = renameat2(
-        directory_descriptor,
+        first_directory_descriptor,
         os.fsencode(first),
-        directory_descriptor,
+        second_directory_descriptor,
         os.fsencode(second),
         _RENAME_EXCHANGE,
     )
     if result != 0:
         error = ctypes.get_errno()
         raise DoctorError(f"cannot atomically exchange files: {os.strerror(error)}")
+
+
+def _rename_exchange(directory_descriptor: int, first: str, second: str) -> None:
+    _rename_exchange_at(
+        directory_descriptor,
+        first,
+        directory_descriptor,
+        second,
+    )
 
 
 def _detach_pack_hardlink(
@@ -11296,6 +12169,17 @@ _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
     "obsolete-surfaces": repair_obsolete_surfaces,
 }
 
+_REPAIR_POSTCONDITIONS: dict[str, tuple[str, ...]] = {
+    "context": ("context.snapshot",),
+    "context-launcher": ("context.launcher",),
+    "runtime": ("runtime.local-coding",),
+    "database": ("database.local-coding",),
+    "unix-git-access": ("access.unix-group",),
+    "workers": ("services.local-coding",),
+    "plan-render-worker": ("services.plan-render",),
+    "obsolete-surfaces": ("cleanup.obsolete-active-surfaces",),
+}
+
 
 def repair(
     operation: str,
@@ -11371,6 +12255,18 @@ def repair(
             else:
                 result = function(paths)
             result = {**result, "started_receipt": started_receipt}
+        except _ReceiptPublicationAmbiguous as exc:
+            # This is neither terminal success nor terminal failure: exact
+            # success bytes may already be durable, so a generic failure
+            # receipt would contradict them. Preserve the typed state and let
+            # the next locked replay reconcile it.
+            detail = (
+                f"{exc}; started receipt: {started_receipt}; "
+                f"possible success receipt: {exc.path}; state preserved for replay"
+            )
+            exc.args = (detail, *exc.args[1:])
+            exc.add_note("generic failure receipt intentionally not emitted")
+            raise
         except Exception as exc:
             try:
                 receipt = _receipt(
@@ -11396,14 +12292,28 @@ def repair(
         if isinstance(context_client_check, Mapping)
         else "UNKNOWN"
     )
-    # The bounded repair verifies its own mutation before returning. Context
-    # client inventory is a best-effort orientation snapshot: /proc offers no
-    # global process-set fence, and it must never become a completion gate for
-    # this or any unrelated subsystem.
-    verification_complete = result.get("ok") is True
+    checks_by_id = {
+        str(item.get("id")): item
+        for item in diagnosis.get("checks", [])
+        if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+    }
+    target_postconditions = {
+        check_id: (
+            checks_by_id[check_id].get("state")
+            if check_id in checks_by_id
+            else "UNKNOWN"
+        )
+        for check_id in _REPAIR_POSTCONDITIONS[operation]
+    }
+    # Only the selected repair's own postconditions are completion-relevant.
+    # Every unrelated diagnostic—including best-effort /proc Context client
+    # inventory—remains advisory and cannot become an implicit global gate.
+    verification_complete = result.get("ok") is True and all(
+        state == "PASS" for state in target_postconditions.values()
+    )
     return {
         "schema": "tgw-local-doctor-repair/v1",
-        "ok": result.get("ok") is True,
+        "ok": verification_complete,
         "operation": operation,
         "mutation_applied": result.get("changed") is True,
         "verification_complete": verification_complete,
@@ -11414,6 +12324,7 @@ def repair(
             else None
         ),
         "context_client_inventory_non_gating": True,
+        "target_postconditions": target_postconditions,
         "results": [result],
         "diagnosis": diagnosis,
     }

@@ -745,6 +745,18 @@ def test_context_transition_review_binding_rejects_conflicting_subjects(
         "- Candidate tree: `{tree}`\n</pre>\n",
         "<details>\n- Candidate commit: `{commit}`\n"
         "- Candidate tree: `{tree}`\n</details>\n",
+        "<script>\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n</script>\n",
+        "<style>\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n</style>\n",
+        "<textarea>\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n</textarea>\n",
+        "<div>\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n</div>\n",
+        "<!-- closed --><!--\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n-->\n",
+        "<script></script><style>\n- Candidate commit: `{commit}`\n"
+        "- Candidate tree: `{tree}`\n</style>\n",
     ],
     ids=(
         "backtick-fence",
@@ -757,6 +769,12 @@ def test_context_transition_review_binding_rejects_conflicting_subjects(
         "html-comment",
         "pre-container",
         "details-container",
+        "script-container",
+        "style-container",
+        "textarea-container",
+        "div-container",
+        "sequential-comment",
+        "sequential-container",
     ),
 )
 def test_context_transition_review_binding_rejects_quoted_only_subject(
@@ -786,7 +804,8 @@ def test_context_transition_review_binding_rejects_quoted_only_subject(
     "subject",
     [
         "Exact candidate:\n\n- Commit: `{commit}`\n- Tree: `{tree}`\n",
-        "- Immutable bindings: `{commit}` are exact and tree `{tree}`\n",
+        "- Immutable bindings: `{commit}` has one parent and tree `{tree}`. "
+        f"The predecessor tree is `{'c' * 40}`.\n",
     ],
     ids=("exact-candidate", "immutable-bindings"),
 )
@@ -822,6 +841,64 @@ def test_context_transition_review_binding_ignores_quoted_decoy(
         f"- Candidate commit: `{'c' * 40}`\n"
         f"- Candidate tree: `{'d' * 40}`\n"
         "```\n",
+        encoding="utf-8",
+    )
+
+    binding = doctor_cli._context_transition_review_binding(
+        report,
+        commit=commit,
+        tree=tree,
+    )
+
+    assert binding["candidate_commit"] == commit
+    assert binding["candidate_tree"] == tree
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "- Candidate commit: `abc123`\n",
+        "- Candidate tree: `abc123`\n",
+        "- Candidate commit: `{commit}\n",
+        "- Immutable bindings: `{commit}` without a bound tree\n",
+        "Exact candidate without a colon\n",
+    ],
+)
+def test_context_transition_review_binding_rejects_malformed_root_cue(
+    tmp_path: Path,
+    malformed: str,
+) -> None:
+    commit = "a" * 40
+    tree = "b" * 40
+    report = tmp_path / "review.md"
+    report.write_text(
+        malformed.format(commit=commit)
+        + f"- Candidate commit: `{commit}`\n"
+        + "   \n"
+        + f"- Candidate tree: `{tree}`\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        doctor_cli.DoctorError,
+        match="ambiguous candidate fields",
+    ):
+        doctor_cli._context_transition_review_binding(
+            report,
+            commit=commit,
+            tree=tree,
+        )
+
+
+def test_context_transition_review_binding_accepts_whitespace_blank_separator(
+    tmp_path: Path,
+) -> None:
+    commit = "a" * 40
+    tree = "b" * 40
+    report = tmp_path / "review.md"
+    report.write_text(
+        f"- Candidate commit: `{commit}`\n   \n"
+        f"- Candidate tree: `{tree}`\n",
         encoding="utf-8",
     )
 
@@ -1255,7 +1332,16 @@ def _stub_context_repair_wrapper(
             "ok": post_diagnosis_ok,
             "state": "ATTENTION" if post_diagnosis_ok else "FAILED",
             "checks": [
-                {"id": "context.clients", "state": inventory_state}
+                {
+                    "id": doctor_cli._REPAIR_POSTCONDITIONS[operation][0],
+                    "state": "PASS",
+                },
+                {"id": "context.clients", "state": inventory_state},
+                *(
+                    [{"id": "unrelated.fixture", "state": "FAIL"}]
+                    if not post_diagnosis_ok
+                    else []
+                ),
             ],
         },
     )
@@ -1328,6 +1414,40 @@ def test_bounded_repair_ignores_unrelated_failed_diagnosis(
     assert result["context_client_inventory_state"] == "UNKNOWN"
     assert result["client_restart_evidence_ok"] is None
     assert result["diagnosis"]["ok"] is False
+
+
+@pytest.mark.parametrize("target_state", ["FAIL", "UNKNOWN"])
+def test_bounded_repair_requires_its_selected_postcondition(
+    monkeypatch: pytest.MonkeyPatch,
+    target_state: str,
+) -> None:
+    _stub_context_repair_wrapper(
+        monkeypatch,
+        inventory_state="WARN",
+        restart_evidence_ok=False,
+        operation="context",
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "diagnose",
+        lambda _paths: {
+            "ok": False,
+            "state": "FAILED",
+            "checks": [
+                {"id": "context.snapshot", "state": target_state},
+                {"id": "context.clients", "state": "WARN"},
+            ],
+        },
+    )
+
+    result = doctor_cli.repair("context", doctor_cli.DoctorPaths())
+
+    assert result["ok"] is False
+    assert result["mutation_applied"] is True
+    assert result["verification_complete"] is False
+    assert result["target_postconditions"] == {
+        "context.snapshot": target_state
+    }
 
 
 def test_repair_cli_exits_nonzero_when_context_verification_is_incomplete(
@@ -5891,7 +6011,9 @@ def test_context_repair_rolls_back_if_external_binding_changes_across_snapshot_c
 
 
 @pytest.mark.parametrize("review_kind", ["current", "item", "plan"])
-@pytest.mark.parametrize("phase", ["during-probe", "after-snapshot-cas"])
+@pytest.mark.parametrize(
+    "phase", ["during-probe", "after-snapshot-cas", "during-receipt"]
+)
 def test_context_transition_fences_every_review_surface_across_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5900,31 +6022,17 @@ def test_context_transition_fences_every_review_surface_across_publication(
 ) -> None:
     paths, head, tree = _fixture(tmp_path)
     task = json.loads(paths.context_task.read_text())
-    cursor = json.loads(paths.context_cursor.read_text())
     review_evidence: Path | None = None
     desired_commit: str | None = None
     source_root: Path | None = None
-    if review_kind == "current":
-        review_evidence = Path(
-            task["implementation"]["development_source"]["review"]
-        )
-        desired_commit = head
-        source_root = tmp_path / "exact-source"
-    else:
-        task["review_admission"] = {
-            "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
-            "legacy": True,
-        }
-        task.pop("next_binding_policy")
-        task.pop("next_bindings")
-        _write_json(paths.context_task, task)
-        _write_json(paths.context_snapshot, _snapshot(task, cursor))
 
     target = {
         "current": Path(task["implementation"]["development_source"]["review"]),
         "item": Path(task["tracks"]["item_workflow"]["review_path"]),
         "plan": Path(task["plan"]["todo_1916"]["review_path"]),
     }[review_kind]
+    if phase == "after-snapshot-cas":
+        paths.context_snapshot.chmod(0o640)
     live_before = {
         path: doctor_cli._surface_snapshot(path)
         for path in (
@@ -5936,6 +6044,7 @@ def test_context_transition_fences_every_review_surface_across_publication(
     selected = doctor_cli._selected_context_artifacts(paths)
     original_run = doctor_cli._run
     original_cas = doctor_cli._cas_regular_file
+    original_receipt = doctor_cli._receipt
     mutated = False
 
     def mutate_review() -> None:
@@ -5973,6 +6082,12 @@ def test_context_transition_fences_every_review_surface_across_publication(
             mutate_review()
         return result
 
+    def receipt(observed_paths, operation, *args, **kwargs):
+        result = original_receipt(observed_paths, operation, *args, **kwargs)
+        if phase == "during-receipt" and operation == "context":
+            mutate_review()
+        return result
+
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
     monkeypatch.setattr(
         doctor_cli,
@@ -5987,6 +6102,7 @@ def test_context_transition_fences_every_review_surface_across_publication(
     monkeypatch.setattr(doctor_cli, "_run", run)
     monkeypatch.setattr(doctor_cli, "_probe_context_stdio", probe)
     monkeypatch.setattr(doctor_cli, "_cas_regular_file", cas)
+    monkeypatch.setattr(doctor_cli, "_receipt", receipt)
     monkeypatch.setattr(
         doctor_cli, "_require_trusted_root_program", lambda *_args: None
     )
@@ -6005,6 +6121,125 @@ def test_context_transition_fences_every_review_surface_across_publication(
             doctor_cli._surface_snapshot(path)
         ) == doctor_cli._surface_semantics(expected)
     assert not list(paths.receipts.glob("*-context.json"))
+
+
+def test_context_ambiguous_receipt_cleanup_preserves_committed_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, head, tree = _fixture(tmp_path)
+    cursor = json.loads(paths.context_cursor.read_text())
+    cursor["source_commit"] = "b" * 40
+    cursor["source_tree"] = "c" * 40
+    _write_json(paths.context_cursor, cursor)
+    selected = doctor_cli._selected_context_artifacts(paths)
+    task = json.loads(paths.context_task.read_text())
+    review_path = Path(task["implementation"]["development_source"]["review"])
+    original_run = doctor_cli._run
+    original_receipt = doctor_cli._receipt
+
+    def run(command, **kwargs):
+        if Path(command[0]).name == "tgw_context_publish.py":
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            output_path.write_bytes(
+                publish_bytes(
+                    json.loads(task_path.read_text()),
+                    json.loads(cursor_path.read_text()),
+                )
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    def receipt(observed_paths, operation, *args, **kwargs):
+        result = original_receipt(observed_paths, operation, *args, **kwargs)
+        if operation == "context":
+            review_path.write_text(
+                review_path.read_text(encoding="utf-8") + "post-receipt change\n",
+                encoding="utf-8",
+            )
+        return result
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_repair_context_artifacts",
+        lambda *_args, **_kwargs: selected,
+    )
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
+    monkeypatch.setattr(doctor_cli, "_receipt", receipt)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_remove_exact_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("injected exact-receipt cleanup failure")
+        ),
+    )
+    monkeypatch.setattr(
+        doctor_cli, "_require_trusted_root_program", lambda *_args: None
+    )
+
+    with pytest.raises(
+        doctor_cli._ReceiptPublicationAmbiguous,
+        match="receipt cleanup is ambiguous",
+    ):
+        doctor_cli.repair_context(paths)
+
+    committed_cursor = json.loads(paths.context_cursor.read_text())
+    assert committed_cursor["source_commit"] == head
+    assert committed_cursor["source_tree"] == tree
+    assert list(paths.receipts.glob("*-context.json"))
+
+
+def test_public_repair_preserves_typed_receipt_ambiguity_without_failure_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = replace(
+        doctor_cli.DoctorPaths(), receipts=tmp_path / "doctor-receipts"
+    )
+    possible_success = paths.receipts / "possible-context.json"
+
+    def ambiguous(*_args, **_kwargs):
+        raise doctor_cli._ReceiptPublicationAmbiguous(
+            possible_success, "injected ambiguous Context receipt"
+        )
+
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setitem(doctor_cli._REPAIRS, "context", ambiguous)
+
+    with pytest.raises(
+        doctor_cli._ReceiptPublicationAmbiguous,
+        match="state preserved for replay",
+    ):
+        doctor_cli.repair("context", paths)
+
+    assert list(paths.receipts.glob("*-context-started.json"))
+    assert not list(paths.receipts.glob("*-context-failed.json"))
+
+
+def test_main_reports_receipt_ambiguity_as_typed_nonterminal_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    possible_success = tmp_path / "possible-context.json"
+
+    def ambiguous(*_args, **_kwargs):
+        raise doctor_cli._ReceiptPublicationAmbiguous(
+            possible_success, "injected ambiguous Context receipt"
+        )
+
+    monkeypatch.setattr(doctor_cli, "repair", ambiguous)
+
+    assert doctor_cli.main(["repair", "context", "--commit", "a" * 40]) == 2
+    error = json.loads(capsys.readouterr().err)
+    assert error["ok"] is False
+    assert error["error_type"] == "_ReceiptPublicationAmbiguous"
 
 
 def test_explicit_exact_context_repair_reconciles_stale_task_source_without_authority_gate(
