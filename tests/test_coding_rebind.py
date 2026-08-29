@@ -118,3 +118,16 @@ def test_rebind_refuses_closed_todo(tmp_path, monkeypatch):
     _setup(monkeypatch, tmp_path, item=item, prior=None)
     with pytest.raises(coding_cli.CodingCLIError, match="not an open Todo"):
         coding_cli.rebind(1922, config_path=Path("/nonexistent"))
+
+
+def test_rebind_accepts_worktree_with_workflow_evidence_files(tmp_path, monkeypatch):
+    worktree = _git_repo(tmp_path / "wt")
+    (worktree / "implementation-receipt.json").write_text("{}", encoding="utf-8")
+    (worktree / "review-receipt.json").write_text("{}", encoding="utf-8")
+    history = worktree / ".tgw-coding-history" / "implementation"
+    history.mkdir(parents=True)
+    (history / "state.json").write_text("{}", encoding="utf-8")
+    prior = {"state": "FAILED", "root_id": "coding:abc", "binding": {"worktree": str(worktree)}}
+    _setup(monkeypatch, tmp_path, item=_open_item(), prior=prior)
+    result = coding_cli.rebind(1922, config_path=Path("/nonexistent"))
+    assert result["ok"] is True

@@ -37,7 +37,9 @@ from tgw.development.local_workflow import (
     status_command,
 )
 from tgw.development.partial_resume import (
+    HISTORY,
     LEGACY_1747,
+    PRESERVATION,
     classify,
     migrate_todo_1747,
     preservation_manifest,
@@ -1950,6 +1952,51 @@ def _target(args: argparse.Namespace) -> str | None:
     return getattr(args, "coding_target", None) or getattr(args, "request_id", None)
 
 
+_RECEIPT_FILES = frozenset({
+    "implementation-receipt.json",
+    "controller-harness-receipt.json",
+    "review-receipt.json",
+    "deployment-receipt.json",
+    "stitch-receipt.json",
+    "operator-admit-pending.json",
+})
+_HISTORY_ROOT = HISTORY.split("/", 1)[0]
+_PRESERVATION_ROOT = PRESERVATION.split("/", 1)[0]
+
+
+def _worktree_source_status(worktree: str) -> str:
+    """Worktree status excluding workflow-evidence files (receipts/history).
+
+    The rebind cleanliness check must ignore the untracked receipt and
+    partial-resume trees that legitimately live in a closed candidate worktree,
+    or every closed candidate is misread as dirty (the same defect the review
+    worker had before the 1923 fix).
+    """
+    status = subprocess.run(
+        ["git", "-c", f"safe.directory={worktree}", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=worktree,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if status.returncode:
+        raise CodingCLIError("worktree status probe failed during rebind")
+    kept = []
+    for line in status.stdout.splitlines():
+        if len(line) < 4:
+            kept.append(line)
+            continue
+        path = line[3:]
+        if path in _RECEIPT_FILES:
+            continue
+        if path == _HISTORY_ROOT or path.startswith(_HISTORY_ROOT + "/"):
+            continue
+        if path == _PRESERVATION_ROOT or path.startswith(_PRESERVATION_ROOT + "/"):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def rebind(
     todo_id: int | str,
     *,
@@ -1979,14 +2026,7 @@ def rebind(
         )
     worktree = prior.get("binding", {}).get("worktree")
     if isinstance(worktree, str) and worktree:
-        status = subprocess.run(
-            ["git", "-c", f"safe.directory={worktree}", "status", "--porcelain"],
-            cwd=worktree,
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        if status.returncode or status.stdout.strip():
+        if _worktree_source_status(worktree):
             raise CodingCLIError(
                 f"Todo {identifier} worktree is not clean; rebind refuses a dirty worktree"
             )
