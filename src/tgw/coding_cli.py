@@ -597,9 +597,8 @@ def resume(
         and isinstance(record.get("resume_intent"), Mapping)
         else None
     )
-    if record is not None and (
-        live_resume is not None
-        or (record.get("state") != "RESUMABLE_PARTIAL" and active_resume is not None)
+    if record is not None and record.get("state") != "RESUMABLE_PARTIAL" and (
+        live_resume is not None or active_resume is not None
     ):
         intent_hash = (
             (live_resume.get("resume_intent_hash") if live_resume else None)

@@ -951,7 +951,14 @@ def test_disposable_start_partial_resume_closes_exact_successor(
         "RESUMABLE_PARTIAL",
         "implementation",
     )
+    # Old journals can have reached the second partial before one-shot intent
+    # consumption existed. The CLI must rotate that stale live intent rather
+    # than returning a false resume_reused no-op forever.
+    stale_generation = partial_again.pop("active_implementation_generation")
+    partial_again["resume_intent"] = stale_generation["intent"]
+    store.put(partial_again)
     resumed_again = coding_cli.resume(1915, config_path=tmp_path / "coding.json")
+    assert "resume_reused" not in resumed_again
     assert resumed_again["resume_intent_hash"] != resumed["resume_intent_hash"]
     assert job_binding(store.find(1915)) != second_fence
     waiting = coding_cli.supervise(
