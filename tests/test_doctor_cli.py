@@ -503,6 +503,8 @@ def test_explicit_context_transition_migrates_legacy_projection_without_relabell
     task.pop("next_binding_policy")
     task.pop("next_bindings")
     task["next"] = [f"Verify exact predecessor {head} before continuing."]
+    task["tracks"]["item_workflow"]["review_sha256"] = "sha256:" + "0" * 64
+    task["plan"]["todo_1916"]["review_sha256"] = "sha256:" + "0" * 64
     review = tmp_path / "successor-review.md"
     review.write_text(f"candidate {head}\ntree {tree}\n", encoding="utf-8")
 
@@ -542,6 +544,18 @@ def test_explicit_context_transition_migrates_legacy_projection_without_relabell
         "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
     }
     assert prior_review != task["review_admission"]
+    assert task["tracks"]["item_workflow"]["review_sha256"] == (
+        "sha256:"
+        + hashlib.sha256(
+            Path(task["tracks"]["item_workflow"]["review_path"]).read_bytes()
+        ).hexdigest()
+    )
+    assert task["plan"]["todo_1916"]["review_sha256"] == (
+        "sha256:"
+        + hashlib.sha256(
+            Path(task["plan"]["todo_1916"]["review_path"]).read_bytes()
+        ).hexdigest()
+    )
     migration = task["explicit_projection_migration_history"][-1]
     assert migration["authority"] is False
     claimed = migration.pop("migration_hash")

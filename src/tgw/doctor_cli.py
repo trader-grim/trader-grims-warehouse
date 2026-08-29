@@ -878,7 +878,6 @@ def _stage_context_transition_projections(
         "tree",
         "generation",
         "review_path",
-        "review_sha256",
         "operator_acceptance",
     )
     if any(not item.get(key) for key in required_item):
@@ -887,12 +886,21 @@ def _stage_context_transition_projections(
         "candidate_commit",
         "candidate_tree",
         "review_path",
-        "review_sha256",
         "review_disposition",
     )
     if any(not todo_1916.get(key) for key in required_plan_review):
         raise DoctorError("current task Plan review evidence is incomplete")
     plan_commit, plan_tree = _plan_repository_evidence_identity(paths, plan)
+    item_review = _context_transition_review_binding(
+        Path(str(item["review_path"])),
+        commit=str(item["commit"]),
+        tree=str(item["tree"]),
+    )
+    plan_review = _context_transition_review_binding(
+        Path(str(todo_1916["review_path"])),
+        commit=str(todo_1916["candidate_commit"]),
+        tree=str(todo_1916["candidate_tree"]),
+    )
 
     previous = {
         "development_source": json.loads(json.dumps(development)),
@@ -906,6 +914,8 @@ def _stage_context_transition_projections(
 
     review_path = str(review["path"])
     review_sha256 = str(review["sha256"])
+    item["review_sha256"] = item_review["sha256"]
+    todo_1916["review_sha256"] = plan_review["sha256"]
     development.update(
         {
             "candidate_worktree": str(paths.repository),
