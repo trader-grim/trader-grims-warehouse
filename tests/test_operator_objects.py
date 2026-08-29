@@ -327,6 +327,93 @@ def test_optional_108857_keeps_independent_record_condition_and_global_vocabular
         )
 
 
+def test_empty_record_condition_vocabulary_is_displayable_but_fail_closed():
+    item = _item()
+    item["condition"] = "Existing Grade"
+    published = build_item_operator_object(
+        item=item,
+        workflow_card=_workflow_card(),
+        category_context=_policy_context(
+            category_groups=[{"value": "paper", "label": "Paper"}],
+            record_condition_vocabulary=[],
+        ),
+    )
+
+    condition = published["field_schema"]["item_fields"]["condition"]
+    assert condition["value"] == "Existing Grade"
+    assert condition["options"] == [{
+        "value": "Existing Grade",
+        "label": (
+            "Existing Grade — unavailable until vocabulary is repaired"
+        ),
+        "display_only": True,
+    }]
+    assert published["field_schema"]["record_condition_vocabulary_drift"] == {
+        "empty": True,
+        "casefold_collisions": [],
+    }
+    assert validate_operator_command_values(
+        published,
+        "save-inventory",
+        {"item_fields": {"notes": "repair unrelated field"}},
+    ) == {"item_fields": {"notes": "repair unrelated field"}}
+    with pytest.raises(OperatorObjectBindingError, match="allowed value"):
+        validate_operator_command_values(
+            published,
+            "save-inventory",
+            {"item_fields": {"condition": "FABRICATED"}},
+        )
+
+
+@pytest.mark.parametrize(
+    "vocabulary",
+    [
+        ["Good", "GOOD", "New"],
+        ["GOOD", "Good", "New"],
+    ],
+)
+def test_casefold_colliding_record_conditions_are_deterministic_and_unwritable(
+    vocabulary,
+):
+    item = _item()
+    item["condition"] = "Good"
+    published = build_item_operator_object(
+        item=item,
+        workflow_card=_workflow_card(),
+        category_context=_policy_context(
+            category_groups=[{"value": "paper", "label": "Paper"}],
+            record_condition_vocabulary=vocabulary,
+        ),
+    )
+
+    schema = published["field_schema"]
+    assert schema["record_condition_vocabulary_drift"] == {
+        "empty": False,
+        "casefold_collisions": [{
+            "identity": "good",
+            "values": ["GOOD", "Good"],
+        }],
+    }
+    command_condition = next(
+        command
+        for command in published["commands"]
+        if command["id"] == "save-inventory"
+    )["input_schema"]["properties"]["item_fields"]["properties"]["condition"]
+    assert command_condition["enum"] == ["New"]
+    assert validate_operator_command_values(
+        published,
+        "save-inventory",
+        {"item_fields": {"condition": "new"}},
+    ) == {"item_fields": {"condition": "New"}}
+    for ambiguous in ("Good", "GOOD", "good"):
+        with pytest.raises(OperatorObjectBindingError, match="allowed value"):
+            validate_operator_command_values(
+                published,
+                "save-inventory",
+                {"item_fields": {"condition": ambiguous}},
+            )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

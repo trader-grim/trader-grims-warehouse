@@ -46,7 +46,7 @@ from .ebay.draft_specifics import get_ebay_aspects, set_ebay_aspects
 from .ebay.draft_specifics import is_envelope as _is_ebay_draft_envelope
 from .ebay.inventory_diff import apply_inventory_diff, diff_ebay_draft_to_inventory
 from .item_mutation import item_generation, item_mutation_lock
-from .items import _archive_before_overwrite, atomic_write_json, create_item, locationupdate
+from .items import _archive_before_overwrite, atomic_write_json, create_item, sync_location_tree
 from .operator_console_host import configured_authority_principal, configured_console_mount
 from .operator_console_plugin import mount_operator_console
 from .plan_authority import AuthorityPrincipal, PrincipalRole
@@ -1538,9 +1538,10 @@ def patch_item(
     request: Request,
     operator_identity: str = Depends(_require_fence_patch_auth),
 ) -> Dict[str, Any]:
-    if "sku" in body.fields:
+    fields = dict(body.fields)
+    if "sku" in fields:
         raise HTTPException(status_code=400, detail="sku field is immutable")
-    if not body.fields:
+    if not fields:
         raise HTTPException(status_code=400, detail="no fields provided")
 
     # Only the in-process published-command executor can possess this identity
@@ -1576,7 +1577,7 @@ def patch_item(
         "draft_listing_state",
         "status",
     }
-    forbidden_evidence = sorted(workflow_evidence_fields.intersection(body.fields))
+    forbidden_evidence = sorted(workflow_evidence_fields.intersection(fields))
     if forbidden_evidence:
         raise HTTPException(
             status_code=409,
@@ -1589,7 +1590,7 @@ def patch_item(
                 ),
             },
         )
-    if "draft_listing" in body.fields and not operator_object_write:
+    if "draft_listing" in fields and not operator_object_write:
         raise HTTPException(
             status_code=409,
             detail={
@@ -1600,13 +1601,13 @@ def patch_item(
             },
         )
     if not _is_machine_caller:
-        _ia = body.fields.get("item_attributes")
+        _ia = fields.get("item_attributes")
         if isinstance(_ia, dict) and inventory_record.is_envelope(_ia):
             raise HTTPException(
                 status_code=422,
                 detail=("item_attributes must be a bare field-update dict, not a full Set A envelope, from a non-machine caller — invariant C12/C14, todo #1464"),
             )
-        _dl_for_gate = body.fields.get("draft_listing")
+        _dl_for_gate = fields.get("draft_listing")
         _isp = _dl_for_gate.get("item_specifics") if isinstance(_dl_for_gate, dict) else None
         if isinstance(_isp, dict) and _is_ebay_draft_envelope(_isp):
             raise HTTPException(
@@ -1618,42 +1619,9 @@ def patch_item(
     if not json_path.exists():
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
 
-    # Handle location specially — must keep location tree in sync
-    location_value: Optional[str] = None
-    if "location" in body.fields:
-        location_value = body.fields.pop("location")
-
     # The published operator-object command owns draft lifecycle changes.
     # Generic PATCH, including the machine fence, cannot synthesize this
     # evaluator-visible evidence.
-
-    doc_before = load_item_doc(json_path)
-
-    # Self-resolving guard findings: if this edit fixes the persisted
-    # condition (e.g. no_price_set and the patch sets a price), clear the
-    # finding in the same write — the operator should never have to clear
-    # an error the system can verify is gone. Rejection errors are kept:
-    # editing one field does not prove the rejected content was fixed.
-    _new_dl_fields = body.fields.get("draft_listing")
-    if isinstance(_new_dl_fields, dict) and doc_before.get("pipeline_error"):
-        _merged_dl = {**(doc_before.get("draft_listing") or {}), **_new_dl_fields}
-        _resolved = draft_sync.resolve_pipeline_error(doc_before["pipeline_error"], _merged_dl, clear_rejections=False)
-        if _resolved is None:
-            body.fields["pipeline_error"] = None
-
-    # listing_description is a derived cache (AI description + boilerplate +
-    # picklist line, built by build_listing_description()) that stage_draft()
-    # prefers over the plain description field when pushing to eBay (sync.py
-    # ~line 453). If a patch edits draft_listing.description without also
-    # supplying listing_description, the cache goes stale and every future
-    # eBay push silently re-sends the old text — found live on
-    # tgw202605040949058, where 9 ebay_stage jobs "succeeded" while pushing
-    # stale AI text over the operator's edits. Regenerate it here so the
-    # cache can never outlive the field it's derived from.
-    if isinstance(_new_dl_fields, dict) and "description" in _new_dl_fields and "listing_description" not in _new_dl_fields:
-        _merged_dl_for_desc = {**(doc_before.get("draft_listing") or {}), **_new_dl_fields}
-        _item_for_desc = {**doc_before, "draft_listing": _merged_dl_for_desc}
-        _new_dl_fields["listing_description"] = build_listing_description(_item_for_desc, _cfg)
 
     # PP-CONDITION-ENUM-001 / todo #1562: draft_listing.condition_enum is a
     # known-vocabulary field (10 Inventory API enum strings) — a caller
@@ -1666,8 +1634,9 @@ def patch_item(
     # conservative: a value that isn't even a real enum is always wrong,
     # while a real-but-category-mismatched enum is a softer case the
     # Draft Editor's dropdown already surfaces for operator review.
-    if isinstance(_new_dl_fields, dict) and "condition_enum" in _new_dl_fields:
-        _ce = _new_dl_fields.get("condition_enum")
+    supplied_draft_fields = fields.get("draft_listing")
+    if isinstance(supplied_draft_fields, dict) and "condition_enum" in supplied_draft_fields:
+        _ce = supplied_draft_fields.get("condition_enum")
         from .apis.ebay.conditions import is_known_condition_enum
 
         if _ce and not is_known_condition_enum(_ce):
@@ -1683,11 +1652,120 @@ def patch_item(
             )
 
     try:
-        updated_keys, resulting_generation = _apply_patch(
-            json_path,
-            body.fields,
-            expected_generation=body.expected_generation,
-        )
+        with item_mutation_lock(
+            journal_root=_item_mutation_journal_root(json_path),
+            sku=sku,
+        ):
+            doc_before = load_item_doc(json_path)
+            observed_generation = item_generation(doc_before)
+            if (
+                body.expected_generation is not None
+                and observed_generation != body.expected_generation
+            ):
+                raise _ItemGenerationConflict(
+                    expected=body.expected_generation,
+                    observed=observed_generation,
+                )
+
+            # Every derived field uses the generation checked above while the
+            # real shared per-item lock remains held through the final write.
+            _new_dl_fields = fields.get("draft_listing")
+            if isinstance(_new_dl_fields, dict):
+                _new_dl_fields = dict(_new_dl_fields)
+                fields["draft_listing"] = _new_dl_fields
+
+                if doc_before.get("pipeline_error"):
+                    _merged_dl = {
+                        **(doc_before.get("draft_listing") or {}),
+                        **_new_dl_fields,
+                    }
+                    _resolved = draft_sync.resolve_pipeline_error(
+                        doc_before["pipeline_error"],
+                        _merged_dl,
+                        clear_rejections=False,
+                    )
+                    if _resolved is None:
+                        fields["pipeline_error"] = None
+
+                # listing_description is a derived cache and belongs to this
+                # same item mutation as the description that invalidates it.
+                if (
+                    "description" in _new_dl_fields
+                    and "listing_description" not in _new_dl_fields
+                ):
+                    _merged_dl_for_desc = {
+                        **(doc_before.get("draft_listing") or {}),
+                        **_new_dl_fields,
+                    }
+                    _item_for_desc = {
+                        **doc_before,
+                        "draft_listing": _merged_dl_for_desc,
+                    }
+                    _new_dl_fields["listing_description"] = (
+                        build_listing_description(_item_for_desc, _cfg)
+                    )
+
+                # A manual/UI price edit and its audit event are one mutation.
+                if "price" in _new_dl_fields:
+                    _old_p = (doc_before.get("draft_listing") or {}).get("price")
+                    _new_p = _new_dl_fields.get("price")
+                    if _new_p is not None and str(_new_p) != str(_old_p):
+                        try:
+                            _caller_id = request.headers.get(
+                                "X-TGW-Caller", "operator"
+                            )
+                            fields["price_history"] = list(
+                                doc_before.get("price_history") or []
+                            ) + [{
+                                "ts": datetime.now(timezone.utc).isoformat(),
+                                "price": float(_new_p),
+                                "previous_price": (
+                                    float(_old_p)
+                                    if _old_p not in (None, "")
+                                    else None
+                                ),
+                                "stage": None,
+                                "label": "price edited",
+                                "source": _caller_id,
+                            }]
+                        except (TypeError, ValueError) as exc:
+                            log.warning(
+                                "price_history append skipped for %s: %s",
+                                sku,
+                                exc,
+                            )
+
+            # Location-tree maintenance remains inside the same critical
+            # section, while _apply_patch performs the sole item-data write.
+            location_value = fields.get("location")
+            if location_value is not None:
+                location_result = sync_location_tree(
+                    _cfg,
+                    sku,
+                    str(doc_before.get("location", "")).strip(),
+                    location_value,
+                )
+                if not location_result.get("ok"):
+                    log.warning(
+                        "location tree update failed for %s: %s",
+                        sku,
+                        location_result,
+                    )
+                    fields["pipeline_error"] = {
+                        "code": "location_update_failed",
+                        "detail": (
+                            f"sync_location_tree() failed: {location_result}"
+                        ),
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "source": "patch_item:location",
+                    }
+
+            updated_keys, resulting_generation = _apply_patch(
+                json_path,
+                fields,
+                expected_generation=body.expected_generation,
+                _item_lock_held=True,
+            )
     except _ItemGenerationConflict as exc:
         raise HTTPException(
             status_code=409,
@@ -1698,48 +1776,6 @@ def patch_item(
                 "refresh": f"/api/operator/items/{sku}",
             },
         ) from exc
-
-    # Price edits leave a history trail (session 42): manual/UI price changes
-    # previously appended nothing to price_history — Dave's $82.99 and every
-    # other hand-set price was invisible in the pricing panel. Any patch that
-    # changes draft_listing.price gets an audit event, whoever the caller is.
-    try:
-        _new_dl = body.fields.get("draft_listing")
-        if isinstance(_new_dl, dict) and "price" in _new_dl:
-            _old_p = (doc_before.get("draft_listing") or {}).get("price")
-            _new_p = _new_dl.get("price")
-            if _new_p is not None and str(_new_p) != str(_old_p):
-                _caller_id = request.headers.get("X-TGW-Caller", "operator")
-                _hist = (doc_before.get("price_history") or []) + [
-                    {
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "price": float(_new_p),
-                        "previous_price": float(_old_p) if _old_p not in (None, "") else None,
-                        "stage": None,
-                        "label": "price edited",
-                        "source": _caller_id,
-                    }
-                ]
-                _apply_patch(json_path, {"price_history": _hist})
-    except (TypeError, ValueError) as _exc:
-        log.warning("price_history append skipped for %s: %s", sku, _exc)
-
-    if location_value is not None:
-        result = locationupdate(_cfg, sku, location_value)
-        if result.get("ok"):
-            updated_keys.append("location")
-        else:
-            # invariant C11: a failed location move is a finding, not a log
-            # line — otherwise the operator/Flutter UI sees false success
-            # ("updated": ["location"]) while the item is silently misfiled.
-            log.warning("location tree update failed for %s: %s", sku, result)
-            _persist_finding(
-                json_path,
-                sku,
-                "location_update_failed",
-                f"locationupdate() failed: {result}",
-                "patch_item:location",
-            )
 
     _enqueue_catalog_rebuild(f"http_patch:{sku}")
 
@@ -1786,12 +1822,15 @@ def append_item(sku: str, body: AppendBody) -> Dict[str, Any]:
         field = f"{subtype}_history"
 
     entry = {**body.data, "appended_at": datetime.now(timezone.utc).isoformat()}
-    doc = load_item_doc(json_path)
-    lst = doc.get(field)
-    if not isinstance(lst, list):
-        lst = []
-    lst.append(entry)
-    _apply_patch(json_path, {field: lst})
+    with item_mutation_lock(
+        journal_root=_item_mutation_journal_root(json_path),
+        sku=sku,
+    ):
+        doc = load_item_doc(json_path)
+        existing = doc.get(field)
+        lst = list(existing) if isinstance(existing, list) else []
+        lst.append(entry)
+        _apply_patch(json_path, {field: lst}, _item_lock_held=True)
     _enqueue_catalog_rebuild(f"append:{sku}:{body.op}")
 
     # PP-INTAKE-004 Phase 1a: incremental-ID trigger. Only the photo-append
@@ -1977,7 +2016,7 @@ def _persist_finding(
     source: str,
     *,
     item_lock_held: bool = False,
-) -> None:
+) -> Optional[str]:
     """Write a C11 guard finding to pipeline_error — a persisted, queryable
     reason the pipeline skipped/failed something, never just a log line.
     Canonical {code, detail, ts, source} shape (see draft_sync.py,
@@ -1992,7 +2031,7 @@ def _persist_finding(
     compared to an infinite recursion if the upsert is persistently broken.
     """
     try:
-        _apply_patch(
+        _updated, resulting_generation = _apply_patch(
             json_path,
             {
                 "pipeline_error": {
@@ -2005,8 +2044,10 @@ def _persist_finding(
             _skip_catalog_upsert=True,
             _item_lock_held=item_lock_held,
         )
+        return resulting_generation
     except Exception:
         log.exception("failed to persist %s finding for %s", code, sku)
+        return None
 
 
 class _ItemGenerationConflict(RuntimeError):
@@ -2021,7 +2062,8 @@ def _item_mutation_journal_root(json_path: "Path") -> Path:
     if configured is not None:
         return Path(configured)
     itemdata_root = Path(_cfg.get("itemdata_root", json_path.parent.parent))
-    return itemdata_root.parent / "var" / "item-mutations"
+    data_root = Path(_cfg.get("data_root", itemdata_root.parent))
+    return data_root.parent / "var" / "item-mutations"
 
 
 def _apply_patch(
@@ -2224,7 +2266,7 @@ def _apply_patch_locked(
             upsert_catalog_row(_cfg, doc)
         except Exception as _uc_exc:
             log.warning("sqlite catalog upsert failed for %s: %s", _sku_for_mutation, _uc_exc)
-            _persist_finding(
+            finding_generation = _persist_finding(
                 json_path,
                 _sku_for_mutation,
                 "sqlite_catalog_upsert_failed",
@@ -2232,6 +2274,8 @@ def _apply_patch_locked(
                 "apply_patch",
                 item_lock_held=True,
             )
+            if finding_generation is not None:
+                resulting_generation = finding_generation
     _changed_keys = _original_field_keys
     # Publish to audit stream (PP-AIOPS-001 Phase 1 / PP-CATALOG-INCR-001 CI-1) —
     # fire-and-forget. This is the real fence choke point essentially all write
@@ -2267,6 +2311,7 @@ def _apply_ebay_write(
     ebay_submitted: Optional[Dict[str, Any]] = None,
     ebay_live: Optional[Dict[str, Any]] = None,
     allow_protected: Optional[List[str]] = None,
+    _item_lock_held: bool = False,
 ) -> Tuple[List[str], str]:
     """eBay block deep-merge with field protection — same logic as POST /ebay-write.
 
@@ -2277,6 +2322,22 @@ def _apply_ebay_write(
     workers that actually OWN a protected field pass its name via
     allow_protected to intentionally refresh/clear it.
     """
+    if not _item_lock_held:
+        with item_mutation_lock(
+            journal_root=_item_mutation_journal_root(json_path),
+            sku=sku,
+        ):
+            return _apply_ebay_write(
+                json_path,
+                sku,
+                ebay_offer=ebay_offer,
+                ebay_listing=ebay_listing,
+                ebay_submitted=ebay_submitted,
+                ebay_live=ebay_live,
+                allow_protected=allow_protected,
+                _item_lock_held=True,
+            )
+
     allow_protected_set = set(allow_protected or ())
     incoming = {
         "ebay_offer": ebay_offer,
@@ -2319,13 +2380,16 @@ def _apply_ebay_write(
         upsert_catalog_row(_cfg, doc)
     except Exception as _uc_exc:
         log.warning("sqlite catalog upsert failed for %s: %s", sku, _uc_exc)
-        _persist_finding(
+        finding_generation = _persist_finding(
             json_path,
             sku,
             "sqlite_catalog_upsert_failed",
             f"SQLite catalog upsert failed after write: {_uc_exc}",
             "apply_ebay_write",
+            item_lock_held=True,
         )
+        if finding_generation is not None:
+            resulting_generation = finding_generation
     # Publish to audit stream — see _apply_patch's identical block (PP-CATALOG-INCR-001 CI-1).
     try:
         from .apis.nats_client import publish_mutation

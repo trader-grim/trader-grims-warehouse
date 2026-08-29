@@ -465,13 +465,30 @@ def locationupdate(cfg: Dict[str, Any], sku: str, new_location: str,
                 'new_location': new_location, 'check_only': True}
     try:
         _write_field(cfg, sku, 'location', new_location)
+        return sync_location_tree(cfg, sku, old_location, new_location)
+    except Exception as e:
+        return {'ok': False, 'sku': sku, 'error': str(e)}
+
+
+def sync_location_tree(
+    cfg: Dict[str, Any],
+    sku: str,
+    old_location: str,
+    new_location: str,
+) -> Dict[str, Any]:
+    """Maintain location links without performing another item-data write."""
+    try:
         if old_location and old_location != new_location:
             _remove_location_link(cfg, sku, old_location)
         _rebuild_location_link(cfg, sku, new_location)
-        return {'ok': True, 'sku': sku, 'old_location': old_location,
-                'new_location': new_location}
-    except Exception as e:
-        return {'ok': False, 'sku': sku, 'error': str(e)}
+        return {
+            'ok': True,
+            'sku': sku,
+            'old_location': old_location,
+            'new_location': new_location,
+        }
+    except Exception as exc:
+        return {'ok': False, 'sku': sku, 'error': str(exc)}
 
 
 def verifiedupdate(cfg: Dict[str, Any], sku: str, value: str,

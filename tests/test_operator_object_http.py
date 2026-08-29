@@ -204,6 +204,163 @@ def test_get_operator_object_mounts_real_http_contract(tmp_path, monkeypatch):
     }
 
 
+def test_live_shaped_lowercase_config_preserves_display_and_cached_policy(
+    tmp_path,
+    monkeypatch,
+):
+    from tgw.apis.ebay import conditions, specifics
+    from tgw.ebay import pricing
+
+    itemdata_root = tmp_path / "ItemData"
+    item_dir = itemdata_root / "sku-1"
+    item_dir.mkdir(parents=True)
+    item_path = item_dir / "sku-1.json"
+    item_path.write_text(json.dumps({
+        "sku": "sku-1",
+        "title": "Live-shaped item",
+        "condition": "Very Good",
+        "notes": "before",
+        "draft_listing": {
+            "category_id": "108857",
+            "condition_enum": "",
+            "item_specifics": {"Color": "Cerulean", "Format": "Poster"},
+        },
+    }), encoding="utf-8")
+    conditions_configured = [
+        "new",
+        "like new",
+        "very good",
+        "good",
+        "acceptable",
+        "for parts",
+    ]
+    groups = {
+        f"group-{index:02d}": {
+            "name": f"Group {index:02d}",
+            "size_class": "flat",
+            "ai_hint": f"group {index:02d}",
+            "ebay_categories": ["108857"] if index == 0 else [str(200000 + index)],
+        }
+        for index in range(25)
+    }
+    groups_path = tmp_path / "category-groups.json"
+    groups_path.write_text(json.dumps({
+        "condition_factors": {
+            value: 1.0 - index / 10
+            for index, value in enumerate(conditions_configured)
+        },
+        "groups": groups,
+    }), encoding="utf-8")
+    (tmp_path / "ebay-condition-policies.json").write_text(json.dumps({
+        "fetched_at": "2099-01-01T00:00:00+00:00",
+        "policies": {"108857": []},
+        "item_condition_required": {"108857": False},
+    }), encoding="utf-8")
+    provider_aspects = [
+        {
+            "name": "Color",
+            "required": False,
+            "mode": "FREE_TEXT",
+            "allowed_values": [],
+        },
+        {
+            "name": "Format",
+            "required": False,
+            "mode": "SELECTION_ONLY",
+            "allowed_values": ["Poster", "Print", "Broadside"],
+        },
+    ]
+    (tmp_path / "ebay-aspects-cache.json").write_text(json.dumps({
+        "108857": {
+            "_aspect_filter_revision": specifics._ASPECT_FILTER_REVISION,
+            "aspects": provider_aspects,
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(conditions, "_policies_mem_cache", None)
+    monkeypatch.setattr(conditions, "_required_mem_cache", {})
+    monkeypatch.setattr(specifics, "_aspects_mem_cache", {})
+    monkeypatch.setattr(pricing, "_groups_cache", None)
+    monkeypatch.setattr(pricing, "_groups_reverse", None)
+    monkeypatch.setattr(http_server, "_cfg", {
+        "itemdata_root": itemdata_root,
+        "item_mutation_journal_root": tmp_path / "item-mutations",
+        "category_groups_path": groups_path,
+        "catalog_root": tmp_path,
+        "pretty": False,
+    })
+    monkeypatch.setattr(
+        http_server,
+        "_api_key",
+        AUTH["Authorization"].removeprefix("Bearer "),
+    )
+    monkeypatch.setattr(http_server, "_workflow_attempt_rows", lambda sku: [])
+    monkeypatch.setattr(
+        http_server,
+        "_workflow_reconciled_provider_effect_ids",
+        lambda rows: frozenset(),
+    )
+    monkeypatch.setattr(http_server, "_workflow_provider_identity", lambda: "")
+    monkeypatch.setattr(
+        sqlite_catalog,
+        "upsert_catalog_row",
+        lambda config, document: {"ok": True},
+    )
+    client = TestClient(http_server.app)
+
+    fetched = client.get("/api/operator/items/sku-1", headers=AUTH)
+
+    assert fetched.status_code == 200, fetched.text
+    published = fetched.json()["object"]
+    schema = published["field_schema"]
+    assert schema["condition"] == {
+        "value": "",
+        "label": None,
+        "required": False,
+        "valid": True,
+        "options": [{"value": "", "label": "No listing condition"}],
+        "required_flag_valid": True,
+    }
+    assert schema["item_fields"]["condition"]["value"] == "Very Good"
+    assert schema["record_condition_vocabulary"] == conditions_configured
+    published_conditions = [
+        option["value"]
+        for option in schema["item_fields"]["condition"]["options"]
+    ]
+    assert [value.casefold() for value in published_conditions] == (
+        conditions_configured
+    )
+    assert "Very Good" in published_conditions
+    assert [option["value"] for option in schema["category_groups"]] == list(
+        groups
+    )
+    assert "record_attribute_vocabulary" not in schema
+    aspects = {aspect["name"]: aspect for aspect in schema["aspects"]}
+    assert aspects["Color"]["mode"] == "FREE_TEXT"
+    assert aspects["Color"]["allowed_values"] == []
+    assert aspects["Format"]["mode"] == "SELECTION_ONLY"
+    assert aspects["Format"]["allowed_values"] == [
+        "Poster",
+        "Print",
+        "Broadside",
+    ]
+
+    saved = client.post(
+        "/api/operator/items/sku-1/commands",
+        headers=AUTH,
+        json={
+            "command_id": "save-inventory",
+            "object_generation": published["object_generation"],
+            "values": {"item_fields": {"notes": "after"}},
+        },
+    )
+
+    assert saved.status_code == 200, saved.text
+    stored = json.loads(item_path.read_text(encoding="utf-8"))
+    assert stored["condition"] == "Very Good"
+    assert stored["notes"] == "after"
+    assert saved.json()["object_generation"] == item_generation(stored)
+
+
 def test_thin_web_item_page_uses_only_published_object_and_command_contract(monkeypatch):
     monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
     client = TestClient(http_server.app)
@@ -276,7 +433,27 @@ aspects[0].value='Other';
 const aspectListing=commandValues('save-listing-draft');
 const numberControl=inputControl('draft_listing','price',{type:'number',label:'Price',nullable:true,value:10});
 const integerControl=inputControl('draft_listing','quantity',{type:'integer',label:'Quantity',nullable:true,value:2});
-globalThis.__result={initialInventory,initialListing,titleInventory,secondInventory,priceListing,emptyNullable,invalidNumber,invalidHeld,partialInteger,nonFiniteNumber,clearListing,remapListing,groupInventory,aspectListing,numericTypes:{number:numberControl.includes('type="number"')&&numberControl.includes('step="any"'),integer:integerControl.includes('type="number"')&&integerControl.includes('step="1"')}};
+const liveAspectHtml=fieldControls({field_schema:{
+  item_fields:{},listing_fields:{},condition:{options:[]},
+  aspects:[
+    {name:'Color',required:false,mode:'FREE_TEXT',allowed_values:[],value:'Cerulean'},
+    {name:'Format',required:false,mode:'SELECTION_ONLY',allowed_values:['Poster','Print','Broadside'],value:'Poster'}
+  ]
+}});
+globalThis.__result={
+  initialInventory,initialListing,titleInventory,secondInventory,priceListing,
+  emptyNullable,invalidNumber,invalidHeld,partialInteger,nonFiniteNumber,
+  clearListing,remapListing,groupInventory,aspectListing,
+  numericTypes:{
+    number:numberControl.includes('type="number"')&&numberControl.includes('step="any"'),
+    integer:integerControl.includes('type="number"')&&integerControl.includes('step="1"')
+  },
+  liveAspects:{
+    colorInput:liveAspectHtml.includes('<input id="aspect-0"')&&!liveAspectHtml.includes('<select id="aspect-0"'),
+    formatSelect:liveAspectHtml.includes('<select id="aspect-1"'),
+    allSelections:['Poster','Print','Broadside'].every(v=>liveAspectHtml.includes('value="'+v+'"'))
+  }
+};
 """
     runner = f"""
 const vm=require('node:vm');
@@ -342,6 +519,11 @@ process.stdout.write(JSON.stringify(sandbox.__result));
         "groupInventory": {"item_fields": {"category_group": "cameras"}},
         "aspectListing": {"draft_listing": {"item_specifics": {"Brand": "Other"}}},
         "numericTypes": {"number": True, "integer": True},
+        "liveAspects": {
+            "colorInput": True,
+            "formatSelect": True,
+            "allSelections": True,
+        },
     }
 
 
@@ -406,7 +588,7 @@ def test_operator_save_http_rejects_nonfinite_and_type_confused_numeric_payloads
     assert response.status_code == 422, response.text
 
 
-def test_operator_save_generation_check_is_atomic_with_item_storage_patch(
+def test_operator_save_and_actual_ebay_write_share_the_real_item_lock(
     tmp_path, monkeypatch
 ):
     item_path = _configure_real_item_command_storage(
@@ -423,11 +605,131 @@ def test_operator_save_generation_check_is_atomic_with_item_storage_patch(
             },
         },
     )
+    monkeypatch.setattr(
+        http_server,
+        "_current_item_operator_object",
+        lambda _sku: _published_from_item_path(item_path),
+    )
+    operator_inside_lock = threading.Event()
+    release_operator = threading.Event()
+    ebay_path_entered = threading.Event()
+    real_apply_patch_locked = http_server._apply_patch_locked
+    real_apply_ebay_write = http_server._apply_ebay_write
+
+    def paused_apply_patch_locked(json_path, fields, *args, **kwargs):
+        if fields.get("notes") == "operator edit":
+            operator_inside_lock.set()
+            assert release_operator.wait(timeout=5)
+        return real_apply_patch_locked(json_path, fields, *args, **kwargs)
+
+    def observed_ebay_write(*args, **kwargs):
+        ebay_path_entered.set()
+        return real_apply_ebay_write(*args, **kwargs)
+
+    monkeypatch.setattr(
+        http_server,
+        "_apply_patch_locked",
+        paused_apply_patch_locked,
+    )
+    monkeypatch.setattr(http_server, "_apply_ebay_write", observed_ebay_write)
     initial_generation = item_generation(
         json.loads(item_path.read_text(encoding="utf-8"))
     )
-    initial_read = threading.Event()
-    release_stale_request = threading.Event()
+    responses = {}
+
+    def submit_operator_save():
+        responses["operator"] = TestClient(http_server.app).post(
+            "/api/operator/items/sku-1/commands",
+            headers=AUTH,
+            json={
+                "command_id": "save-inventory",
+                "object_generation": initial_generation,
+                "values": {"item_fields": {"notes": "operator edit"}},
+            },
+        )
+
+    def submit_ebay_write():
+        responses["ebay"] = TestClient(http_server.app).post(
+            "/api/items/sku-1/ebay-write",
+            headers=AUTH,
+            json={"ebay_offer": {"offer_id": "offer-1"}},
+        )
+
+    operator_thread = threading.Thread(target=submit_operator_save)
+    ebay_thread = threading.Thread(target=submit_ebay_write)
+    operator_thread.start()
+    assert operator_inside_lock.wait(timeout=5)
+    ebay_thread.start()
+    assert ebay_path_entered.wait(timeout=5)
+    assert ebay_thread.is_alive()
+    release_operator.set()
+    operator_thread.join(timeout=5)
+    ebay_thread.join(timeout=5)
+
+    assert not operator_thread.is_alive()
+    assert not ebay_thread.is_alive()
+    assert responses["operator"].status_code == 200, responses["operator"].text
+    assert responses["ebay"].status_code == 200, responses["ebay"].text
+    final_document = json.loads(item_path.read_text(encoding="utf-8"))
+    assert final_document["notes"] == "operator edit"
+    assert final_document["ebay_offer"]["offer_id"] == "offer-1"
+
+
+@pytest.mark.parametrize(
+    ("command_id", "initial_extra", "newer_values", "stale_values"),
+    [
+        (
+            "save-inventory",
+            {"location": "old-bin"},
+            {"item_fields": {"location": "newer-bin"}},
+            {"item_fields": {"location": "stale-bin"}},
+        ),
+        (
+            "save-listing-draft",
+            {
+                "price_history": [{
+                    "ts": "2026-01-01T00:00:00+00:00",
+                    "price": 10.0,
+                    "previous_price": None,
+                    "stage": None,
+                    "label": "initial",
+                    "source": "test",
+                }],
+            },
+            {"draft_listing": {"price": 20.0}},
+            {"draft_listing": {"price": 12.0}},
+        ),
+    ],
+    ids=["location", "price-history"],
+)
+def test_exact_operator_route_rejects_stale_save_without_overwriting_newer_state(
+    tmp_path,
+    monkeypatch,
+    command_id,
+    initial_extra,
+    newer_values,
+    stale_values,
+):
+    item = {
+        "sku": "sku-1",
+        "title": "Thing",
+        "draft_listing": {
+            "category_id": "123",
+            "condition_enum": "USED_GOOD",
+            "price": 10.0,
+            "item_specifics": {},
+        },
+        **initial_extra,
+    }
+    item_path = _configure_real_item_command_storage(
+        tmp_path,
+        monkeypatch,
+        item,
+    )
+    http_server._cfg["location_tree_root"] = tmp_path / "by-location"
+    initial_generation = item_generation(item)
+    stale_published = threading.Event()
+    release_stale = threading.Event()
     current_calls = 0
     calls_lock = threading.Lock()
 
@@ -438,8 +740,8 @@ def test_operator_save_generation_check_is_atomic_with_item_storage_patch(
             current_calls += 1
             call_number = current_calls
         if call_number == 1:
-            initial_read.set()
-            assert release_stale_request.wait(timeout=5)
+            stale_published.set()
+            assert release_stale.wait(timeout=5)
         return published
 
     monkeypatch.setattr(
@@ -447,66 +749,63 @@ def test_operator_save_generation_check_is_atomic_with_item_storage_patch(
         "_current_item_operator_object",
         interleaved_current,
     )
-    real_apply_patch = http_server._apply_patch
-    stale_at_storage_boundary = threading.Event()
+    responses = {}
 
-    def instrumented_apply_patch(*args, **kwargs):
-        if kwargs.get("expected_generation") is not None:
-            stale_at_storage_boundary.set()
-        return real_apply_patch(*args, **kwargs)
-
-    monkeypatch.setattr(
-        http_server,
-        "_apply_patch",
-        instrumented_apply_patch,
-    )
-    response_holder = {}
-    client = TestClient(http_server.app)
-
-    def submit_stale_save():
-        response_holder["response"] = client.post(
+    def submit_stale():
+        responses["stale"] = TestClient(http_server.app).post(
             "/api/operator/items/sku-1/commands",
             headers=AUTH,
             json={
-                "command_id": "save-inventory",
+                "command_id": command_id,
                 "object_generation": initial_generation,
-                "values": {"item_fields": {"notes": "stale browser edit"}},
+                "values": stale_values,
             },
         )
 
-    stale_thread = threading.Thread(target=submit_stale_save)
+    stale_thread = threading.Thread(
+        target=submit_stale,
+        name="stale-operator-save",
+    )
     stale_thread.start()
-    assert initial_read.wait(timeout=5)
-    with http_server.item_mutation_lock(
-        journal_root=http_server._item_mutation_journal_root(item_path),
-        sku="sku-1",
-    ):
-        real_apply_patch(
-            item_path,
-            {"notes": "concurrent writer"},
-            _item_lock_held=True,
-        )
-        concurrent_document = json.loads(
-            item_path.read_text(encoding="utf-8")
-        )
-        concurrent_generation = item_generation(concurrent_document)
-        release_stale_request.set()
-        assert stale_at_storage_boundary.wait(timeout=5)
-        assert stale_thread.is_alive()
-    stale_thread.join(timeout=5)
+    assert stale_published.wait(timeout=5)
+    newer = TestClient(http_server.app).post(
+        "/api/operator/items/sku-1/commands",
+        headers=AUTH,
+        json={
+            "command_id": command_id,
+            "object_generation": initial_generation,
+            "values": newer_values,
+        },
+    )
+    assert newer.status_code == 200, newer.text
+    newer_document = json.loads(item_path.read_text(encoding="utf-8"))
+    newer_generation = item_generation(newer_document)
+    assert newer.json()["object_generation"] == newer_generation
 
+    release_stale.set()
+    stale_thread.join(timeout=5)
     assert not stale_thread.is_alive()
-    response = response_holder["response"]
-    assert response.status_code == 409, response.text
-    assert response.json()["detail"] == {
+    assert responses["stale"].status_code == 409, responses["stale"].text
+    assert responses["stale"].json()["detail"] == {
         "code": "generation_conflict",
-        "expected": concurrent_generation,
+        "expected": newer_generation,
         "received": initial_generation,
         "refresh": "/api/operator/items/sku-1",
     }
     final_document = json.loads(item_path.read_text(encoding="utf-8"))
-    assert final_document["notes"] == "concurrent writer"
-    assert item_generation(final_document) == concurrent_generation
+    assert final_document == newer_document
+
+    if command_id == "save-inventory":
+        assert final_document["location"] == "newer-bin"
+        assert (tmp_path / "by-location" / "newer-bin" / "sku-1").is_symlink()
+        assert not (tmp_path / "by-location" / "stale-bin" / "sku-1").exists()
+    else:
+        assert final_document["draft_listing"]["price"] == 20.0
+        assert [entry["price"] for entry in final_document["price_history"]] == [
+            10.0,
+            20.0,
+        ]
+        assert final_document["price_history"][-1]["previous_price"] == 10.0
 
 
 def test_inventory_condition_http_enforces_published_tgw_vocabulary_without_mutation(

@@ -97,19 +97,20 @@ def _validate_schema_value(schema: Mapping[str, Any], value: Any, label: str) ->
         if allowed is not None:
             if not isinstance(allowed, list):
                 raise OperatorObjectBindingError(f"{label} has an invalid value schema")
-            if value not in allowed:
-                if schema.get("case_insensitive_enum") is True:
-                    canonical = next(
-                        (
-                            candidate
-                            for candidate in allowed
-                            if isinstance(candidate, str)
-                            and candidate.casefold() == value.casefold()
-                        ),
-                        None,
+            if schema.get("case_insensitive_enum") is True:
+                matches = [
+                    candidate
+                    for candidate in allowed
+                    if isinstance(candidate, str)
+                    and candidate.casefold() == value.casefold()
+                ]
+                if len(matches) > 1:
+                    raise OperatorObjectBindingError(
+                        f"{label} has an ambiguous value vocabulary"
                     )
-                    if canonical is not None:
-                        return canonical
+                if len(matches) == 1:
+                    return matches[0]
+            if value not in allowed:
                 raise OperatorObjectBindingError(f"{label} is not an allowed value")
         return value
     if field_type == "number":
@@ -411,10 +412,70 @@ def build_item_operator_object(
         "graph_id": workflow_card.get("graph_id"),
         "details": deepcopy(dict(workflow_card)),
     }
-    record_conditions = [str(value) for value in context.get("record_condition_vocabulary", ()) if isinstance(value, str) and value]
+    configured_record_conditions = [
+        str(value)
+        for value in context.get("record_condition_vocabulary", ())
+        if isinstance(value, str) and value
+    ]
     stored_record_condition = str(item.get("condition") or "")
-    canonical_record_condition = next((value for value in record_conditions if value.casefold() == stored_record_condition.casefold()), stored_record_condition)
+    conditions_by_identity: dict[str, list[str]] = {}
+    for value in configured_record_conditions:
+        conditions_by_identity.setdefault(value.casefold(), []).append(value)
+    condition_collisions = [
+        {
+            "identity": identity,
+            "values": sorted(values, key=lambda value: (value.casefold(), value)),
+        }
+        for identity, values in sorted(conditions_by_identity.items())
+        if len(values) > 1
+    ]
+    record_conditions = []
+    for configured in configured_record_conditions:
+        if len(conditions_by_identity[configured.casefold()]) != 1:
+            continue
+        # Production condition_factors uses lowercase identity labels.  Keep a
+        # more intentional existing display spelling for that same identity;
+        # otherwise the configured spelling remains canonical.
+        if (
+            stored_record_condition
+            and configured.casefold() == stored_record_condition.casefold()
+            and configured == configured.casefold()
+            and stored_record_condition != stored_record_condition.casefold()
+        ):
+            record_conditions.append(stored_record_condition)
+        else:
+            record_conditions.append(configured)
+    record_condition_options = [
+        {"value": value, "label": value}
+        for value in record_conditions
+    ]
+    published_record_condition = next(
+        (
+            value
+            for value in record_conditions
+            if value.casefold() == stored_record_condition.casefold()
+        ),
+        stored_record_condition,
+    )
+    if stored_record_condition and not any(
+        option["value"].casefold() == stored_record_condition.casefold()
+        for option in record_condition_options
+    ):
+        record_condition_options.insert(0, {
+            "value": stored_record_condition,
+            "label": (
+                f"{stored_record_condition} — unavailable until vocabulary is repaired"
+            ),
+            "display_only": True,
+        })
     group_options = list(context.get("category_groups") or ())
+    record_condition_projection = (
+        "record_condition_vocabulary" in context or bool(group_options)
+    )
+    record_condition_drift = {
+        "empty": not configured_record_conditions,
+        "casefold_collisions": condition_collisions,
+    }
     field_schema = {
         "item_fields": {
             "title": {"type": "string", "label": "Inventory title", "value": item.get("title") or ""},
@@ -466,31 +527,28 @@ def build_item_operator_object(
     }
     if policy_fields_present:
         field_schema["condition"]["required_flag_valid"] = required_flag_valid
-    if group_options or record_conditions:
+    if record_condition_projection:
         field_schema["item_fields"].update({
             "condition": {
                 "type": "string",
                 "label": "Inventory condition",
-                "value": canonical_record_condition,
-                "options": [
-                    {"value": value, "label": value}
-                    for value in record_conditions
-                ],
-                **(
-                    {
-                        "enum": record_conditions,
-                        "case_insensitive_enum": True,
-                    }
-                    if record_conditions
-                    else {}
-                ),
+                "value": published_record_condition,
+                "options": record_condition_options,
+                "enum": record_conditions,
+                "case_insensitive_enum": True,
+                "case_insensitive_options": True,
             },
             "category_group": {"type": "string", "label": "TGW category group", "value": item.get("category_group") or "", "options": group_options},
             "size_class": {"type": "string", "label": "Size class", "value": item.get("size_class") or ""},
             "ai_hint": {"type": "string", "label": "AI hint", "value": item.get("ai_hint") or ""},
         })
         field_schema["category_groups"] = deepcopy(group_options)
-        field_schema["record_condition_vocabulary"] = record_conditions
+        field_schema["record_condition_vocabulary"] = (
+            configured_record_conditions
+        )
+        field_schema["record_condition_vocabulary_drift"] = (
+            record_condition_drift
+        )
     if context.get("record_attribute_vocabulary"):
         field_schema["record_attribute_vocabulary"] = deepcopy(context["record_attribute_vocabulary"])
     command_input_schema = {

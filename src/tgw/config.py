@@ -83,6 +83,10 @@ def load_config(path: Path) -> Dict[str, Any]:
     secrets_root = p("secrets_root", "/opt/TGW/secrets")
     _load_secrets_env(secrets_root)
     itemdata_root = p("itemdata_root", "/opt/TGW/data/ItemData")
+    item_mutation_journal_root = p(
+        "item_mutation_journal_root",
+        "/opt/TGW/var/item-mutations",
+    )
     catalog_root = p("catalog_root", "/opt/TGW/data/ItemCatalog")
     archive_root = p("archive_root", "/opt/TGW/data/ItemArchive")
     log_root = p("log_root", "/opt/TGW/var/log")
@@ -318,6 +322,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         "machine_api_key": _machine_api_key,
         "postgres_dsn": postgres_dsn,
         "itemdata_root": itemdata_root,
+        "item_mutation_journal_root": item_mutation_journal_root,
         "catalog_root": catalog_root,
         "archive_root": archive_root,
         "log_root": log_root,
