@@ -1697,14 +1697,56 @@ def test_coding_cli_access_status_reads_only_the_local_workflow(
     observed: list[tuple[int | None, object]] = []
     monkeypatch.setattr(
         coding_cli,
-        "status",
-        lambda todo_id, *, config_path: observed.append((todo_id, config_path))
+        "access_status",
+        lambda todo_id, *, config_path, full_jobs: observed.append(
+            (todo_id, config_path, full_jobs)
+        )
         or {"ok": True, "dependencies": {"tgw_prod": False}},
     )
 
     assert coding_cli.run(argparse.Namespace(coding_op="access-status", request_id=request_id, config=None)) == 0
-    assert observed == [(expected_todo, coding_cli.DEFAULT_CONFIG)]
+    assert observed == [(expected_todo, coding_cli.DEFAULT_CONFIG, False)]
     assert json.loads(capsys.readouterr().out)["dependencies"]["tgw_prod"] is False
+
+
+def test_coding_cli_access_status_compacts_jobs_unless_explicitly_requested(
+    monkeypatch,
+):
+    jobs = [
+        {"job_id": "1", "state": "succeeded", "payload_json": {"large": "x" * 1000}},
+        {"job_id": "2", "state": "dead_letter", "payload_json": {"large": "y" * 1000}},
+        {"job_id": "3", "state": "succeeded", "payload_json": {"large": "z" * 1000}},
+    ]
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {})
+    monkeypatch.setattr(
+        coding_cli,
+        "status_command",
+        lambda _args: {
+            "ok": True,
+            "actor": "codex",
+            "group": "tgw-coders",
+            "dependencies": {"tgw_prod": False},
+        },
+    )
+    monkeypatch.setattr(coding_cli, "_jobs", lambda todo_id: jobs)
+
+    compact = coding_cli.access_status(1915, config_path="disposable")
+    assert compact["schema"] == "tgw-local-coding-access-status/v1"
+    assert compact["job_count"] == 3
+    assert compact["job_state_counts"] == {"dead_letter": 1, "succeeded": 2}
+    assert compact["jobs_included"] is False
+    assert "jobs" not in compact
+
+    full = coding_cli.access_status(
+        1915, config_path="disposable", full_jobs=True
+    )
+    assert full["jobs_included"] is True
+    assert full["jobs"] == jobs
+
+    parsed = coding_cli.parser().parse_args(
+        ["access-status", "1915", "--full-jobs"]
+    )
+    assert parsed.full_jobs is True
 
 
 @pytest.mark.parametrize(

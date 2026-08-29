@@ -116,7 +116,8 @@ def _jobs(todo_id: int | None = None, *, limit: int = 50) -> list[dict[str, Any]
                 f"""
                 SELECT job_id::text, queue_name, state, entity_id, operation,
                        attempt_count, max_attempts, created_at, updated_at,
-                       lease_owner, payload_json
+                       finished_at, lease_owner, lease_token::text,
+                       error_code, error_detail, payload_json
                   FROM queue_jobs
                  WHERE {where}
                  ORDER BY created_at DESC
@@ -551,14 +552,38 @@ def resume(
         if lifecycle_root is not None
         else None
     )
-    if record is not None and record.get("resume_intent") is not None:
+    active_generation = (
+        record.get("active_implementation_generation")
+        if record is not None
+        else None
+    )
+    active_resume = (
+        active_generation
+        if isinstance(active_generation, Mapping)
+        and active_generation.get("kind") == "resume"
+        else None
+    )
+    live_resume = (
+        record.get("resume_intent")
+        if record is not None
+        and isinstance(record.get("resume_intent"), Mapping)
+        else None
+    )
+    if record is not None and (
+        live_resume is not None
+        or (record.get("state") != "RESUMABLE_PARTIAL" and active_resume is not None)
+    ):
+        intent_hash = (
+            (live_resume.get("resume_intent_hash") if live_resume else None)
+            or active_resume.get("intent_hash")
+        )
         return {
             "schema": "tgw-local-coding-resume/v2",
             "ok": True,
             "todo_id": identifier,
             "lifecycle_root_id": record["root_id"],
             "lifecycle_state": record["state"],
-            "resume_intent_hash": record["resume_intent"]["resume_intent_hash"],
+            "resume_intent_hash": intent_hash,
             "resume_reused": True,
             "supervisor": "tgw-coding-lifecycle-supervisor.service",
         }
@@ -1006,6 +1031,28 @@ def _queue_evidence(
                     reason="partial implementation queue payload is unavailable",
                     job_ids=ids,
                 )
+            durable_result = payload.get("result")
+            if (
+                row.get("state") != "dead_letter"
+                or row.get("error_code") != "HARD_FAILURE"
+                or not isinstance(row.get("error_detail"), str)
+                or row.get("error_detail")
+                != "TreatmentFailure('coding treatment reported partial')"
+                or row.get("finished_at") is None
+                or row.get("lease_owner") is not None
+                or row.get("lease_token") is not None
+                or durable_result != failed_receipt
+            ):
+                return _stage(
+                    record,
+                    stage,
+                    "failed",
+                    reason=(
+                        "partial implementation lacks exact durable terminal "
+                        "queue provenance"
+                    ),
+                    job_ids=ids,
+                )
             plan = record["binding"]["plan_todo_binding"]
             expected = {
                 "todo_id": int(record["target"]),
@@ -1032,6 +1079,8 @@ def _queue_evidence(
                 or latest_attempt.get("attempt_count") != row.get("attempt_count")
                 or latest_attempt.get("outcome") != "partial"
                 or latest_attempt.get("artifacts") != artifacts
+                or failed_receipt.get("implementation_attempt_hash")
+                != latest_attempt.get("attempt_hash")
             ):
                 return _stage(
                     record,
@@ -1212,6 +1261,20 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
     def implementation(record: dict[str, Any]) -> dict[str, Any]:
         resume_intent = record.get("resume_intent")
         remediation_intent = record.get("remediation_intent")
+        active_generation = record.get("active_implementation_generation")
+        if isinstance(active_generation, Mapping):
+            active_intent = active_generation.get("intent")
+            if not isinstance(active_intent, Mapping):
+                raise CodingCLIError(
+                    "active coding implementation generation has no exact intent"
+                )
+            if active_generation.get("kind") == "resume" and resume_intent is None:
+                resume_intent = active_intent
+            elif (
+                active_generation.get("kind") == "remediation"
+                and remediation_intent is None
+            ):
+                remediation_intent = active_intent
         return _queue_evidence(
             record,
             stage="implementation",
@@ -1741,6 +1804,35 @@ def status(
     return local
 
 
+def access_status(
+    todo_id: int | None = None,
+    *,
+    config_path: Path | str = DEFAULT_CONFIG,
+    full_jobs: bool = False,
+) -> dict[str, Any]:
+    """Return a compact Unix/group proof; expose job payloads only on request."""
+
+    _initialize(config_path)
+    result = status_command(argparse.Namespace(config=Path(config_path)))
+    jobs = _jobs(todo_id)
+    state_counts: dict[str, int] = {}
+    for job in jobs:
+        state = str(job.get("state") or "unknown")
+        state_counts[state] = state_counts.get(state, 0) + 1
+    result.update(
+        {
+            "schema": "tgw-local-coding-access-status/v1",
+            "todo_id": todo_id,
+            "job_state_counts": dict(sorted(state_counts.items())),
+            "job_count": len(jobs),
+            "jobs_included": full_jobs,
+        }
+    )
+    if full_jobs:
+        result["jobs"] = jobs
+    return result
+
+
 def reconcile(target: str = PP_REF, *, config_path: Path | str = DEFAULT_CONFIG) -> dict[str, Any]:
     """Read-only reconciliation status for an explicit PP root."""
     if target != PP_REF:
@@ -1851,8 +1943,14 @@ def run(args: argparse.Namespace) -> int:
                 config_path=config_path,
                 source_commit=getattr(args, "source_commit", None),
             )
-        elif args.coding_op in {"status", "access-status"}:
+        elif args.coding_op == "status":
             result = consolidated_status(target, config_path=config_path)
+        elif args.coding_op == "access-status":
+            result = access_status(
+                _todo_id(target) if target is not None else None,
+                config_path=config_path,
+                full_jobs=bool(getattr(args, "full_jobs", False)),
+            )
         elif args.coding_op == "reconcile":
             result = reconcile(target or PP_REF, config_path=config_path)
         elif args.coding_op == "log":
@@ -1921,6 +2019,11 @@ def parser() -> argparse.ArgumentParser:
         action.add_argument("coding_target", metavar="ROOT")
     access = commands.add_parser("access-status", help="prove the local Unix/group binding")
     access.add_argument("coding_target", metavar="TODO_ID", nargs="?")
+    access.add_argument(
+        "--full-jobs",
+        action="store_true",
+        help="include complete durable job payloads instead of counts only",
+    )
     return root
 
 

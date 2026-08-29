@@ -209,9 +209,62 @@ def job_binding(record: Mapping[str, Any]) -> dict[str, Any]:
                 "remediation_intent_hash"
             )
             or record.get("resume_intent", {}).get("resume_intent_hash")
+            or record.get("active_implementation_generation", {}).get(
+                "intent_hash"
+            )
         ),
     }
     return {**unsigned, "job_binding_hash": _hash(unsigned)}
+
+
+def _bind_active_implementation_generation(
+    record: dict[str, Any], result: Mapping[str, Any]
+) -> None:
+    """Consume a dispatched intent without changing its immutable job fence.
+
+    A live resume/remediation intent is a one-shot dispatch request. Retaining
+    it after the implementation job is durably visible makes a later partial
+    look like the same request. The active generation keeps the exact hash and
+    request needed for crash replay while allowing the next RESUMABLE_PARTIAL
+    transition to mint a new fence.
+    """
+
+    jobs = result.get("job_ids")
+    if not isinstance(jobs, list) or not jobs:
+        return
+    live: list[tuple[str, str, Mapping[str, Any]]] = []
+    remediation = record.get("remediation_intent")
+    if isinstance(remediation, Mapping):
+        live.append(
+            ("remediation", "remediation_intent_hash", remediation)
+        )
+    resume = record.get("resume_intent")
+    if isinstance(resume, Mapping):
+        live.append(("resume", "resume_intent_hash", resume))
+    if not live:
+        return
+    if len(live) != 1:
+        raise LifecycleError("coding implementation has conflicting live intents")
+    kind, hash_key, intent = live[0]
+    intent_hash = intent.get(hash_key)
+    if _SHA256.fullmatch(str(intent_hash or "")) is None:
+        raise LifecycleError("coding implementation intent hash is invalid")
+    before = job_binding(record)
+    active = {
+        "schema": "tgw-local-coding-active-implementation-generation/v1",
+        "kind": kind,
+        "intent_hash": intent_hash,
+        "intent": dict(intent),
+        "job_ids": list(jobs),
+        "bound_at": _now(),
+    }
+    prior = record.get("active_implementation_generation")
+    if prior is not None and prior != active:
+        raise LifecycleError("coding implementation generation changed while active")
+    record["active_implementation_generation"] = active
+    record.pop(f"{kind}_intent", None)
+    if job_binding(record) != before:
+        raise LifecycleError("consuming coding intent changed the active job fence")
 
 
 def validate_job_binding(record: Mapping[str, Any], value: object) -> dict[str, Any]:
@@ -797,6 +850,9 @@ def _begin_bounded_remediation(
         "effects": record.get("effects", {}),
         "job_ids": record.get("job_ids", []),
         "resume_intent": record.get("resume_intent"),
+        "active_implementation_generation": record.get(
+            "active_implementation_generation"
+        ),
         "failure_result": dict(result),
     }
     archived["history_hash"] = _hash(archived)
@@ -826,6 +882,7 @@ def _begin_bounded_remediation(
     # remain live beside remediation because implementation dispatch treats a
     # live resume intent as resume-only work.
     record.pop("resume_intent", None)
+    record.pop("active_implementation_generation", None)
     record["stages"] = {}
     record["effects"] = {}
     record["job_ids"] = []
@@ -929,6 +986,8 @@ def advance(
                 break
             outcome = result["outcome"]
             if outcome == "waiting":
+                if stage == "implementation":
+                    _bind_active_implementation_generation(record, result)
                 record["state"] = "WAITING"
                 record["stages"][stage] = result
                 break
@@ -1016,7 +1075,10 @@ def request_resume(
         record = store.get(identity)
         if record is None:
             raise LifecycleError("coding lifecycle does not exist")
-        if record.get("resume_intent") is not None:
+        if (
+            record.get("resume_intent") is not None
+            and record["state"] != "RESUMABLE_PARTIAL"
+        ):
             return record
         if record["state"] != "RESUMABLE_PARTIAL":
             raise LifecycleError("coding lifecycle is not RESUMABLE_PARTIAL")
@@ -1049,18 +1111,26 @@ def request_resume(
             "stages": record.get("stages", {}),
             "effects": record.get("effects", {}),
             "job_ids": record.get("job_ids", []),
+            "resume_intent": record.get("resume_intent"),
+            "active_implementation_generation": record.get(
+                "active_implementation_generation"
+            ),
         }
         record.setdefault("resume_history", []).append(
             {**archived, "history_hash": _hash(archived)}
         )
+        generation = int(record.get("resume_generation", 0)) + 1
         intent = {
             **value,
+            "generation": generation,
             "requested_at": _now(),
         }
+        record["resume_generation"] = generation
         record["resume_intent"] = {
             **intent,
             "resume_intent_hash": _hash(intent),
         }
+        record.pop("active_implementation_generation", None)
         record["stages"] = {}
         record["effects"] = {}
         record["job_ids"] = []

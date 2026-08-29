@@ -556,7 +556,6 @@ def test_disposable_start_partial_resume_closes_exact_successor(
 ):
     """Exercise the real worker→journal→CLI resume seam without a provider."""
     from tgw.development.partial_resume import candidate_changed_paths, history
-    from tgw.queue.worker_base import HardFailure
     from tgw.workers.coding import CodingWorker
 
     repository = tmp_path / "repository"
@@ -709,6 +708,10 @@ def test_disposable_start_partial_resume_closes_exact_successor(
                 "queue_name": queue,
                 "state": "queued",
                 "attempt_count": 1,
+                "lease_token": (
+                    "00000000-0000-4000-8000-"
+                    f"{len(rows) + 1:012d}"
+                ),
                 "payload_json": payload,
             }
         )
@@ -718,6 +721,57 @@ def test_disposable_start_partial_resume_closes_exact_successor(
     monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: rows)
     monkeypatch.setattr("tgw.queue.worker_base.state_machine.init", lambda _dsn: None)
     monkeypatch.setattr("tgw.apis.nats_client.init_nats", lambda _config: None)
+
+    def queue_row(job_id):
+        return next(row for row in rows if row["job_id"] == job_id)
+
+    def mark_running(job_id, owner, lease_token):
+        queue_row(job_id).update(
+            state="running", lease_owner=owner, lease_token=lease_token
+        )
+
+    def mark_dead_letter(job_id, _owner, _lease_token, detail, *, result=None):
+        job = queue_row(job_id)
+        job.update(
+            state="dead_letter",
+            error_code="HARD_FAILURE",
+            error_detail=detail,
+            finished_at="2026-08-28T00:00:00+00:00",
+            lease_owner=None,
+            lease_token=None,
+        )
+        job["payload_json"]["result"] = result
+
+    def close_local_success(job_id, _owner, _lease_token, result, publish):
+        compensators = []
+        publish(compensators.append)
+        assert len(compensators) == 1
+        job = queue_row(job_id)
+        job.update(
+            state="succeeded",
+            finished_at="2026-08-28T00:01:00+00:00",
+            lease_owner=None,
+            lease_token=None,
+            error_code=None,
+            error_detail=None,
+        )
+        job["payload_json"]["result"] = result
+        return True
+
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.mark_running", mark_running
+    )
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.mark_dead_letter", mark_dead_letter
+    )
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.close_local_success",
+        close_local_success,
+    )
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.get_job", queue_row
+    )
+    monkeypatch.setattr("tgw.notify.notify", lambda *_args, **_kwargs: None)
 
     started = coding_cli.lifecycle_start(1915, config_path=tmp_path / "coding.json")
     assert started["state"] == "QUEUED"
@@ -737,9 +791,11 @@ def test_disposable_start_partial_resume_closes_exact_successor(
         }
 
     worker = CodingWorker("codex-implement", config, launcher=preserve_partial)
-    with pytest.raises(HardFailure, match="reported partial"):
-        worker.handle(first_job)
-    first_job["state"] = "dead_letter"
+    worker._process(first_job)
+    first_result = first_job["payload_json"]["result"]
+    assert first_job["error_detail"] == (
+        "TreatmentFailure('coding treatment reported partial')"
+    )
     rows[0] = {**first_job, "job_id": "forged-canary-job"}
     rejected = coding_cli._queue_evidence(
         waiting,
@@ -751,6 +807,39 @@ def test_disposable_start_partial_resume_closes_exact_successor(
     assert rejected["outcome"] == "failed"
     assert "no exact resumable lineage" in rejected["reason"]
     rows[0] = first_job
+
+    receipt_path = worktree / "implementation-receipt.json"
+    exact_receipt_bytes = receipt_path.read_bytes()
+    forged_receipt = json.loads(exact_receipt_bytes)
+    forged_receipt["artifacts"] = [
+        {"kind": "forged", "detail": "not the queue-persisted result"}
+    ]
+    receipt_path.write_text(
+        json.dumps(forged_receipt, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    rejected = coding_cli._queue_evidence(
+        waiting,
+        stage="implementation",
+        queue_name="codex-implement",
+        receipt_name="implementation-receipt.json",
+        dispatch=lambda: pytest.fail("terminal partial must not redispatch"),
+    )
+    assert rejected["outcome"] == "failed"
+    assert "durable terminal queue provenance" in rejected["reason"]
+    receipt_path.write_bytes(exact_receipt_bytes)
+
+    first_job["state"] = "cancelled"
+    rejected = coding_cli._queue_evidence(
+        waiting,
+        stage="implementation",
+        queue_name="codex-implement",
+        receipt_name="implementation-receipt.json",
+        dispatch=lambda: pytest.fail("cancelled partial must not redispatch"),
+    )
+    assert rejected["outcome"] == "failed"
+    assert "durable terminal queue provenance" in rejected["reason"]
+    first_job["state"] = "dead_letter"
+
     partial = coding_cli.supervise(
         started["root_id"], config_path=tmp_path / "coding.json"
     )
@@ -776,6 +865,49 @@ def test_disposable_start_partial_resume_closes_exact_successor(
     assert (waiting["state"], waiting["stage"]) == ("WAITING", "implementation")
     second_job = rows[1]
     assert second_job["payload_json"]["resume_of"] == resumed["coding_state"]["resume_of"]
+    second_fence = second_job["payload_json"]["coding_lifecycle"]
+    assert waiting.get("resume_intent") is None
+    assert waiting["active_implementation_generation"]["kind"] == "resume"
+    assert job_binding(waiting) == second_fence
+
+    worker = CodingWorker("codex-implement", config, launcher=preserve_partial)
+    worker._process(second_job)
+    second_result = second_job["payload_json"]["result"]
+    attempts = history(worktree)
+    assert [attempt["outcome"] for attempt in attempts] == ["partial", "partial"]
+    current_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert current_receipt == second_result
+    assert current_receipt["coding_lifecycle"] == second_fence
+    assert current_receipt["implementation_attempt_hash"] == attempts[-1][
+        "attempt_hash"
+    ]
+    archived_receipt = (
+        worktree
+        / ".tgw-coding-history"
+        / "implementation"
+        / "receipts"
+        / (attempts[0]["attempt_hash"].removeprefix("sha256:") + ".json")
+    )
+    assert json.loads(archived_receipt.read_text(encoding="utf-8")) == (
+        first_result
+    )
+
+    partial_again = coding_cli.supervise(
+        started["root_id"], config_path=tmp_path / "coding.json"
+    )
+    assert (partial_again["state"], partial_again["stage"]) == (
+        "RESUMABLE_PARTIAL",
+        "implementation",
+    )
+    resumed_again = coding_cli.resume(1915, config_path=tmp_path / "coding.json")
+    assert resumed_again["resume_intent_hash"] != resumed["resume_intent_hash"]
+    assert job_binding(store.find(1915)) != second_fence
+    waiting = coding_cli.supervise(
+        started["root_id"], config_path=tmp_path / "coding.json"
+    )
+    assert (waiting["state"], waiting["stage"]) == ("WAITING", "implementation")
+    third_job = rows[2]
+    assert third_job["payload_json"]["coding_lifecycle"] != second_fence
 
     def close_successor(_treatment, _payload, selected_worktree):
         subprocess.run(
@@ -818,18 +950,17 @@ def test_disposable_start_partial_resume_closes_exact_successor(
         }
 
     worker = CodingWorker("codex-implement", config, launcher=close_successor)
-    receipt = worker.handle(second_job)
-    second_job["state"] = "succeeded"
-    second_job["payload_json"]["result"] = receipt
+    worker._process(third_job)
     advanced = coding_cli.supervise(
         started["root_id"], config_path=tmp_path / "coding.json"
     )
     assert (advanced["state"], advanced["stage"]) == ("WAITING", "controller")
     assert [attempt["outcome"] for attempt in history(worktree)] == [
         "partial",
+        "partial",
         "satisfied",
     ]
-    assert rows[2]["queue_name"] == "controller-verify"
+    assert rows[3]["queue_name"] == "controller-verify"
 
 
 def test_controller_finding_automatically_starts_one_fenced_remediation_generation(

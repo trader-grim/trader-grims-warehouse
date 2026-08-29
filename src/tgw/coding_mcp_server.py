@@ -140,13 +140,14 @@ def tgw_coding_stop(job_id: str) -> str:
 
 
 @mcp.tool()
-def tgw_coding_access_status(todo_id: int | None = None) -> str:
+def tgw_coding_access_status(todo_id: int | None = None, full_jobs: bool = False) -> str:
     """Prove the calling Linux actor's local Unix/group and workflow binding."""
     return _result(
         "access-status",
-        coding_cli.status,
+        coding_cli.access_status,
         todo_id,
         config_path=_config_path(),
+        full_jobs=full_jobs,
     )
 
 

@@ -36,6 +36,7 @@ from tgw.development.partial_resume import (
 )
 from tgw.development.plan_binding import MalformedPlanBindingError, validate_plan_binding
 from tgw.development.worktree_lease import exclusive_worktree_lease
+from tgw.errors import TreatmentFailure
 from tgw.queue import worker_base
 from tgw.queue.worker_base import HardFailure, JobCancelled, QueueWorker
 from tgw.workflow_kernel.contracts import (
@@ -281,21 +282,136 @@ def receipt_path_for_treatment(worktree: Path, treatment_id: str) -> Path:
         raise HardFailure(f"unsupported coding treatment: {treatment_id}") from exc
 
 
-def _write_receipt(path: Path, receipt: dict[str, Any]) -> None:
-    """Atomically persist a worktree receipt for the snapshot reader."""
-    if path.exists() and receipt.get("outcome") != OUTCOME_SATISFIED:
-        return
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8") as stream:
-        stream.write(json.dumps(receipt, sort_keys=True) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
-    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+def _regular_file_bytes(path: Path) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        os.fsync(descriptor)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise HardFailure("coding receipt is not one regular file")
+        chunks = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        return b"".join(chunks)
     finally:
         os.close(descriptor)
+
+
+def _archive_prior_implementation_receipt(
+    path: Path,
+    *,
+    receipt: dict[str, Any],
+    predecessor: str,
+) -> None:
+    """Archive one exact prior negative projection before replacing it."""
+
+    try:
+        existing_bytes = _regular_file_bytes(path)
+        existing = json.loads(existing_bytes)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HardFailure("prior coding implementation receipt is unreadable") from exc
+    if not isinstance(existing, dict):
+        raise HardFailure("prior coding implementation receipt is malformed")
+    old_lifecycle = existing.get("coding_lifecycle")
+    new_lifecycle = receipt.get("coding_lifecycle")
+    stable_fence_fields = (
+        "root_id",
+        "binding_hash",
+        "plan_binding_hash",
+        "execution_root_identity",
+        "card_idempotency_key",
+        "closure_hash",
+    )
+    if (
+        existing.get("status") != "FAIL"
+        or existing.get("treatment_id") != "codex-implement"
+        or existing.get("outcome") not in {OUTCOME_PARTIAL, OUTCOME_FAILED}
+        or existing.get("implementation_attempt_hash") != predecessor
+        or existing.get("plan_binding") != receipt.get("plan_binding")
+        or not isinstance(old_lifecycle, dict)
+        or not isinstance(new_lifecycle, dict)
+        or any(
+            old_lifecycle.get(field) != new_lifecycle.get(field)
+            for field in stable_fence_fields
+        )
+    ):
+        raise HardFailure(
+            "prior coding implementation receipt does not bind the archived generation"
+        )
+    archive_root = path.parent / ".tgw-coding-history" / "implementation" / "receipts"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    parent_descriptor = os.open(archive_root.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(parent_descriptor)
+    finally:
+        os.close(parent_descriptor)
+    archive_path = archive_root / (
+        predecessor.removeprefix("sha256:") + ".json"
+    )
+    try:
+        descriptor = os.open(
+            archive_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o440,
+        )
+    except FileExistsError:
+        if _regular_file_bytes(archive_path) != existing_bytes:
+            raise HardFailure("archived coding implementation receipt conflicts")
+    else:
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                stream.write(existing_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        directory = os.open(archive_root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
+def _write_receipt(
+    path: Path,
+    receipt: dict[str, Any],
+    *,
+    predecessor: str | None = None,
+) -> None:
+    """Atomically persist a worktree receipt for the snapshot reader."""
+    if path.exists() and receipt.get("outcome") != OUTCOME_SATISFIED:
+        if (
+            receipt.get("treatment_id") != "codex-implement"
+            or predecessor is None
+        ):
+            return
+        _archive_prior_implementation_receipt(
+            path,
+            receipt=receipt,
+            predecessor=predecessor,
+        )
+    descriptor, temporary_text = tempfile.mkstemp(
+        prefix=path.name + ".", dir=path.parent
+    )
+    temporary = Path(temporary_text)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            os.fchmod(stream.fileno(), 0o660)
+            stream.write(json.dumps(receipt, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
 class CodingWorker(QueueWorker):
@@ -952,9 +1068,23 @@ class CodingWorker(QueueWorker):
                 ),
             }
             if attempt_binding is not None:
-                append_attempt(worktree, make_attempt(attempt_binding, worktree, outcome=OUTCOME_FAILED, predecessor=predecessor, artifacts=receipt["artifacts"]))
-            _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
-            raise HardFailure(f"coding treatment mechanical failure: {exc}") from exc
+                attempt = make_attempt(
+                    attempt_binding,
+                    worktree,
+                    outcome=OUTCOME_FAILED,
+                    predecessor=predecessor,
+                    artifacts=receipt["artifacts"],
+                )
+                append_attempt(worktree, attempt)
+                receipt["implementation_attempt_hash"] = attempt["attempt_hash"]
+            _write_receipt(
+                receipt_path_for_treatment(worktree, treatment_id),
+                receipt,
+                predecessor=predecessor,
+            )
+            raise TreatmentFailure(
+                f"coding treatment mechanical failure: {exc}", receipt
+            ) from exc
         receipt = {
             "status": "PASS" if outcome == OUTCOME_SATISFIED else "FAIL",
             "treatment_id": treatment_id,
@@ -998,15 +1128,29 @@ class CodingWorker(QueueWorker):
                 artifacts,
             )
         elif attempt_binding is not None:
-            append_attempt(worktree, make_attempt(attempt_binding, worktree, outcome=outcome, predecessor=predecessor, artifacts=artifacts))
+            attempt = make_attempt(
+                attempt_binding,
+                worktree,
+                outcome=outcome,
+                predecessor=predecessor,
+                artifacts=artifacts,
+            )
+            append_attempt(worktree, attempt)
+            receipt["implementation_attempt_hash"] = attempt["attempt_hash"]
         if outcome == OUTCOME_SATISFIED:
             self._persist_success_receipt(job, receipt_path_for_treatment(worktree, treatment_id), receipt)
         else:
-            _write_receipt(receipt_path_for_treatment(worktree, treatment_id), receipt)
+            _write_receipt(
+                receipt_path_for_treatment(worktree, treatment_id),
+                receipt,
+                predecessor=predecessor,
+            )
         if outcome != OUTCOME_SATISFIED:
             # A negative launcher result is a terminal job outcome, not a
             # successful queue delivery with a disappointing payload.
-            raise HardFailure(f"coding treatment reported {outcome}")
+            raise TreatmentFailure(
+                f"coding treatment reported {outcome}", receipt
+            )
         return receipt
 
 
