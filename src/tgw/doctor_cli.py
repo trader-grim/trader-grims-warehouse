@@ -2409,6 +2409,68 @@ def _pidfd_has_exited(pidfd: int) -> bool:
         selector.close()
 
 
+def _process_stat_start_ticks(
+    pid: int, *, proc_root: Path = Path("/proc")
+) -> int:
+    """Read the start ticks for exactly the PID named by one proc stat row."""
+
+    try:
+        raw = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DoctorError(f"process {pid} stat is unavailable: {exc}") from exc
+    opening = raw.find("(")
+    closing = raw.rfind(")")
+    fields = raw[closing + 2 :].split() if 0 < opening < closing else []
+    try:
+        observed_pid = int(raw[:opening].strip())
+        start_ticks = int(fields[19])
+    except (IndexError, ValueError) as exc:
+        raise DoctorError(f"process {pid} stat is malformed") from exc
+    if observed_pid != pid or start_ticks < 0:
+        raise DoctorError(f"process {pid} stat identity differs")
+    return start_ticks
+
+
+def _stable_process_identity(
+    pid: int,
+    boot_id: str,
+    *,
+    proc_root: Path = Path("/proc"),
+) -> dict[str, Any]:
+    """Return a PID-reuse-safe identity after pidfd/stat revalidation."""
+
+    if pid <= 0 or not boot_id or ":" in boot_id or "\n" in boot_id:
+        raise DoctorError("process identity inputs are invalid")
+    if not hasattr(os, "pidfd_open"):
+        raise DoctorError("pidfd process identity is unavailable")
+    pidfd = -1
+    try:
+        pidfd = os.pidfd_open(pid, 0)
+        if _pidfd_has_exited(pidfd):
+            raise DoctorError(f"process {pid} exited before identity inspection")
+        before_start_ticks = _process_stat_start_ticks(pid, proc_root=proc_root)
+        after_start_ticks = _process_stat_start_ticks(pid, proc_root=proc_root)
+        if (
+            _pidfd_has_exited(pidfd)
+            or after_start_ticks != before_start_ticks
+        ):
+            raise DoctorError(
+                f"process {pid} changed identity during inspection; retry"
+            )
+    except DoctorError:
+        raise
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError) as exc:
+        raise DoctorError(f"process {pid} identity is unavailable: {exc}") from exc
+    finally:
+        if pidfd >= 0:
+            os.close(pidfd)
+    return {
+        "pid": pid,
+        "start_ticks": before_start_ticks,
+        "process_identity": f"{boot_id}:{pid}:{before_start_ticks}",
+    }
+
+
 def _process_start_ns_lower_bound(
     boot_time_seconds: int, start_ticks: int, clock_ticks: int
 ) -> int:
@@ -2434,7 +2496,7 @@ def _process_not_proven_after(
     )
 
 
-def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
+def _context_processes_once(paths: DoctorPaths) -> list[dict[str, Any]]:
     boot = _boot_time()
     boot_id_path = Path("/proc/sys/kernel/random/boot_id")
     boot_id = boot_id_path.read_text(
@@ -2464,7 +2526,7 @@ def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
         entrypoint_surface["mtime_ns"],
     )
     processes: list[dict[str, Any]] = []
-    for entry in Path("/proc").iterdir():
+    for entry in sorted(Path("/proc").iterdir(), key=lambda item: item.name):
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
@@ -2494,6 +2556,12 @@ def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
             ppid = int(fields[1])
             process_group = int(fields[2])
             session_id = int(fields[3])
+            try:
+                parent_identity = _stable_process_identity(ppid, boot_id)
+            except DoctorError as exc:
+                raise DoctorError(
+                    f"Context process {pid} parent harness identity is unproven: {exc}"
+                ) from exc
             started_at = boot + start_ticks / ticks
             started_at_ns_lower_bound = _process_start_ns_lower_bound(
                 int(boot), start_ticks, ticks
@@ -2526,6 +2594,8 @@ def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
                     "process_identity": f"{boot_id}:{pid}:{start_ticks}",
                     "boot_id": boot_id,
                     "parent_pid": ppid,
+                    "parent_start_ticks": parent_identity["start_ticks"],
+                    "parent_process_identity": parent_identity["process_identity"],
                     "process_group": process_group,
                     "session_id": session_id,
                     "user": pwd.getpwuid(stat_result.st_uid).pw_name,
@@ -2594,11 +2664,62 @@ def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
     return sorted(processes, key=lambda item: item["pid"])
 
 
+def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
+    """Return clients only when two bounded full inventories agree exactly."""
+
+    first = _context_processes_once(paths)
+    second = _context_processes_once(paths)
+    if second != first:
+        raise DoctorError(
+            "Context process set changed during bounded inventory comparison; retry"
+        )
+    return second
+
+
+def _context_restart_targets(
+    processes: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build restart advice only from exact stable parent identities."""
+
+    targets: list[dict[str, Any]] = []
+    for item in processes:
+        if not _context_process_requires_restart(item):
+            continue
+        boot_id = item.get("boot_id")
+        parent_pid = item.get("parent_pid")
+        parent_start_ticks = item.get("parent_start_ticks")
+        parent_process_identity = item.get("parent_process_identity")
+        if (
+            not isinstance(boot_id, str)
+            or not boot_id
+            or not isinstance(parent_pid, int)
+            or parent_pid <= 1
+            or not isinstance(parent_start_ticks, int)
+            or parent_start_ticks < 0
+            or parent_process_identity
+            != f"{boot_id}:{parent_pid}:{parent_start_ticks}"
+        ):
+            raise DoctorError(
+                "affected Context client has no proven stable parent harness identity"
+            )
+        targets.append(
+            {
+                "context_process_identity": item["process_identity"],
+                "parent_process_identity": parent_process_identity,
+                "session_id": item["session_id"],
+                "user": item["user"],
+                "entrypoint": item["entrypoint"],
+            }
+        )
+    return targets
+
+
 def check_context_processes(paths: DoctorPaths) -> dict[str, Any]:
     try:
         processes = _context_processes(paths)
         stale = [item for item in processes if _context_process_requires_restart(item)]
         if stale:
+            restart_targets = _context_restart_targets(processes)
             return _check(
                 "context.clients",
                 "RESTART_REQUIRED",
@@ -2608,18 +2729,11 @@ def check_context_processes(paths: DoctorPaths) -> dict[str, Any]:
                     "observed_stale_pids_non_actionable": [
                         item["pid"] for item in stale
                     ],
-                    "restart_identities": [
-                        {
-                            "process_identity": item["process_identity"],
-                            "parent_pid": item["parent_pid"],
-                            "session_id": item["session_id"],
-                        }
-                        for item in stale
-                    ],
+                    "restart_identities": restart_targets,
                 },
                 repair=(
                     "restart only the affected parent harness session by its stable "
-                    "process identity; never signal a reported bare PID"
+                    "parent_process_identity; never signal a reported bare PID"
                 ),
             )
         if not processes:
@@ -2636,7 +2750,22 @@ def check_context_processes(paths: DoctorPaths) -> dict[str, Any]:
             evidence={"processes": processes},
         )
     except Exception as exc:
-        return _check("context.clients", "UNKNOWN", str(exc))
+        return _check(
+            "context.clients",
+            "UNKNOWN",
+            str(exc),
+            evidence={
+                "restart_identities": None,
+                "restart_scope": (
+                    "unknown; use a manual fresh harness session and do not signal "
+                    "any reported PID"
+                ),
+            },
+            repair=(
+                "start a fresh harness session manually; process inventory is not "
+                "stable enough to identify a parent restart target"
+            ),
+        )
 
 
 def _context_restart_report(paths: DoctorPaths) -> dict[str, Any]:
@@ -2644,31 +2773,25 @@ def _context_restart_report(paths: DoctorPaths) -> dict[str, Any]:
 
     try:
         clients = _context_processes(paths)
+        restart_required = _context_restart_targets(clients)
     except Exception as exc:
         return {
             "client_processes_mutated": False,
             "client_restart_evidence_ok": False,
             "restart_required": None,
-            "restart_scope": "unknown; inventory must be retried before operator action",
+            "restart_scope": (
+                "unknown; use a manual fresh harness session and do not signal any "
+                "reported PID"
+            ),
             "restart_detection_error": str(exc),
         }
-    affected = [item for item in clients if _context_process_requires_restart(item)]
     return {
         "client_processes_mutated": False,
         "client_restart_evidence_ok": True,
-        "restart_required": [
-            {
-                "process_identity": item["process_identity"],
-                "parent_pid": item["parent_pid"],
-                "session_id": item["session_id"],
-                "user": item["user"],
-                "entrypoint": item["entrypoint"],
-            }
-            for item in affected
-        ],
+        "restart_required": restart_required,
         "restart_scope": (
-            "affected parent harness sessions only; bare PIDs are diagnostic and "
-            "must never be signaled"
+            "affected parent harness sessions by parent_process_identity only; "
+            "bare PIDs are diagnostic and must never be signaled"
         ),
         "restart_detection_error": None,
     }
@@ -10251,12 +10374,48 @@ def repair(
             except Exception as receipt_exc:
                 receipt = f"unavailable ({receipt_exc})"
             raise DoctorError(f"{exc}; started receipt: {started_receipt}; failure receipt: {receipt}") from exc
+    diagnosis = diagnose(paths)
+    context_client_check = next(
+        (
+            item
+            for item in diagnosis.get("checks", [])
+            if item.get("id") == "context.clients"
+        ),
+        None,
+    )
+    context_client_inventory_state = (
+        context_client_check.get("state")
+        if isinstance(context_client_check, Mapping)
+        else "UNKNOWN"
+    )
+    repair_time_client_evidence_ok = (
+        result.get("client_restart_evidence_ok") is True
+        if operation in {"context", "context-launcher"}
+        else True
+    )
+    verification_complete = (
+        context_client_inventory_state
+        in {"PASS", "WARN", "FAIL", "RESTART_REQUIRED"}
+        and repair_time_client_evidence_ok
+    )
     return {
         "schema": "tgw-local-doctor-repair/v1",
-        "ok": True,
+        "ok": (
+            result.get("ok") is True
+            and diagnosis.get("ok") is True
+            and verification_complete
+        ),
         "operation": operation,
+        "mutation_applied": result.get("changed") is True,
+        "verification_complete": verification_complete,
+        "context_client_inventory_state": context_client_inventory_state,
+        "client_restart_evidence_ok": (
+            result.get("client_restart_evidence_ok")
+            if operation in {"context", "context-launcher"}
+            else None
+        ),
         "results": [result],
-        "diagnosis": diagnose(paths),
+        "diagnosis": diagnosis,
     }
 
 
@@ -10615,7 +10774,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             # A completed bounded repair is successful when the resulting
             # diagnosis has no failure.  Historical cleanup warnings and
             # restart notices remain visible evidence, but must not make the
-            # exact bootstrap claim that the repair itself failed.
+            # exact bootstrap claim that the repair itself failed.  The repair
+            # wrapper separately fails closed when Context client verification
+            # is incomplete, even if its bounded mutation was applied.
             return 0 if result.get("ok") and result["diagnosis"].get("ok") else 2
         if args.operation == "inventory":
             result = inventory()

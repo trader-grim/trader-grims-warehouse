@@ -1361,7 +1361,10 @@ def test_doctor_context_launcher_check_and_receipted_atomic_repair(
             {
                 "pid": 41,
                 "process_identity": "boot:41:100",
+                "boot_id": "boot",
                 "parent_pid": 4,
+                "parent_start_ticks": 50,
+                "parent_process_identity": "boot:4:50",
                 "session_id": 1,
                 "user": "codex",
                 "entrypoint": {"kind": "installed-launcher"},
@@ -1373,7 +1376,10 @@ def test_doctor_context_launcher_check_and_receipted_atomic_repair(
             {
                 "pid": 42,
                 "process_identity": "boot:42:101",
+                "boot_id": "boot",
                 "parent_pid": 4,
+                "parent_start_ticks": 50,
+                "parent_process_identity": "boot:4:50",
                 "session_id": 1,
                 "user": "codex",
                 "entrypoint": {"kind": "installed-launcher"},
@@ -1392,8 +1398,8 @@ def test_doctor_context_launcher_check_and_receipted_atomic_repair(
     assert result["changed"] is True
     assert result["restart_required"] == [
         {
-            "process_identity": "boot:41:100",
-            "parent_pid": 4,
+            "context_process_identity": "boot:41:100",
+            "parent_process_identity": "boot:4:50",
             "session_id": 1,
             "user": "codex",
             "entrypoint": {"kind": "installed-launcher"},

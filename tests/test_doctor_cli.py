@@ -729,6 +729,98 @@ def test_repair_cli_succeeds_with_non_failing_diagnostic_attention(
     assert '"state": "ATTENTION"' in capsys.readouterr().out
 
 
+def _stub_context_repair_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    inventory_state: str,
+    restart_evidence_ok: bool,
+) -> None:
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_repair_lock", lambda _paths: nullcontext())
+    monkeypatch.setattr(
+        doctor_cli,
+        "_receipt",
+        lambda _paths, operation, *_args: operation + ".json",
+    )
+    monkeypatch.setitem(
+        doctor_cli._REPAIRS,
+        "context",
+        lambda _paths, **_kwargs: {
+            "ok": True,
+            "changed": True,
+            "client_restart_evidence_ok": restart_evidence_ok,
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "diagnose",
+        lambda _paths: {
+            "ok": True,
+            "state": "ATTENTION",
+            "checks": [
+                {"id": "context.clients", "state": inventory_state}
+            ],
+        },
+    )
+
+
+def test_repair_wrapper_distinguishes_applied_mutation_from_unknown_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_context_repair_wrapper(
+        monkeypatch,
+        inventory_state="UNKNOWN",
+        restart_evidence_ok=False,
+    )
+
+    result = doctor_cli.repair("context", doctor_cli.DoctorPaths())
+
+    assert result["ok"] is False
+    assert result["mutation_applied"] is True
+    assert result["verification_complete"] is False
+    assert result["context_client_inventory_state"] == "UNKNOWN"
+    assert result["client_restart_evidence_ok"] is False
+    assert result["results"][0]["ok"] is True
+
+
+@pytest.mark.parametrize("inventory_state", ["WARN", "RESTART_REQUIRED"])
+def test_repair_wrapper_keeps_proven_client_advisories_non_failing(
+    monkeypatch: pytest.MonkeyPatch, inventory_state: str
+) -> None:
+    _stub_context_repair_wrapper(
+        monkeypatch,
+        inventory_state=inventory_state,
+        restart_evidence_ok=True,
+    )
+
+    result = doctor_cli.repair("context", doctor_cli.DoctorPaths())
+
+    assert result["ok"] is True
+    assert result["verification_complete"] is True
+
+
+def test_repair_cli_exits_nonzero_when_context_verification_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "repair",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "mutation_applied": True,
+            "verification_complete": False,
+            "diagnosis": {"ok": True, "state": "ATTENTION", "exit_code": 1},
+        },
+    )
+
+    result = doctor_cli.main(
+        ["repair", "context", "--commit", "a" * 40, "--json"]
+    )
+
+    assert result == 2
+    assert '"verification_complete": false' in capsys.readouterr().out
+
+
 def test_unix_access_probes_support_roots_and_inflight_worktrees(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1509,13 +1601,63 @@ def test_context_process_entrypoint_rejects_legacy_module_mode(tmp_path: Path) -
     assert legacy == {"kind": "legacy-module", "path": None, "installed": False}
 
 
+def test_stable_process_identity_revalidates_parent_stat_under_pidfd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exits = iter([False, False])
+    start_ticks = iter([50, 50])
+    closed: list[int] = []
+    monkeypatch.setattr(doctor_cli.os, "pidfd_open", lambda pid, flags: 91)
+    monkeypatch.setattr(
+        doctor_cli, "_pidfd_has_exited", lambda _pidfd: next(exits)
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_process_stat_start_ticks",
+        lambda _pid, **_kwargs: next(start_ticks),
+    )
+    monkeypatch.setattr(doctor_cli.os, "close", closed.append)
+
+    result = doctor_cli._stable_process_identity(4, "boot")
+
+    assert result == {
+        "pid": 4,
+        "start_ticks": 50,
+        "process_identity": "boot:4:50",
+    }
+    assert closed == [91]
+
+
+def test_stable_process_identity_rejects_parent_stat_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_ticks = iter([50, 51])
+    closed: list[int] = []
+    monkeypatch.setattr(doctor_cli.os, "pidfd_open", lambda pid, flags: 92)
+    monkeypatch.setattr(doctor_cli, "_pidfd_has_exited", lambda _pidfd: False)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_process_stat_start_ticks",
+        lambda _pid, **_kwargs: next(start_ticks),
+    )
+    monkeypatch.setattr(doctor_cli.os, "close", closed.append)
+
+    with pytest.raises(doctor_cli.DoctorError, match="changed identity"):
+        doctor_cli._stable_process_identity(4, "boot")
+
+    assert closed == [92]
+
+
 @pytest.mark.parametrize(
     "process",
     [
         {
             "pid": 41,
             "process_identity": "boot:41:100",
+            "boot_id": "boot",
             "parent_pid": 4,
+            "parent_start_ticks": 50,
+            "parent_process_identity": "boot:4:50",
             "session_id": 1,
             "user": "codex",
             "entrypoint": {"kind": "installed-launcher"},
@@ -1527,7 +1669,10 @@ def test_context_process_entrypoint_rejects_legacy_module_mode(tmp_path: Path) -
         {
             "pid": 42,
             "process_identity": "boot:42:101",
+            "boot_id": "boot",
             "parent_pid": 4,
+            "parent_start_ticks": 50,
+            "parent_process_identity": "boot:4:50",
             "session_id": 1,
             "user": "codex",
             "entrypoint": {"kind": "legacy-module"},
@@ -1549,6 +1694,16 @@ def test_context_clients_require_current_snapshot_and_installed_entrypoint(
     assert result["evidence"]["observed_stale_pids_non_actionable"] == [
         process["pid"]
     ]
+    assert result["evidence"]["restart_identities"] == [
+        {
+            "context_process_identity": process["process_identity"],
+            "parent_process_identity": "boot:4:50",
+            "session_id": 1,
+            "user": "codex",
+            "entrypoint": process["entrypoint"],
+        }
+    ]
+    assert "parent_pid" not in result["evidence"]["restart_identities"][0]
     assert "affected parent harness" in result["operator_action"]
 
 
@@ -1562,6 +1717,28 @@ def test_context_process_same_tick_is_not_proven_current() -> None:
     assert doctor_cli._process_not_proven_after(
         boot, start_ticks + 1, ticks, same_tick
     ) is False
+
+
+def test_context_inventory_requires_two_equal_process_sets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    passes = iter([[], [{"pid": 41}]])
+    calls = 0
+
+    def inventory_once(_paths: doctor_cli.DoctorPaths) -> list[dict[str, object]]:
+        nonlocal calls
+        calls += 1
+        return next(passes)
+
+    monkeypatch.setattr(doctor_cli, "_context_processes_once", inventory_once)
+
+    result = doctor_cli.check_context_processes(doctor_cli.DoctorPaths())
+
+    assert calls == 2
+    assert result["state"] == "UNKNOWN"
+    assert "process set changed" in result["detail"]
+    assert result["evidence"]["restart_identities"] is None
+    assert "manual fresh harness session" in result["evidence"]["restart_scope"]
 
 
 def test_context_restart_report_never_turns_inventory_error_into_empty_success(
@@ -1579,7 +1756,38 @@ def test_context_restart_report_never_turns_inventory_error_into_empty_success(
 
     assert result["client_restart_evidence_ok"] is False
     assert result["restart_required"] is None
+    assert "manual fresh harness session" in result["restart_scope"]
     assert "permission denied" in result["restart_detection_error"]
+
+
+def test_context_restart_report_requires_proven_parent_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "_context_processes",
+        lambda _paths: [
+            {
+                "pid": 41,
+                "process_identity": "boot:41:100",
+                "parent_pid": 4,
+                "session_id": 1,
+                "user": "codex",
+                "entrypoint": {"kind": "installed-launcher"},
+                "installed_entrypoint": True,
+                "predates_launcher": True,
+                "predates_generation": False,
+                "predates_snapshot": False,
+            }
+        ],
+    )
+
+    result = doctor_cli._context_restart_report(doctor_cli.DoctorPaths())
+
+    assert result["client_restart_evidence_ok"] is False
+    assert result["restart_required"] is None
+    assert "manual fresh harness session" in result["restart_scope"]
+    assert "parent harness identity" in result["restart_detection_error"]
 
 
 def _full_current_task_projection(commit: str, tree: str) -> tuple[dict, dict]:
