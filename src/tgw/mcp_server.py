@@ -21,6 +21,8 @@ Register in Claude Code:
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -340,42 +342,113 @@ if not _READONLY:
 # tgw_get_todo — list open TODO items
 # ---------------------------------------------------------------------------
 
+def _todo_record_hash(record: Mapping[str, Any]) -> str:
+    return "sha256:" + hashlib.sha256(
+        json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+
+
+def _todo_cursor(offset: int) -> str:
+    payload = {"offset": offset}
+    raw = json.dumps(
+        {**payload, "hash": _todo_record_hash(payload)},
+        sort_keys=True, separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _todo_cursor_offset(cursor: str) -> int:
+    if not cursor:
+        return 0
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        payload = json.loads(raw)
+        claimed = payload.pop("hash")
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("todo cursor is invalid") from exc
+    if claimed != _todo_record_hash(payload) or not isinstance(payload.get("offset"), int) or payload["offset"] < 0:
+        raise ValueError("todo cursor is stale or mismatched")
+    return payload["offset"]
+
+
 @mcp.tool()
 def tgw_get_todo(
     agent: Annotated[str, alias_field('agent')] = '',
+    todo_id: Annotated[int, alias_field('todo_id')] = 0,
+    limit: Annotated[int, alias_field('limit')] = 50,
+    cursor: Annotated[str, alias_field('cursor')] = '',
+    include_bodies: Annotated[bool, alias_field('include_bodies')] = False,
 ) -> str:
-    """List open TODO items from the TGW multi-agent tracker.
+    """Identity-bound and bounded Todo retrieval; never a full-backlog body dump.
+
+    - ``todo_id`` > 0: return exactly that one open Todo (metadata + body), or ABSENT.
+    - otherwise: a bounded metadata-first page (bodies only when
+      ``include_bodies`` is True). An empty ``agent`` no longer returns every
+      open body; it returns a capped metadata page with truncation accounting
+      and an opaque next cursor.
 
     Args:
-        agent: Filter by agent ('claude', 'admin', 'gemini', 'db', 'tigwa', or '' for all)
-
-    Returns JSON list of open TODO items with id, agent, priority, body.
+        agent: filter by agent ('', or e.g. 'claude', 'codex', 'deepseek').
+        todo_id: exact Todo ID to retrieve (0 disables exact lookup).
+        limit: page size, 1..100 (default 50).
+        cursor: opaque next-page cursor from a prior call.
+        include_bodies: explicitly include full bodies in a page.
     """
     cfg = _get_cfg()
     from tgw.queue import state_machine
     state_machine.init(cfg['postgres_dsn'])
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+        return json.dumps({'ok': False, 'error': 'limit must be an integer between 1 and 100'})
+    if not isinstance(todo_id, int) or isinstance(todo_id, bool) or todo_id < 0:
+        return json.dumps({'ok': False, 'error': 'todo_id must be a positive integer or 0'})
+    try:
+        offset = _todo_cursor_offset(cursor)
+    except ValueError as exc:
+        return json.dumps({'ok': False, 'error': str(exc)})
     try:
         with state_machine._conn() as con:
             import psycopg2.extras
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if todo_id > 0:
+                    cur.execute(
+                        """SELECT id, agent, priority, body, source, added_at,
+                                  (done_at IS NULL) AS open
+                             FROM todo_items WHERE id = %s""",
+                        (todo_id,),
+                    )
+                    rows = [dict(r) for r in cur.fetchall()]
+                    if not rows:
+                        return json.dumps({'ok': True, 'outcome': 'ABSENT', 'todo_id': todo_id, 'todo': None})
+                    item = rows[0]
+                    item['record_hash'] = _todo_record_hash(item)
+                    return json.dumps({'ok': True, 'outcome': 'CURRENT', 'todo_id': todo_id, 'todo': item}, default=str)
+                cols = "id, agent, priority, source, added_at, (done_at IS NULL) AS open"
+                if include_bodies:
+                    cols += ", body"
                 if agent:
                     cur.execute(
-                        """SELECT id, agent, priority, body, source, added_at
-                             FROM todo_items
-                            WHERE done_at IS NULL AND agent = %s
-                            ORDER BY priority, added_at""",
-                        (agent,),
+                        f"SELECT {cols} FROM todo_items WHERE done_at IS NULL AND agent = %s "
+                        f"ORDER BY priority, added_at, id LIMIT %s OFFSET %s",
+                        (agent, limit, offset),
                     )
                 else:
                     cur.execute(
-                        """SELECT id, agent, priority, body, source, added_at
-                             FROM todo_items
-                            WHERE done_at IS NULL
-                            ORDER BY priority, added_at"""
+                        f"SELECT {cols} FROM todo_items WHERE done_at IS NULL "
+                        f"ORDER BY priority, added_at, id LIMIT %s OFFSET %s",
+                        (limit, offset),
                     )
                 rows = [dict(r) for r in cur.fetchall()]
-        return json.dumps({'ok': True, 'agent': agent or 'all', 'items': rows},
-                          default=str)
+        for row in rows:
+            if not include_bodies:
+                row.pop("body", None)
+            row['record_hash'] = _todo_record_hash(row)
+        truncated = len(rows) == limit
+        next_cursor = _todo_cursor(offset + len(rows)) if truncated else None
+        return json.dumps({
+            'ok': True, 'agent': agent or 'all', 'items': rows,
+            'include_bodies': bool(include_bodies), 'limit': limit,
+            'truncated': truncated, 'next_cursor': next_cursor,
+        }, default=str)
     except Exception as exc:
         return json.dumps({'ok': False, 'error': str(exc)})
 

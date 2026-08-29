@@ -408,14 +408,54 @@ def test_enqueue_accepts_capitalized_arguments(cfg, monkeypatch):
 # tgw_get_todo
 # ---------------------------------------------------------------------------
 
-def test_get_todo_all(cfg, monkeypatch):
+def test_get_todo_default_is_bounded_metadata_page_without_bodies(cfg, monkeypatch):
     rows = [{"id": 1, "agent": "claude", "priority": 1, "body": "do x",
              "source": "plan", "added_at": "2026-06-07"}]
     _install_conn(monkeypatch, rows)
     out = json.loads(mcp_server.tgw_get_todo())
     assert out["ok"] is True
     assert out["agent"] == "all"
+    assert out["include_bodies"] is False
+    assert "body" not in out["items"][0]
+    assert out["items"][0]["record_hash"].startswith("sha256:")
+    assert "truncated" in out and "next_cursor" in out
+
+
+def test_get_todo_include_bodies_is_explicit_opt_in(cfg, monkeypatch):
+    rows = [{"id": 1, "agent": "claude", "priority": 1, "body": "do x",
+             "source": "plan", "added_at": "2026-06-07"}]
+    _install_conn(monkeypatch, rows)
+    out = json.loads(mcp_server.tgw_get_todo(include_bodies=True))
+    assert out["ok"] is True
+    assert out["include_bodies"] is True
     assert out["items"][0]["body"] == "do x"
+
+
+def test_get_todo_exact_lookup_returns_single_todo(cfg, monkeypatch):
+    rows = [{"id": 7, "agent": "codex", "priority": 1, "body": "the task",
+             "source": "plan", "added_at": "2026-06-07", "open": True}]
+    _install_conn(monkeypatch, rows)
+    out = json.loads(mcp_server.tgw_get_todo(todo_id=7))
+    assert out["ok"] is True
+    assert out["outcome"] == "CURRENT"
+    assert out["todo"]["id"] == 7
+    assert out["todo"]["body"] == "the task"
+    assert out["todo"]["record_hash"].startswith("sha256:")
+
+
+def test_get_todo_exact_lookup_absent_never_broadens(cfg, monkeypatch):
+    _install_conn(monkeypatch, [])
+    out = json.loads(mcp_server.tgw_get_todo(todo_id=999))
+    assert out["ok"] is True
+    assert out["outcome"] == "ABSENT"
+    assert out["todo"] is None
+
+
+def test_get_todo_rejects_invalid_limit(cfg, monkeypatch):
+    _install_conn(monkeypatch, [])
+    out = json.loads(mcp_server.tgw_get_todo(limit=0))
+    assert out["ok"] is False
+    assert "limit" in out["error"]
 
 
 def test_get_todo_filtered_by_agent(cfg, monkeypatch):
@@ -423,6 +463,7 @@ def test_get_todo_filtered_by_agent(cfg, monkeypatch):
     out = json.loads(mcp_server.tgw_get_todo(agent="gemini"))
     assert out["ok"] is True
     assert out["agent"] == "gemini"
+    assert out["include_bodies"] is False
 
 
 def test_get_todo_accepts_capitalized_agent_argument(cfg, monkeypatch):
