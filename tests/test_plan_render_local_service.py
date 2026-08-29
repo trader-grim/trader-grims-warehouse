@@ -18,7 +18,7 @@ ROOT = Path(__file__).parents[1]
 
 def test_local_plan_render_config_is_exact_and_independent() -> None:
     config = json.loads((ROOT / "config/tgw-plan-render-local.json").read_text(encoding="utf-8"))
-    assert config["postgres_dsn"] == "dbname=tgw_lib_dev_state_machine"
+    assert config["postgres_dsn"] == "dbname=tgw_lib_dev_state_machine user=tgw_coding"
     assert config["standalone_plan_root"] == ("/opt/TGW/library/approved/058e2f980201cc78245358e4901cf007063f2c29")
     assert config["plan_repository_root"] == "/opt/TGW/library/plans"
     assert config["plan_approved_commit"] == ("058e2f980201cc78245358e4901cf007063f2c29")

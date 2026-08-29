@@ -224,7 +224,7 @@ def test_render_writes_file(tmp_path):
 
 def test_render_uses_explicit_todo_database_without_global_rebind(tmp_path):
     cfg = _cfg(tmp_path)
-    cfg['postgres_dsn'] = 'dbname=tgw_lib_dev_state_machine'
+    cfg['postgres_dsn'] = 'dbname=tgw_lib_dev_state_machine user=tgw_coding'
 
     with patch('tgw.todo.todo_list', return_value=[]) as todo_list:
         result = render_taskboard(cfg)
@@ -232,7 +232,7 @@ def test_render_uses_explicit_todo_database_without_global_rebind(tmp_path):
     assert result['ok'] is True
     todo_list.assert_called_once_with(
         show_all=True,
-        dsn='dbname=tgw_lib_dev_state_machine',
+        dsn='dbname=tgw_lib_dev_state_machine user=tgw_coding',
     )
 
 

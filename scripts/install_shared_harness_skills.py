@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Install TGW's canonical skills through native per-harness discovery paths."""
+"""Install TGW's canonical skills through native per-harness discovery paths.
+
+Harness onboarding never creates a PostgreSQL login role: a new harness joins
+the ordinary ``tgw-coders`` Unix group and the universal ``tgw_coding`` peer
+map (config/environment/postgresql/pg_ident.conf), then this installer links
+the two canonical skills into its native discovery path.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +23,7 @@ SKILLS = ("tgw-plan", "tgw-review")
 DESTINATIONS = {
     "claude": Path(".claude/skills"),
     "codex": Path(".codex/skills"),
+    "deepseek": Path(".dsh/skills"),
     "hermes": Path(".hermes/skills/tgw"),
 }
 

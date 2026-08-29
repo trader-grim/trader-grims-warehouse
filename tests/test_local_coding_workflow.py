@@ -31,7 +31,7 @@ def _config(tmp_path: Path) -> Path:
         json.dumps(
             {
                 "schema": "tgw-local-coding-workflow/v1",
-                "postgres_dsn": "dbname=tgw_lib_dev_state_machine",
+                "postgres_dsn": "dbname=tgw_lib_dev_state_machine user=tgw_coding",
                 "queue": {"poll_interval_s": 2},
                 "coding": {
                     "repository_root": str(repository),
@@ -48,7 +48,7 @@ def _config(tmp_path: Path) -> Path:
 def test_local_config_has_no_remote_or_authority_dependency(tmp_path: Path) -> None:
     config = local_workflow.load_config(_config(tmp_path))
 
-    assert config["postgres_dsn"] == "dbname=tgw_lib_dev_state_machine"
+    assert config["postgres_dsn"] == "dbname=tgw_lib_dev_state_machine user=tgw_coding"
     assert "api_endpoint" not in config["coding"]
     assert "worker_identity" not in config["coding"]
 

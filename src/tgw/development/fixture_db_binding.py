@@ -1,6 +1,7 @@
 """Fail-closed database binding for the one-shot local fixture proof."""
 from __future__ import annotations
 
+import grp
 import importlib
 import os
 import pwd
@@ -13,7 +14,8 @@ from psycopg2.extensions import parse_dsn
 from tgw.config import load_config, load_json_strict
 
 DEVELOPMENT_DATABASE = "tgw_lib_dev_state_machine"
-DEVELOPMENT_WRITE_IDENTITIES = frozenset({"db", "codex"})
+UNIVERSAL_EXECUTION_ROLE = "tgw_coding"
+CODING_GROUP = "tgw-coders"
 DEFAULT_LOCAL_CONFIG = Path("/opt/TGW/tgw-lib/config/tgw-coding-local.json")
 
 
@@ -69,6 +71,20 @@ def fixture_worker_config(
     return {"postgres_dsn": dsn, "coding": dict(coding)}
 
 
+def _require_coding_unix_identity(actor: str) -> None:
+    """Require the invoking Unix account to be an ordinary tgw-coders member."""
+    try:
+        group = grp.getgrnam(CODING_GROUP)
+    except KeyError as exc:
+        raise FixtureDatabaseBindingError(
+            f"fixture coding group {CODING_GROUP} is unavailable"
+        ) from exc
+    if actor not in group.gr_mem:
+        raise FixtureDatabaseBindingError(
+            f"fixture process is not a {CODING_GROUP} Unix identity"
+        )
+
+
 def initialize_fixture_database(
     *, config_path: Path = DEFAULT_LOCAL_CONFIG,
     connect: Callable[[str], Any] = psycopg2.connect,
@@ -76,8 +92,9 @@ def initialize_fixture_database(
     """Validate and install the one local DSN into both fixture adapters.
 
     This never selects a default DSN, contacts a remote endpoint, or elevates
-    privileges.  PostgreSQL peer identity must match the invoking ``db`` or
-    ``codex`` Unix account.
+    privileges.  PostgreSQL peer authentication must resolve the invoking
+    ordinary ``tgw-coders`` Unix account to the universal ``tgw_coding``
+    execution role; the shared development DSN explicitly names that role.
     """
     dsn = _explicit_dsn(config_path)
     try:
@@ -85,13 +102,14 @@ def initialize_fixture_database(
     except Exception as exc:
         raise FixtureDatabaseBindingError("fixture postgres_dsn is malformed") from exc
     actor = pwd.getpwuid(os.geteuid()).pw_name
-    if actor not in DEVELOPMENT_WRITE_IDENTITIES:
-        raise FixtureDatabaseBindingError("fixture process is not a local coding Unix identity")
+    _require_coding_unix_identity(actor)
     if (
         parsed.get("dbname") != DEVELOPMENT_DATABASE
-        or parsed.get("user") not in (None, "", actor)
+        or parsed.get("user") != UNIVERSAL_EXECUTION_ROLE
     ):
-        raise FixtureDatabaseBindingError("fixture postgres_dsn does not name the configured development target")
+        raise FixtureDatabaseBindingError(
+            "fixture postgres_dsn does not name the configured development target"
+        )
     host = parsed.get("host")
     if host not in (None, "", "/var/run/postgresql"):
         raise FixtureDatabaseBindingError("fixture postgres_dsn must use a local PostgreSQL endpoint")
@@ -104,8 +122,14 @@ def initialize_fixture_database(
         raise
     except Exception as exc:
         raise FixtureDatabaseBindingError("fixture development database preflight failed") from exc
-    if database != DEVELOPMENT_DATABASE or role != actor or endpoint is not None:
-        raise FixtureDatabaseBindingError("fixture database connection is not the configured local development target")
+    if (
+        database != DEVELOPMENT_DATABASE
+        or role != UNIVERSAL_EXECUTION_ROLE
+        or endpoint is not None
+    ):
+        raise FixtureDatabaseBindingError(
+            "fixture database connection is not the configured local development target"
+        )
     # Set the explicit DSN before importing the side-effect-free Todo adapter;
     # neither import nor init is allowed to perform schema work or use a
     # legacy fallback in this fixture path.
@@ -114,4 +138,8 @@ def initialize_fixture_database(
     queue = importlib.import_module("tgw.queue.state_machine")
     todo.init(dsn)
     queue.init(dsn)
-    return {"database": database, "role": role, "config_path": str(config_path)}
+    return {
+        "database": database,
+        "role": UNIVERSAL_EXECUTION_ROLE,
+        "config_path": str(config_path),
+    }

@@ -130,6 +130,12 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         "bin/tgw-operator": (ROOT / "bin/tgw-operator").read_text(),
         "bin/tgw-coding-bootstrap": (ROOT / "bin/tgw-coding-bootstrap").read_text(),
         "config/tgw-coding-local-roles.sql": "SELECT 1;\n",
+        "config/environment/postgresql/pg_ident.conf": (
+            ROOT / "config/environment/postgresql/pg_ident.conf"
+        ).read_text(encoding="utf-8"),
+        "config/environment/postgresql/pg_hba.conf": (
+            ROOT / "config/environment/postgresql/pg_hba.conf"
+        ).read_text(encoding="utf-8"),
         "systemd/tgw-codex-implement-worker.service": "[Service]\nExecStart=/bin/true\n",
         "systemd/tgw-claude-review-worker.service": "[Service]\nExecStart=/bin/true\n",
         "systemd/tgw-controller-verify-worker.service": "[Service]\nExecStart=/bin/true\n",
@@ -214,7 +220,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         config,
         {
             "schema": "tgw-local-coding-workflow/v1",
-            "postgres_dsn": "dbname=tgw_lib_dev_state_machine",
+            "postgres_dsn": "dbname=tgw_lib_dev_state_machine user=tgw_coding",
             "coding": {
                 "repository_root": str(repository),
                 "worktree_root": str(worktrees),
@@ -452,6 +458,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         plan_render_config=plan_render_config,
         runtime_root=runtime_root,
         local_bin=local_bin,
+        postgresql_conf_dir=tmp_path / "postgresql",
         operator_cli=operator_cli,
         coding_bootstrap=coding_bootstrap,
         context_snapshot=snapshot_path,
@@ -492,6 +499,14 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     publisher.write_bytes(doctor_cli._CONTEXT_DISPATCH_SHIM)
     launcher.chmod(0o555)
     publisher.chmod(0o555)
+    pg_conf = tmp_path / "postgresql"
+    pg_conf.mkdir(parents=True, exist_ok=True)
+    (pg_conf / "pg_ident.conf").write_text(
+        (ROOT / "config/environment/postgresql/pg_ident.conf").read_text(encoding="utf-8")
+    )
+    (pg_conf / "pg_hba.conf").write_text(
+        (ROOT / "config/environment/postgresql/pg_hba.conf").read_text(encoding="utf-8")
+    )
     return paths, head, tree
 
 
@@ -1044,7 +1059,7 @@ def test_coding_bootstrap_is_explicit_and_context_independent(
     _git(repository, "config", "user.email", "bootstrap@example.invalid")
     candidate_config = {
         "schema": "tgw-local-coding-workflow/v1",
-        "postgres_dsn": "dbname=tgw_lib_dev_state_machine",
+        "postgres_dsn": "dbname=tgw_lib_dev_state_machine user=tgw_coding",
         "coding": {
             "repository_root": str(repository),
             "worktree_root": str(tmp_path / "worktrees"),
@@ -3955,7 +3970,8 @@ def test_direct_root_database_check_uses_durable_actor_without_sudo_environment(
     _bind_direct_root_coding_probe(paths, monkeypatch)
     observed = {}
     database = {
-        "actor": "codex",
+        "actor": "tgw_coding",
+        "universal_role": True,
         "database_connect": True,
         "schema_usage": True,
         "role_member": True,
@@ -3981,7 +3997,8 @@ def test_direct_root_database_check_uses_durable_actor_without_sudo_environment(
     result = doctor_cli.check_database(paths)
 
     assert result["state"] == "PASS"
-    assert result["evidence"]["actor"] == "codex"
+    assert result["evidence"]["actor"] == "tgw_coding"
+    assert result["evidence"]["unix_actor"] == "codex"
     assert observed["command"][:5] == [
         "sudo",
         "-n",
@@ -4008,7 +4025,8 @@ def test_root_database_postcheck_runs_as_the_invoking_operator(tmp_path: Path, m
     def run(command, **_kwargs):
         observed["command"] = command
         result = {
-            "actor": "codex",
+            "actor": "tgw_coding",
+            "universal_role": True,
             "database_connect": True,
             "schema_usage": True,
             "role_member": True,
@@ -4031,7 +4049,8 @@ def test_root_database_postcheck_runs_as_the_invoking_operator(tmp_path: Path, m
     result = doctor_cli.check_database(paths)
 
     assert result["state"] == "PASS"
-    assert result["evidence"]["actor"] == "codex"
+    assert result["evidence"]["actor"] == "tgw_coding"
+    assert result["evidence"]["unix_actor"] == "codex"
     assert observed["command"][:5] == [
         "sudo",
         "-n",
@@ -8215,6 +8234,8 @@ def test_inventory_scans_all_declared_systemd_and_archive_roots(
 def test_database_check_source_covers_every_granted_object_and_execute_privilege() -> None:
     source = Path(doctor_cli.__file__).read_text(encoding="utf-8")
 
+    assert "universal_role" in source
+    assert "current_user = 'tgw_coding'" in source
     assert "history_access" in source
     assert "history_sequence_access" in source
     assert "has_function_privilege" in source
@@ -8358,13 +8379,13 @@ def test_database_check_fails_until_progress_note_exists(tmp_path, monkeypatch) 
     paths, head, _tree = _fixture(tmp_path)
     observation = {
         key: True for key in (
-            "database_connect", "schema_usage", "role_member", "todo_access",
-            "queue_access", "history_access", "todo_sequence_access",
-            "history_sequence_access", "claim_function_access",
-            "recovery_function_access",
+            "universal_role", "database_connect", "schema_usage", "role_member",
+            "todo_access", "queue_access", "history_access",
+            "todo_sequence_access", "history_sequence_access",
+            "claim_function_access", "recovery_function_access",
         )
     }
-    observation.update(actor="codex", progress_note_column=False)
+    observation.update(actor="tgw_coding", progress_note_column=False)
     monkeypatch.setattr(
         doctor_cli,
         "_database_observation",
@@ -8403,12 +8424,14 @@ def test_database_repair_pipes_exact_git_sql_across_private_release_ancestry(
         },
     ])
     observed: dict[str, object] = {}
+    calls: list[dict[str, object]] = []
     verified: list[tuple[str, Path]] = []
 
     def run(command, **kwargs):
+        calls.append({"command": command, "input": kwargs.get("input")})
         observed["command"] = command
         observed["input"] = kwargs.get("input")
-        return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "t\n", "")
 
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
     monkeypatch.setattr(
@@ -8425,10 +8448,14 @@ def test_database_repair_pipes_exact_git_sql_across_private_release_ancestry(
 
     assert result["ok"] is True
     assert verified == [(head, release)]
-    assert observed["input"] == migration
-    assert "--file" not in observed["command"]
-    assert str(release) not in observed["command"]
-    assert observed["command"][:5] == ["sudo", "-n", "-u", "postgres", "psql"]
+    migration_call = calls[0]
+    assert migration_call["input"] == migration
+    assert "--file" not in migration_call["command"]
+    assert str(release) not in migration_call["command"]
+    assert migration_call["command"][:5] == ["sudo", "-n", "-u", "postgres", "psql"]
+    reload_call = calls[1]
+    assert reload_call["input"] is None
+    assert any("pg_reload_conf()" in arg for arg in reload_call["command"])
 
 
 def test_database_stdin_failure_is_receipted_and_fails_closed(
@@ -8460,6 +8487,134 @@ def test_database_stdin_failure_is_receipted_and_fails_closed(
         doctor_cli.repair("database", paths)
 
     assert receipts == ["database-started", "database-failed"]
+
+
+def test_peer_auth_check_is_functional_when_unprivileged(tmp_path: Path) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+
+    result = doctor_cli.check_database_peer_auth(paths)
+
+    assert result["state"] == "PASS"
+    assert result["evidence"]["checked"] is False
+    assert "functional peer-auth proof" in result["detail"]
+
+
+def test_peer_auth_check_requires_complete_ident_and_ordered_hba(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, head, _tree = _fixture(tmp_path)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    conf = paths.postgresql_conf_dir
+    (conf / "pg_hba.conf").write_text(
+        "local   all             all                                     peer\n"
+        "local   all             tgw_coding      peer map=tgw-coders\n",
+        encoding="utf-8",
+    )
+    (conf / "pg_ident.conf").write_text(
+        "tgw-coders      db                      tgw_coding\n",
+        encoding="utf-8",
+    )
+
+    result = doctor_cli.check_database_peer_auth(paths)
+
+    assert result["state"] == "FAIL"
+    assert result["evidence"]["pg_hba"]["exact"] is False
+    assert result["evidence"]["pg_ident"]["exact"] is False
+    assert result["evidence"]["pg_ident"]["missing"]
+    assert result["operator_action"] == (
+        "sudo -n /usr/local/sbin/tgw-coding-bootstrap "
+        f"--commit {head} --repair database"
+    )
+
+
+def test_peer_auth_check_passes_when_materialization_is_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+
+    result = doctor_cli.check_database_peer_auth(paths)
+
+    assert result["state"] == "PASS"
+    assert result["evidence"]["checked"] is True
+    assert result["evidence"]["pg_ident"]["exact"] is True
+    assert result["evidence"]["pg_hba"]["exact"] is True
+
+
+def test_peer_auth_check_rejects_no_map_shadow_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    conf = paths.postgresql_conf_dir
+    hba = (conf / "pg_hba.conf").read_text(encoding="utf-8")
+    (conf / "pg_hba.conf").write_text(
+        hba.replace(
+            "local   all             tgw_coding      peer map=tgw-coders",
+            "local   all             tgw_coding      peer",
+        ),
+        encoding="utf-8",
+    )
+
+    result = doctor_cli.check_database_peer_auth(paths)
+
+    assert result["state"] == "FAIL"
+    assert result["evidence"]["pg_hba"]["conflicting_no_map_line"] is True
+
+
+def test_database_repair_materializes_peer_auth_and_reloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, head, tree = _fixture(tmp_path)
+    conf = paths.postgresql_conf_dir
+    (conf / "pg_hba.conf").write_text(
+        "local   all             all                                     peer\n",
+        encoding="utf-8",
+    )
+    (conf / "pg_ident.conf").write_text("# stale ident\n", encoding="utf-8")
+    commands: list[list[str]] = []
+    inputs: list[str | None] = []
+    check_calls = 0
+
+    def run(command, **kwargs):
+        commands.append(command)
+        inputs.append(kwargs.get("input"))
+        return subprocess.CompletedProcess(command, 0, "t\n", "")
+
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(
+        doctor_cli, "_verify_release_tree", lambda *_args: {"tree": tree}
+    )
+
+    def check_database(_paths):
+        nonlocal check_calls
+        check_calls += 1
+        return {
+            "state": "FAIL" if check_calls == 1 else "PASS",
+            "evidence": {"progress_note_column": check_calls > 1},
+        }
+
+    monkeypatch.setattr(doctor_cli, "check_database", check_database)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_receipt", lambda *_args: "receipt.json")
+
+    result = doctor_cli.repair_database(paths)
+
+    assert result["ok"] is True
+    assert result["changed"] is True
+    assert any(
+        any("pg_reload_conf()" in arg for arg in command) for command in commands
+    )
+    ident = (conf / "pg_ident.conf").read_text(encoding="utf-8")
+    assert "tgw-coders      deepseek                tgw_coding" in ident
+    hba = (conf / "pg_hba.conf").read_text(encoding="utf-8")
+    managed_index = hba.splitlines().index(
+        "local   all             tgw_coding      peer map=tgw-coders"
+    )
+    catch_all_index = hba.splitlines().index(
+        "local   all             all                                     peer"
+    )
+    assert managed_index < catch_all_index
 
 
 def test_doctor_launcher_is_local_and_provider_independent() -> None:

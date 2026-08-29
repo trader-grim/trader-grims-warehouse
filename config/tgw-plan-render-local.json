@@ -1,6 +1,6 @@
 {
   "schema": "tgw-local-plan-render/v1",
-  "postgres_dsn": "dbname=tgw_lib_dev_state_machine",
+  "postgres_dsn": "dbname=tgw_lib_dev_state_machine user=tgw_coding",
   "standalone_plan_root": "/opt/TGW/library/approved/058e2f980201cc78245358e4901cf007063f2c29",
   "plan_repository_root": "/opt/TGW/library/plans",
   "plan_approved_commit": "058e2f980201cc78245358e4901cf007063f2c29",

@@ -223,6 +223,7 @@ class DoctorPaths:
     plan_render_config: Path = Path("/opt/TGW/tgw-lib/config/tgw-plan-render-local.json")
     plan_render_root: Path = Path("/opt/TGW/var/plan-render")
     plan_render_log_root: Path = Path("/opt/TGW/var/plan-render/log")
+    postgresql_conf_dir: Path = Path("/etc/postgresql/17/main")
     runtime_root: Path = Path("/opt/TGW/tgw-lib/coding-runtime")
     local_bin: Path = Path("/opt/TGW/tgw-lib/bin")
     operator_cli: Path = Path("/usr/local/bin/tgw")
@@ -4648,6 +4649,7 @@ def _coding_config(paths: DoctorPaths) -> dict[str, Any]:
 _DATABASE_OBSERVATION_SQL = """
 SELECT json_build_object(
     'actor', current_user,
+    'universal_role', current_user = 'tgw_coding',
     'database_connect', has_database_privilege(current_user, current_database(), 'CONNECT'),
     'schema_usage', has_schema_privilege(current_user, 'public', 'USAGE'),
     'role_member', pg_has_role(current_user, 'tgw_coding', 'member'),
@@ -4716,10 +4718,10 @@ def check_database(paths: DoctorPaths) -> dict[str, Any]:
     repair = _privileged_repair_action(paths, "database")
     try:
         config = _coding_config(paths)
-        row, active = _database_observation(
-            config, _ordinary_coding_probe_actor(paths)
-        )
+        actor = _ordinary_coding_probe_actor(paths)
+        row, active = _database_observation(config, actor)
         required = (
+            "universal_role",
             "database_connect",
             "schema_usage",
             "role_member",
@@ -4736,12 +4738,292 @@ def check_database(paths: DoctorPaths) -> dict[str, Any]:
         return _check(
             "database.local-coding",
             "PASS" if ok else "FAIL",
-            f"peer actor {row.get('actor')} has {'all' if ok else 'incomplete'} local coding grants; {active} active job(s)",
-            evidence={**row, "active_jobs": active, "database": config["postgres_dsn"]},
+            f"peer actor {actor} via universal role {row.get('actor')} has {'all' if ok else 'incomplete'} local coding grants; {active} active job(s)",
+            evidence={
+                **row,
+                "active_jobs": active,
+                "database": config["postgres_dsn"],
+                "unix_actor": actor,
+            },
             repair=None if ok else repair,
         )
     except Exception as exc:
         return _failed("database.local-coding", exc, repair=repair)
+
+
+_PEER_MAP_NAME = "tgw-coders"
+_PEER_TARGET_ROLE = "tgw_coding"
+_PEER_IDENT_RELATIVE = Path("config/environment/postgresql/pg_ident.conf")
+_PEER_HBA_RELATIVE = Path("config/environment/postgresql/pg_hba.conf")
+_PEER_AUTH_ENTRY = re.compile(r"^\s*(\S+)\s+(\S+)\s+(\S+)\s*(?:#.*)?$")
+_PEER_HBA_LINE = re.compile(r"^local\s+\S+\s+tgw_coding\s+peer\s+map=tgw-coders\s*$")
+# A tgw_coding peer line without the map would shadow the managed line under
+# pg_hba first-match semantics and must be treated as a conflict.
+_PEER_HBA_CONFLICT_LINE = re.compile(r"^local\s+\S+\s+tgw_coding\s+peer\b(?!\s+map=tgw-coders)")
+
+
+def _canonical_peer_ident_entries(paths: DoctorPaths) -> list[tuple[str, str, str]]:
+    """Parse the canonical pg_ident map into (map, system_user, pg_role) rows."""
+    source = paths.repository / _PEER_IDENT_RELATIVE
+    try:
+        text = source.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DoctorError("canonical pg_ident materialization is unavailable") from exc
+    rows: list[tuple[str, str, str]] = []
+    for line in text.splitlines():
+        match = _PEER_AUTH_ENTRY.match(line)
+        if match is None:
+            continue
+        rows.append((match.group(1), match.group(2), match.group(3)))
+    return rows
+
+
+def _managed_peer_hba_line(paths: DoctorPaths) -> str:
+    """Return the managed tgw_coding peer line from the canonical pg_hba."""
+    source = paths.repository / _PEER_HBA_RELATIVE
+    try:
+        text = source.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DoctorError("canonical pg_hba materialization is unavailable") from exc
+    for line in text.splitlines():
+        if _PEER_HBA_LINE.match(line):
+            return line
+    raise DoctorError("canonical pg_hba materialization has no tgw_coding peer line")
+
+
+def _live_ident_entries(paths: DoctorPaths) -> list[tuple[str, str, str]]:
+    path = paths.postgresql_conf_dir / "pg_ident.conf"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DoctorError("installed pg_ident.conf is unreadable") from exc
+    rows: list[tuple[str, str, str]] = []
+    for line in text.splitlines():
+        match = _PEER_AUTH_ENTRY.match(line)
+        if match is None:
+            continue
+        rows.append((match.group(1), match.group(2), match.group(3)))
+    return rows
+
+
+def _peer_auth_materialization(paths: DoctorPaths) -> dict[str, Any]:
+    """Verify the installed peer-auth host materialization (root-only).
+
+    The unprivileged functional proof is the database.local-coding check
+    itself: connecting through the universal DSN as each ordinary actor can
+    succeed only when pg_hba ordering and the pg_ident map are correct.  This
+    file-state verification additionally guards the root bootstrap/repair path.
+    """
+    if os.geteuid() != 0:
+        return {
+            "checked": False,
+            "detail": "unprivileged; functional peer-auth proof via database.local-coding",
+        }
+    canonical = _canonical_peer_ident_entries(paths)
+    expected_users = {
+        system_user
+        for map_name, system_user, _role in canonical
+        if map_name == _PEER_MAP_NAME
+    }
+    live_ident = _live_ident_entries(paths)
+    live_map = {
+        (map_name, system_user): role
+        for map_name, system_user, role in live_ident
+        if map_name == _PEER_MAP_NAME
+    }
+    live_users = {system_user for map_name, system_user in live_map}
+    missing = sorted(expected_users - live_users)
+    wrong = sorted(
+        f"{system_user}->{role}"
+        for (map_name, system_user), role in live_map.items()
+        if role != _PEER_TARGET_ROLE
+    )
+    ident_exact = (
+        not missing
+        and not wrong
+        and all(
+            live_map.get((map_name, system_user)) == role
+            for map_name, system_user, role in canonical
+        )
+    )
+    hba_path = paths.postgresql_conf_dir / "pg_hba.conf"
+    try:
+        hba_lines = hba_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise DoctorError("installed pg_hba.conf is unreadable") from exc
+    managed_line = _managed_peer_hba_line(paths)
+    managed_index = next(
+        (index for index, line in enumerate(hba_lines) if _PEER_HBA_LINE.match(line)),
+        None,
+    )
+    conflict_index = next(
+        (
+            index
+            for index, line in enumerate(hba_lines)
+            if _PEER_HBA_CONFLICT_LINE.match(line)
+        ),
+        None,
+    )
+    catch_all_index = next(
+        (
+            index
+            for index, line in enumerate(hba_lines)
+            if re.match(r"^local\s+\S+\s+all\s+peer\b", line)
+        ),
+        None,
+    )
+    ordered = managed_index is not None and (
+        catch_all_index is None or managed_index < catch_all_index
+    )
+    return {
+        "checked": True,
+        "pg_ident": {
+            "exact": ident_exact,
+            "missing": missing,
+            "wrong_target": wrong,
+            "canonical_entries": len(canonical),
+            "live_entries": len(live_map),
+        },
+        "pg_hba": {
+            "exact": managed_index is not None and ordered and conflict_index is None,
+            "managed_line": managed_line,
+            "line_present": managed_index is not None,
+            "precedes_catch_all_peer": ordered,
+            "conflicting_no_map_line": conflict_index is not None,
+        },
+    }
+
+
+def check_database_peer_auth(paths: DoctorPaths) -> dict[str, Any]:
+    repair = _privileged_repair_action(paths, "database")
+    try:
+        materialization = _peer_auth_materialization(paths)
+    except Exception as exc:
+        return _failed("database.local-coding-peer-auth", exc, repair=repair)
+    if not materialization["checked"]:
+        return _check(
+            "database.local-coding-peer-auth",
+            "PASS",
+            materialization["detail"],
+            evidence=materialization,
+        )
+    pg_ident = materialization["pg_ident"]
+    pg_hba = materialization["pg_hba"]
+    exact = pg_ident["exact"] and pg_hba["exact"]
+    if exact:
+        detail = "universal tgw_coding peer map and pg_hba ordering are exact"
+    else:
+        parts: list[str] = []
+        if not pg_ident["exact"]:
+            detail_parts = []
+            if pg_ident["missing"]:
+                detail_parts.append("missing " + ", ".join(pg_ident["missing"]))
+            if pg_ident["wrong_target"]:
+                detail_parts.append("wrong " + ", ".join(pg_ident["wrong_target"]))
+            parts.append("pg_ident: " + "; ".join(detail_parts))
+        if not pg_hba["exact"]:
+            parts.append(
+                "pg_hba peer line absent, conflicting no-map peer line present, "
+                "or ordered after a catch-all peer line"
+            )
+        detail = "peer-auth host materialization differs: " + "; ".join(parts)
+    return _check(
+        "database.local-coding-peer-auth",
+        "PASS" if exact else "FAIL",
+        detail,
+        evidence=materialization,
+        repair=None if exact else repair,
+    )
+
+
+def _materialize_peer_auth(
+    paths: DoctorPaths,
+    *,
+    ident_bytes: bytes,
+    managed_line: str,
+) -> None:
+    """Write the universal peer map and the managed pg_hba line idempotently.
+
+    Preserves every unrelated pg_ident map and pg_hba line byte-for-byte; only
+    the ``tgw-coders`` map and the managed tgw_coding peer line are managed.
+    """
+    conf_dir = paths.postgresql_conf_dir
+    if conf_dir.is_symlink() or not conf_dir.is_dir():
+        raise DoctorError("PostgreSQL configuration directory is unsafe")
+    ident_path = conf_dir / "pg_ident.conf"
+    hba_path = conf_dir / "pg_hba.conf"
+    try:
+        postgres_gid = pwd.getpwnam("postgres").pw_gid
+    except KeyError as exc:
+        raise DoctorError("postgres service account is unavailable") from exc
+    # Ownership hardening applies on the real root repair path; an
+    # unprivileged invocation (test or misuse) still materializes the bytes.
+    privileged = os.geteuid() == 0
+    file_uid = 0 if privileged else None
+    file_gid = postgres_gid if privileged else None
+    try:
+        existing_ident = ident_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        existing_ident = []
+    canonical_ident_lines = [
+        line
+        for line in ident_bytes.decode("utf-8").splitlines()
+        if _PEER_AUTH_ENTRY.match(line)
+    ]
+    retained = [
+        line
+        for line in existing_ident
+        if not (
+            (match := _PEER_AUTH_ENTRY.match(line))
+            and match.group(1) == _PEER_MAP_NAME
+        )
+    ]
+    new_ident = retained + [""] + canonical_ident_lines + [""]
+    _atomic_bytes(
+        ident_path,
+        ("\n".join(new_ident) + "\n").encode("utf-8"),
+        mode=0o640,
+        uid=file_uid,
+        gid=file_gid,
+    )
+    try:
+        existing_hba = hba_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        existing_hba = []
+    existing_hba = [
+        line
+        for line in existing_hba
+        if not (
+            _PEER_HBA_LINE.match(line) or _PEER_HBA_CONFLICT_LINE.match(line)
+        )
+    ]
+    postgres_index = next(
+        (
+            index
+            for index, line in enumerate(existing_hba)
+            if re.match(r"^local\s+\S+\s+postgres\s+peer\b", line)
+        ),
+        None,
+    )
+    if postgres_index is not None:
+        insert_at = postgres_index + 1
+    else:
+        insert_at = next(
+            (
+                index
+                for index, line in enumerate(existing_hba)
+                if line.lstrip().startswith("local ")
+            ),
+            0,
+        )
+    existing_hba.insert(insert_at, managed_line)
+    _atomic_bytes(
+        hba_path,
+        ("\n".join(existing_hba) + "\n").encode("utf-8"),
+        mode=0o640,
+        uid=file_uid,
+        gid=file_gid,
+    )
 
 
 def _unit_state(unit: str) -> dict[str, Any]:
@@ -5971,6 +6253,7 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         check_unix_access(paths),
         check_worktrees(paths),
         check_database(paths),
+        check_database_peer_auth(paths),
         check_units(paths),
         check_plan_render_worker(paths),
         check_runtime(paths),
@@ -8482,9 +8765,38 @@ def repair_database(
         if sql_mode != 0o644:
             raise DoctorError("exact coding role SQL mode differs")
         migration = migration_bytes.decode("utf-8")
+        ident_mode, ident_bytes = read_exact_tree_file(
+            paths.repository,
+            commit=desired,
+            tree=tree,
+            path="config/environment/postgresql/pg_ident.conf",
+        )
+        if ident_mode != 0o644:
+            raise DoctorError("exact pg_ident materialization mode differs")
+        hba_mode, hba_bytes = read_exact_tree_file(
+            paths.repository,
+            commit=desired,
+            tree=tree,
+            path="config/environment/postgresql/pg_hba.conf",
+        )
+        if hba_mode != 0o644:
+            raise DoctorError("exact pg_hba materialization mode differs")
+        managed_line = next(
+            (
+                line
+                for line in hba_bytes.decode("utf-8").splitlines()
+                if _PEER_HBA_LINE.match(line)
+            ),
+            None,
+        )
+        if managed_line is None:
+            raise DoctorError("exact pg_hba materialization has no tgw_coding peer line")
     except (ValueError, UnicodeDecodeError) as exc:
         raise DoctorError(f"cannot read the verified coding role SQL: {exc}") from exc
-    before = check_database(paths)
+    before = {
+        "database": check_database(paths),
+        "peer_auth": check_database_peer_auth(paths),
+    }
     result = _run(
         [
             "sudo",
@@ -8494,14 +8806,41 @@ def repair_database(
             "psql",
             "--dbname=tgw_lib_dev_state_machine",
         ],
-        timeout=30,
+        timeout=60,
         input=migration,
     )
     if result.returncode:
         raise DoctorError(result.stderr.strip() or "database role repair failed")
-    after = check_database(paths)
-    if after["state"] != "PASS":
+    _materialize_peer_auth(
+        paths,
+        ident_bytes=ident_bytes,
+        managed_line=managed_line,
+    )
+    reload_result = _run(
+        [
+            "sudo",
+            "-n",
+            "-u",
+            "postgres",
+            "psql",
+            "--dbname=tgw_lib_dev_state_machine",
+            "--no-align",
+            "--tuples-only",
+            "--command",
+            "SELECT pg_reload_conf();",
+        ],
+        timeout=30,
+    )
+    if reload_result.returncode or reload_result.stdout.strip() != "t":
+        raise DoctorError("PostgreSQL peer-auth configuration reload failed")
+    after = {
+        "database": check_database(paths),
+        "peer_auth": check_database_peer_auth(paths),
+    }
+    if after["database"]["state"] != "PASS":
         raise DoctorError("database schema or grants remain incomplete after repair")
+    if after["peer_auth"]["state"] != "PASS":
+        raise DoctorError("peer-auth host materialization remains incomplete after repair")
     receipt = _receipt(paths, "database", before, after)
     return {"ok": True, "operation": "database", "changed": before != after, "receipt": receipt}
 

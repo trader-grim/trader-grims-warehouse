@@ -9,7 +9,14 @@ from tgw.development.fixture_db_binding import (
     initialize_fixture_database,
 )
 
-DSN = "dbname=tgw_lib_dev_state_machine"
+DSN = "dbname=tgw_lib_dev_state_machine user=tgw_coding"
+UNIVERSAL_ROLE = "tgw_coding"
+
+
+class _CodingGroup:
+    gr_name = "tgw-coders"
+    gr_gid = 983
+    gr_mem = ("db", "codex", "claude", "deepseek")
 
 
 class _Cursor:
@@ -21,7 +28,7 @@ class _Cursor:
         self.query = sql
 
     def fetchone(self):
-        return ("tgw_lib_dev_state_machine", "codex", None)
+        return ("tgw_lib_dev_state_machine", UNIVERSAL_ROLE, None)
 
     def fetchall(self):
         return [(column,) for column in self.columns]
@@ -63,6 +70,17 @@ def _config(tmp_path, value=DSN):
     return path
 
 
+def _member(monkeypatch, actor="codex"):
+    monkeypatch.setattr(
+        "tgw.development.fixture_db_binding.pwd.getpwuid",
+        lambda _uid: SimpleNamespace(pw_name=actor),
+    )
+    monkeypatch.setattr(
+        "tgw.development.fixture_db_binding.grp.getgrnam",
+        lambda _name: _CodingGroup(),
+    )
+
+
 def test_explicit_configured_dsn_is_required(tmp_path):
     with pytest.raises(FixtureDatabaseBindingError, match="config is missing"):
         _explicit_dsn(tmp_path / "absent.json")
@@ -88,20 +106,26 @@ def test_configured_dsn_initializes_both_adapters(monkeypatch, tmp_path):
     calls = []
     todo = SimpleNamespace(init=lambda dsn: calls.append(("todo", dsn)))
     queue = SimpleNamespace(init=lambda dsn: calls.append(("queue", dsn)))
-    monkeypatch.setattr("tgw.development.fixture_db_binding.pwd.getpwuid", lambda _uid: SimpleNamespace(pw_name="codex"))
-    monkeypatch.setattr("tgw.development.fixture_db_binding.importlib.import_module", lambda name: todo if name == "tgw.todo" else queue)
+    _member(monkeypatch, actor="deepseek")
+    monkeypatch.setattr(
+        "tgw.development.fixture_db_binding.importlib.import_module",
+        lambda name: todo if name == "tgw.todo" else queue,
+    )
     result = initialize_fixture_database(config_path=_config(tmp_path), connect=lambda _dsn: _Connection())
     assert result["database"] == "tgw_lib_dev_state_machine"
+    assert result["role"] == UNIVERSAL_ROLE
     assert calls == [("todo", DSN), ("queue", DSN)]
 
 
 def test_wrong_identity_or_target_refuses_before_adapter_initialization(monkeypatch, tmp_path):
-    monkeypatch.setattr("tgw.development.fixture_db_binding.pwd.getpwuid", lambda _uid: SimpleNamespace(pw_name="tigwadev"))
-    with pytest.raises(FixtureDatabaseBindingError, match="coding Unix identity"):
+    _member(monkeypatch, actor="mallory")
+    with pytest.raises(FixtureDatabaseBindingError, match="tgw-coders Unix identity"):
         initialize_fixture_database(config_path=_config(tmp_path), connect=lambda _dsn: pytest.fail("must not connect"))
-    monkeypatch.setattr("tgw.development.fixture_db_binding.pwd.getpwuid", lambda _uid: SimpleNamespace(pw_name="codex"))
+    _member(monkeypatch, actor="codex")
     with pytest.raises(FixtureDatabaseBindingError, match="configured development target"):
         initialize_fixture_database(config_path=_config(tmp_path, "dbname=state_machine user=tgw"), connect=lambda _dsn: pytest.fail("must not connect"))
+    with pytest.raises(FixtureDatabaseBindingError, match="does not name the configured"):
+        initialize_fixture_database(config_path=_config(tmp_path, "dbname=tgw_lib_dev_state_machine"), connect=lambda _dsn: pytest.fail("must not connect"))
     with pytest.raises(FixtureDatabaseBindingError, match="connection is not"):
         initialize_fixture_database(config_path=_config(tmp_path), connect=lambda _dsn: _WrongRoleConnection())
 
@@ -114,7 +138,10 @@ def test_wrong_identity_or_target_refuses_before_adapter_initialization(monkeypa
     ],
 )
 def test_fixture_preflight_refuses_missing_todo_schema_columns(monkeypatch, tmp_path, columns, missing):
-    monkeypatch.setattr("tgw.development.fixture_db_binding.pwd.getpwuid", lambda _uid: SimpleNamespace(pw_name="codex"))
-    monkeypatch.setattr("tgw.development.fixture_db_binding.importlib.import_module", lambda _name: pytest.fail("must not import adapters"))
+    _member(monkeypatch, actor="codex")
+    monkeypatch.setattr(
+        "tgw.development.fixture_db_binding.importlib.import_module",
+        lambda _name: pytest.fail("must not import adapters"),
+    )
     with pytest.raises(FixtureDatabaseBindingError, match=missing):
         initialize_fixture_database(config_path=_config(tmp_path), connect=lambda _dsn: _Connection(columns))

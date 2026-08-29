@@ -1,6 +1,6 @@
 {
   "schema": "tgw-local-coding-workflow/v1",
-  "postgres_dsn": "dbname=tgw_lib_dev_state_machine",
+  "postgres_dsn": "dbname=tgw_lib_dev_state_machine user=tgw_coding",
   "queue": {
     "poll_interval_s": 2,
     "lease_seconds": 2100
