@@ -23,6 +23,7 @@ from typing import Any
 
 from tgw.development.partial_resume import (
     append_attempt,
+    candidate_changed_paths,
     classify,
     history,
     make_attempt,
@@ -733,6 +734,7 @@ class CodingWorker(QueueWorker):
 
         attempt_binding = None
         predecessor = None
+        remediation_parent: dict[str, str] | None = None
         if treatment_id == "codex-implement" and payload.get("todo_id") is not None:
             payload.setdefault("job_id", str(job.get("job_id") or ""))
             payload.setdefault("attempt_count", job.get("attempt_count"))
@@ -770,41 +772,69 @@ class CodingWorker(QueueWorker):
                 if payload.get("resume_of") or payload.get("resume_fingerprint"):
                     raise HardFailure("clean initial Codex attempt cannot carry resume authority")
             elif state["state"] == "CLOSED_CANDIDATE":
-                self._raise_if_cancelled(job)
-                latest = state["history"][-1]
-                artifacts = [
-                    *latest.get("artifacts", []),
-                    {
-                        "kind": "recovered_attempt",
-                        "attempt_hash": latest["attempt_hash"],
-                        "detail": "exact closed candidate recovered without rerunning Codex",
-                    },
-                ]
-                receipt = {
-                    "status": "PASS",
-                    "treatment_id": treatment_id,
-                    "treatment_version": str(payload.get("treatment_version", "1")),
-                    "graph_id": payload.get("graph_id"),
-                    "object_id": str(worktree),
-                    "object_generation": payload.get("object_generation"),
-                    "outcome": OUTCOME_SATISFIED,
-                    "established_conditions": ["implemented"],
-                    "artifacts": artifacts,
-                    "receipt_schema_id": "receipt/tgw-development/v1",
-                    "plan_binding": plan_binding,
-                    **(
-                        {"coding_lifecycle": dict(payload["coding_lifecycle"])}
-                        if payload.get("coding_lifecycle") is not None
-                        else {}
-                    ),
-                    **(
-                        {"coding_candidate": dict(payload["coding_candidate"])}
-                        if payload.get("coding_candidate") is not None
-                        else {}
-                    ),
-                }
-                self._persist_success_receipt(job, receipt_path_for_treatment(worktree, treatment_id), receipt)
-                return receipt
+                remediation = payload.get("task_spec", {}).get("remediation")
+                candidate = state.get("source", {})
+                if isinstance(remediation, dict):
+                    if (
+                        remediation.get("schema")
+                        != "tgw-local-coding-remediation-intent/v1"
+                        or remediation.get("root_id")
+                        != payload.get("coding_lifecycle", {}).get("root_id")
+                        or remediation.get("candidate_commit")
+                        != candidate.get("head")
+                        or remediation.get("candidate_tree")
+                        != candidate.get("tree")
+                        or not str(
+                            remediation.get("failure_receipt_hash", "")
+                        ).startswith("sha256:")
+                    ):
+                        raise HardFailure(
+                            "Codex remediation intent does not bind the exact closed candidate"
+                        )
+                    predecessor = state["history"][-1]["attempt_hash"]
+                    remediation_parent = {
+                        "commit": candidate["head"],
+                        "tree": candidate["tree"],
+                        "failure_receipt_hash": remediation[
+                            "failure_receipt_hash"
+                        ],
+                    }
+                else:
+                    self._raise_if_cancelled(job)
+                    latest = state["history"][-1]
+                    artifacts = [
+                        *latest.get("artifacts", []),
+                        {
+                            "kind": "recovered_attempt",
+                            "attempt_hash": latest["attempt_hash"],
+                            "detail": "exact closed candidate recovered without rerunning Codex",
+                        },
+                    ]
+                    receipt = {
+                        "status": "PASS",
+                        "treatment_id": treatment_id,
+                        "treatment_version": str(payload.get("treatment_version", "1")),
+                        "graph_id": payload.get("graph_id"),
+                        "object_id": str(worktree),
+                        "object_generation": payload.get("object_generation"),
+                        "outcome": OUTCOME_SATISFIED,
+                        "established_conditions": ["implemented"],
+                        "artifacts": artifacts,
+                        "receipt_schema_id": "receipt/tgw-development/v1",
+                        "plan_binding": plan_binding,
+                        **(
+                            {"coding_lifecycle": dict(payload["coding_lifecycle"])}
+                            if payload.get("coding_lifecycle") is not None
+                            else {}
+                        ),
+                        **(
+                            {"coding_candidate": dict(payload["coding_candidate"])}
+                            if payload.get("coding_candidate") is not None
+                            else {}
+                        ),
+                    }
+                    self._persist_success_receipt(job, receipt_path_for_treatment(worktree, treatment_id), receipt)
+                    return receipt
             else:
                 preservation_manifest(worktree, state, attempt_binding)
                 raise HardFailure(f"Codex implementation refuses {state['state']} worktree")
@@ -818,6 +848,41 @@ class CodingWorker(QueueWorker):
                 worktree=worktree,
                 job_id=str(job.get("job_id") or payload.get("job_id") or ""),
             )
+            if remediation_parent is not None and outcome == OUTCOME_SATISFIED:
+                closed = [
+                    item
+                    for item in artifacts
+                    if isinstance(item, dict)
+                    and item.get("kind") == "closed_candidate"
+                ]
+                if len(closed) != 1 or closed[0].get("base_commit") != remediation_parent["commit"]:
+                    raise HardFailure(
+                        "Codex remediation did not close one exact successor"
+                    )
+                candidate = source_fingerprint(worktree)
+                normalized = {
+                    **closed[0],
+                    "base_commit": attempt_binding["source_commit"],
+                    "changed_paths": candidate_changed_paths(
+                        worktree,
+                        attempt_binding["source_commit"],
+                        candidate["head"],
+                    ),
+                }
+                artifacts = [
+                    normalized if item is closed[0] else item
+                    for item in artifacts
+                ]
+                artifacts.append(
+                    {
+                        "kind": "remediation_successor",
+                        "parent_commit": remediation_parent["commit"],
+                        "parent_tree": remediation_parent["tree"],
+                        "failure_receipt_hash": remediation_parent[
+                            "failure_receipt_hash"
+                        ],
+                    }
+                )
             if attempt_binding is not None and outcome == OUTCOME_SATISFIED:
                 candidate = source_fingerprint(worktree)
                 closed = [item for item in artifacts if isinstance(item, dict) and item.get("kind") == "closed_candidate"]

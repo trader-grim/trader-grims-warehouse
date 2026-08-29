@@ -93,6 +93,10 @@ class ForemanConfig:
     # Populated only by the owner-commanded CLI start path, under the worktree
     # lease. Timer ticks retain the empty default and suppress every dirty tree.
     resume_bindings: dict[int, dict[str, str]] = field(default_factory=dict)
+    # Exact diagnostic findings for the next implementation successor.  This
+    # carries no authority; it only prevents the operator from copy/pasting a
+    # reviewer report back into a fresh implementation prompt.
+    remediation_bindings: dict[int, dict[str, Any]] = field(default_factory=dict)
     # Exact lifecycle identity supplied by the durable supervisor or recovered
     # by the recurring Foreman.  Jobs without this value are historical and can
     # never satisfy a lifecycle stage.
@@ -857,6 +861,13 @@ def tick(
                 authority = cfg.resume_bindings.get(chosen.todo.todo_id)
                 if authority:
                     payload_extra.update(authority)
+                remediation = cfg.remediation_bindings.get(
+                    chosen.todo.todo_id
+                )
+                if remediation:
+                    payload_extra["task_spec"]["remediation"] = dict(
+                        remediation
+                    )
             elif disposition.treatment_id == "controller-verify":
                 payload_extra["implementation_attempt_hash"] = (
                     chosen.implementation_attempt_hash

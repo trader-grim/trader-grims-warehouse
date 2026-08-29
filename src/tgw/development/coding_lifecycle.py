@@ -201,8 +201,11 @@ def job_binding(record: Mapping[str, Any]) -> dict[str, Any]:
         "execution_root_identity": binding["execution_root_identity"],
         "card_idempotency_key": binding["card_idempotency_key"],
         "closure_hash": binding["closure_hash"],
-        "resume_intent_hash": record.get("resume_intent", {}).get(
-            "resume_intent_hash"
+        "resume_intent_hash": (
+            record.get("resume_intent", {}).get("resume_intent_hash")
+            or record.get("remediation_intent", {}).get(
+                "remediation_intent_hash"
+            )
         ),
     }
     return {**unsigned, "job_binding_hash": _hash(unsigned)}
@@ -766,6 +769,59 @@ def _retry_publication(
     )
 
 
+def _begin_bounded_remediation(
+    record: dict[str, Any], *, stage: str, result: Mapping[str, Any]
+) -> bool:
+    """Turn exact controller/review findings into one new fenced generation."""
+    if stage not in {"controller", "review"}:
+        return False
+    receipt = result.get("receipt")
+    candidate = receipt.get("candidate") if isinstance(receipt, Mapping) else None
+    if (
+        not isinstance(candidate, Mapping)
+        or _COMMIT.fullmatch(str(candidate.get("head", ""))) is None
+        or _COMMIT.fullmatch(str(candidate.get("tree", ""))) is None
+        or not isinstance(result.get("receipt_hash"), str)
+    ):
+        return False
+    history = record.setdefault("remediation_history", [])
+    if not isinstance(history, list) or len(history) >= 3:
+        return False
+    archived = {
+        "generation": len(history) + 1,
+        "stage": stage,
+        "stages": record.get("stages", {}),
+        "effects": record.get("effects", {}),
+        "job_ids": record.get("job_ids", []),
+        "failure_result": dict(result),
+    }
+    archived["history_hash"] = _hash(archived)
+    history.append(archived)
+    intent = {
+        "schema": "tgw-local-coding-remediation-intent/v1",
+        "root_id": record["root_id"],
+        "binding_hash": record["binding"]["binding_hash"],
+        "generation": len(history),
+        "failed_stage": stage,
+        "failure_receipt_hash": result["receipt_hash"],
+        "reason": result.get("reason", "diagnostic findings require remediation"),
+        "candidate_commit": candidate["head"],
+        "candidate_tree": candidate["tree"],
+        "requested_at": _now(),
+    }
+    record["remediation_intent"] = {
+        **intent,
+        "remediation_intent_hash": _hash(intent),
+    }
+    record["stages"] = {}
+    record["effects"] = {}
+    record["job_ids"] = []
+    record["stage"] = "implementation"
+    record["state"] = "WAITING"
+    record.pop("failure", None)
+    return True
+
+
 def advance(
     store: LifecycleStore,
     identity: str,
@@ -885,6 +941,12 @@ def advance(
                 publication_retried = True
                 continue
             if outcome != "satisfied":
+                if _begin_bounded_remediation(
+                    record, stage=stage, result=result
+                ):
+                    record["updated_at"] = _now()
+                    record = store.put(record)
+                    continue
                 record["state"] = (
                     "FAILED" if outcome == "failed" else "REMEDIATION_REQUIRED"
                 )

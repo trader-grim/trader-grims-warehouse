@@ -405,7 +405,9 @@ def _source_identity(paths: DoctorPaths) -> tuple[str, str, str]:
     tree = _git(paths.repository, "rev-parse", "HEAD^{tree}")
     status_command = protected_git_command(paths.repository, "status", "--short")
     status_environment = dict(protected_git_environment())
-    if os.geteuid() == 0:
+    # getresuid is deliberately not a test/actor projection: only a genuinely
+    # privileged process may cross into the ordinary db account.
+    if os.geteuid() == 0 and os.getresuid()[1] == 0:
         status_command = [
             "/usr/sbin/runuser",
             "-u",
@@ -4659,6 +4661,7 @@ def repair_context(
     source_root: Path | None = None,
 ) -> dict[str, Any]:
     _require_root()
+    explicit_source_reconciliation = desired_commit is not None
     selected = _repair_context_artifacts(
         paths, desired_commit=desired_commit, source_root=source_root
     )
@@ -4691,7 +4694,56 @@ def repair_context(
     cursor = dict(before["cursor"])
     task_source = task.get("implementation", {}).get("development_source", {}).get("commit")
     if task_source != head:
-        raise DoctorError("current task and canonical source disagree; explicit operator disposition is required")
+        if not explicit_source_reconciliation or desired_commit != head:
+            raise DoctorError("current task and canonical source disagree; rerun the bounded repair with the exact clean canonical commit")
+        # An exact commit supplied to the privileged bootstrap is the operator's
+        # source disposition. Context is orientation, not an authority surface.
+        now = datetime.now().astimezone().isoformat()
+        previous = {
+            "commit": task_source,
+            "tree": task.get("implementation", {}).get("development_source", {}).get("tree"),
+            "state": task.get("implementation", {}).get("development_source", {}).get("state"),
+            "task_source": task.get("source"),
+        }
+        implementation = task.setdefault("implementation", {})
+        if not isinstance(implementation, dict):
+            raise DoctorError("current task implementation projection is malformed")
+        development_source = implementation.setdefault("development_source", {})
+        if not isinstance(development_source, dict):
+            raise DoctorError("current task development source projection is malformed")
+        history = task.setdefault("source_reconciliation_history", [])
+        if not isinstance(history, list):
+            raise DoctorError("current task source reconciliation history is malformed")
+        reconciliation = {
+            "schema": "tgw-context-source-reconciliation/v1",
+            "recorded_at": now,
+            "disposition": "EXPLICIT_EXACT_CANONICAL_SOURCE",
+            "previous": previous,
+            "successor": {"commit": head, "tree": tree},
+            "semantic_reconciliation": "PENDING",
+            "authority": False,
+        }
+        reconciliation["reconciliation_hash"] = _hash(reconciliation)
+        history.append(reconciliation)
+        development_source.update(
+            {
+                "state": "CANONICAL_SOURCE_ADVANCED_RECONCILIATION_PENDING",
+                "commit": head,
+                "tree": tree,
+            }
+        )
+        source_projection = task.setdefault("source", {})
+        if not isinstance(source_projection, dict):
+            raise DoctorError("current task source projection is malformed")
+        source_projection.update(
+            {
+                "repository": str(paths.repository),
+                "commit": head,
+                "tree": tree,
+                "canonical_working_tree_clean": True,
+            }
+        )
+        task["updated_at"] = now
     if cursor.get("plan_commit") != task.get("plan", {}).get("approved_commit"):
         raise DoctorError("task and cursor Plan commits disagree; source-only repair is unsafe")
     capability = task.get("implementation", {}).get("development_source", {}).get("next_leaf")
@@ -4704,6 +4756,10 @@ def repair_context(
         cursor["source_tree"] = tree
         cursor["updated_at"] = datetime.now().astimezone().isoformat()
     paths.context_cursor.parent.mkdir(parents=True, exist_ok=True)
+    task_fd, task_text = tempfile.mkstemp(
+        prefix=paths.context_task.name + ".doctor-stage.",
+        dir=paths.context_task.parent,
+    )
     cursor_fd, cursor_text = tempfile.mkstemp(
         prefix=paths.context_cursor.name + ".doctor-stage.",
         dir=paths.context_cursor.parent,
@@ -4712,18 +4768,21 @@ def repair_context(
         prefix=paths.context_snapshot.name + ".doctor-stage.",
         dir=paths.context_snapshot.parent,
     )
+    os.close(task_fd)
     os.close(cursor_fd)
     os.close(snapshot_fd)
+    staged_task = Path(task_text)
     staged_cursor = Path(cursor_text)
     staged_snapshot = Path(snapshot_text)
     try:
+        _atomic_json(staged_task, task)
         _atomic_json(staged_cursor, cursor)
         staged_snapshot.unlink(missing_ok=True)
         result = _run(
             [
                 str(selected_publisher),
                 "--task",
-                str(paths.context_task),
+                str(staged_task),
                 "--cursor",
                 str(staged_cursor),
                 "--output",
@@ -4817,7 +4876,8 @@ def repair_context(
         if primary_failure is not None:
             raise primary_failure.with_traceback(primary_failure.__traceback__)
         changed = (
-            before["cursor"] != cursor
+            before["task"] != task
+            or before["cursor"] != cursor
             or before["snapshot"] != after
             or snapshot_surface["uid"] != paths.context_install_uid
             or snapshot_surface["gid"] != paths.context_install_gid
@@ -4828,11 +4888,23 @@ def repair_context(
             raise DoctorError("canonical source changed during context repair")
         if _surface_snapshot(paths.context_task) != task_surface or _surface_snapshot(paths.context_cursor) != cursor_surface or _surface_snapshot(paths.context_snapshot) != snapshot_surface:
             raise DoctorError("context inputs changed concurrently; no live file was replaced")
+        committed_task: dict[str, Any] | None = None
         committed_cursor: dict[str, Any] | None = None
         committed_snapshot: dict[str, Any] | None = None
         try:
-            # The cursor is non-live publisher input. Commit it first; the one
-            # snapshot CAS below remains the sole MCP-visible cutover.
+            # Task and cursor are non-live publisher inputs. Commit them first;
+            # the one snapshot CAS below remains the sole MCP-visible cutover.
+            if before["task"] == task:
+                committed_task = task_surface
+            else:
+                committed_task = _cas_regular_file(
+                    paths.context_task,
+                    task_surface,
+                    _json_bytes(task),
+                    mode=task_surface["mode"],
+                    uid=task_surface["uid"],
+                    gid=task_surface["gid"],
+                )
             if before["cursor"] == cursor:
                 committed_cursor = cursor_surface
             else:
@@ -4844,7 +4916,7 @@ def repair_context(
                     uid=cursor_surface["uid"],
                     gid=cursor_surface["gid"],
                 )
-            if _surface_snapshot(paths.context_task) != task_surface or _surface_snapshot(paths.context_cursor) != committed_cursor:
+            if _surface_snapshot(paths.context_task) != committed_task or _surface_snapshot(paths.context_cursor) != committed_cursor:
                 raise DoctorError("Context inputs changed before atomic snapshot cutover")
             snapshot_metadata_exact = (
                 snapshot_surface["uid"] == paths.context_install_uid
@@ -4862,13 +4934,17 @@ def repair_context(
                     uid=paths.context_install_uid,
                     gid=paths.context_install_gid,
                 )
-            if _surface_snapshot(paths.context_task) != task_surface or _surface_snapshot(paths.context_cursor) != committed_cursor or _surface_snapshot(paths.context_snapshot) != committed_snapshot:
+            if (
+                _surface_snapshot(paths.context_task) != committed_task
+                or _surface_snapshot(paths.context_cursor) != committed_cursor
+                or _surface_snapshot(paths.context_snapshot) != committed_snapshot
+            ):
                 raise DoctorError("final Context transaction verification failed")
             receipt = _receipt(
                 paths,
                 "context",
                 before,
-                {"cursor": cursor, "snapshot": after},
+                {"task": task, "cursor": cursor, "snapshot": after},
             )
         except Exception as exc:
             rollback_errors: list[str] = []
@@ -4881,6 +4957,7 @@ def repair_context(
                     snapshot_surface,
                 ),
                 ("cursor", paths.context_cursor, committed_cursor, cursor_surface),
+                ("task", paths.context_task, committed_task, task_surface),
             ):
                 if committed is None:
                     continue
@@ -4908,6 +4985,7 @@ def repair_context(
             suffix = "; rollback errors: " + "; ".join(rollback_errors) if rollback_errors else "; " + ", ".join(rollback_states) if rollback_states else "; no live file was replaced"
             raise DoctorError(f"context commit failed: {exc}{suffix}") from exc
     finally:
+        staged_task.unlink(missing_ok=True)
         staged_cursor.unlink(missing_ok=True)
         staged_snapshot.unlink(missing_ok=True)
     return {
@@ -5684,10 +5762,14 @@ def _scan_shared_git_tree(
                             dir_fd=directory_descriptor,
                         )
                     except PermissionError:
-                        if in_immutable_directory(relative):
+                        if mutate and in_immutable_directory(relative):
                             raise DoctorError(
                                 f"cannot safely inventory immutable directory entry without O_NOATIME: {relative}"
                             )
+                        # Read-only diagnosis may fall back when the ordinary
+                        # coder does not own a protected preservation inode.
+                        # Mutation still fails closed above; inventory grants
+                        # no write or cleanup authority.
                         descriptor = os.open(
                             name,
                             os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
@@ -8239,6 +8321,58 @@ def _format(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _compact_diagnosis(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep operator JSON bounded; evidence remains available with --full."""
+    return {
+        key: value
+        for key, value in report.items()
+        if key not in {"checks"}
+    } | {
+        "checks": [
+            {
+                key: value
+                for key, value in item.items()
+                if key in {"id", "state", "detail", "repairable", "operator_action"}
+            }
+            for item in report.get("checks", [])
+        ]
+    }
+
+
+def _compact_inventory(report: Mapping[str, Any]) -> dict[str, Any]:
+    worktrees = report.get("worktrees", [])
+    safe = [
+        item
+        for item in worktrees
+        if not item.get("canonical")
+        and item.get("exists") is True
+        and item.get("dirty") is False
+        and item.get("unique_commits") == 0
+        and item.get("merged_into_canonical") is True
+        and not item.get("errors")
+    ]
+    attention = [item for item in worktrees if item.get("preservation_required")]
+    return {
+        "schema": "tgw-local-doctor-inventory-summary/v1",
+        "ok": report.get("ok"),
+        "host": report.get("host"),
+        "actor": report.get("actor"),
+        "observed_at": report.get("observed_at"),
+        "canonical_source": report.get("canonical_source"),
+        "counts": report.get("counts"),
+        "safe_cleanup_candidates": {
+            "count": len(safe),
+            "sample": [item.get("path") for item in safe[:20]],
+        },
+        "preservation_required": {
+            "count": len(attention),
+            "sample": [item.get("path") for item in attention[:20]],
+        },
+        "cleanup_boundary": report.get("cleanup_boundary"),
+        "full_inventory": "tgw doctor inventory --full",
+    }
+
+
 def repair_coding_bootstrap(
     commit: str, paths: DoctorPaths = DoctorPaths()
 ) -> dict[str, Any]:
@@ -8483,8 +8617,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tgw doctor")
     parser.add_argument("--json", action="store_true", dest="json_output")
     sub = parser.add_subparsers(dest="operation")
-    sub.add_parser("check", help="run read-only diagnosis (default)")
-    sub.add_parser("inventory", help="inventory linked and active-path remnants read-only")
+    check_parser = sub.add_parser("check", help="run read-only diagnosis (default)")
+    check_parser.add_argument("--full", action="store_true", help="include complete evidence")
+    inventory_parser = sub.add_parser("inventory", help="inventory linked and active-path remnants read-only")
+    inventory_parser.add_argument("--full", action="store_true", help="include every discovered row")
     census_parser = sub.add_parser("condition-policy-census", help="census cached condition policies read-only")
     census_parser.add_argument("--cache", required=True, type=Path)
     resume_parser = sub.add_parser("coding-resume", help="resume one exact local RESUMABLE_PARTIAL Todo")
@@ -8518,7 +8654,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(result, indent=2, sort_keys=True))
             return int(result["diagnosis"]["exit_code"])
         if args.operation == "inventory":
-            print(json.dumps(inventory(), indent=2, sort_keys=True))
+            result = inventory()
+            if not args.full:
+                result = _compact_inventory(result)
+            print(json.dumps(result, indent=2, sort_keys=True))
             return 0
         if args.operation == "condition-policy-census":
             print(json.dumps(condition_policy_census(args.cache), indent=2, sort_keys=True))
@@ -8539,6 +8678,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         result = diagnose()
         if args.json_output:
+            if not getattr(args, "full", False):
+                result = _compact_diagnosis(result)
             print(json.dumps(result, indent=2, sort_keys=True))
         else:
             print(_format(result))

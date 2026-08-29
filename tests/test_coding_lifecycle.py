@@ -422,6 +422,71 @@ def test_pp_start_aliases_exactly_one_smallest_todo_root_and_refuses_ambiguity(
         coding_cli.lifecycle_start(coding_cli.PP_REF, config_path=tmp_path / "x")
 
 
+def test_todo_lifecycle_start_creates_missing_unix_worktree_binding_and_returns_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    worktree = tmp_path / "todo-1921-plan-bound"
+    worktree.mkdir()
+    binding = plan_binding(worktree)
+    row = {"id": 1915, "done_at": None, "status_note": None}
+    solution = {
+        "plan_commit": binding["plan_commit"],
+        "solution_hash": binding["solution_hash"],
+        "closure_hash": binding["closure_hash"],
+    }
+    config = {
+        "postgres_dsn": "test",
+        "coding": {"lifecycle_root": str(tmp_path / "journal")},
+    }
+    calls = []
+    bound = False
+
+    def exact_binding(_identifier):
+        if not bound:
+            raise coding_cli.CodingCLIError("Todo 1915 has no exact Plan/Todo binding")
+        return row, binding
+
+    def prepare(*_args, **kwargs):
+        nonlocal bound
+        calls.append(kwargs)
+        bound = True
+        return {"ok": True, "session": {"cwd": str(worktree)}}
+
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: config)
+    monkeypatch.setattr(
+        coding_cli,
+        "_pp_runtime_binding",
+        lambda *_args: {
+            "selected_commit": binding["source_commit"],
+            "selected_tree": "d" * 40,
+        },
+    )
+    monkeypatch.setattr(coding_cli, "_plan_binding_for_todo", exact_binding)
+    monkeypatch.setattr(coding_cli, "start", prepare)
+    monkeypatch.setattr(
+        coding_cli,
+        "LifecycleStore",
+        lambda root: LifecycleStore(root, group_gid=os.getegid()),
+    )
+    local = __import__("tgw.development.local_workflow", fromlist=["load_solution"])
+    monkeypatch.setattr(local, "load_solution", lambda _path: solution)
+
+    result = coding_cli.lifecycle_start(1915, config_path=tmp_path / "x")
+
+    assert calls == [
+        {
+            "config_path": tmp_path / "x",
+            "solution_path": coding_cli.DEFAULT_SOLUTION,
+            "source_commit": binding["source_commit"],
+            "dispatch_jobs": False,
+        }
+    ]
+    assert result["binding_created"] is True
+    assert result["session"]["cwd"] == str(worktree)
+    assert result["session"]["argv"] == ["codex", "-C", str(worktree)]
+    assert result["session"]["observer"] == ["tgw", "coding", "status", "1915"]
+
+
 def test_resume_intent_is_durable_before_dispatch_and_retries_use_new_fence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -480,6 +545,59 @@ def test_resume_intent_is_durable_before_dispatch_and_retries_use_new_fence(
         row["job_id"]
         for row in coding_cli._bound_jobs(reopened, "codex-implement")
     ] == ["new"]
+
+
+def test_controller_finding_automatically_starts_one_fenced_remediation_generation(
+    tmp_path: Path,
+) -> None:
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+    original_fence = job_binding(record)
+    implementation_calls = 0
+
+    def implementation(current):
+        nonlocal implementation_calls
+        implementation_calls += 1
+        if implementation_calls == 1:
+            return stage_result(
+                current,
+                "implementation",
+                "satisfied",
+                receipt={"generation": 1},
+            )
+        return stage_result(
+            current,
+            "implementation",
+            "waiting",
+            reason="remediation worker pending",
+        )
+
+    def controller(current):
+        return stage_result(
+            current,
+            "controller",
+            "remediation",
+            receipt={
+                "schema": "tgw-local-coding-negative-queue-evidence/v1",
+                "candidate": {"head": "e" * 40, "tree": "f" * 40},
+            },
+            reason="missing source-bound test",
+            job_ids=["controller-job-1"],
+        )
+
+    observed = advance(
+        store,
+        record["root_id"],
+        {"implementation": implementation, "controller": controller},
+    )
+
+    assert observed["state"] == "WAITING"
+    assert observed["stage"] == "implementation"
+    assert implementation_calls == 2
+    assert len(observed["remediation_history"]) == 1
+    assert observed["remediation_intent"]["failed_stage"] == "controller"
+    assert observed["remediation_intent"]["candidate_commit"] == "e" * 40
+    assert job_binding(observed) != original_fence
 
 
 def test_resume_recovers_worker_completed_crash_boundary_with_new_fenced_job(

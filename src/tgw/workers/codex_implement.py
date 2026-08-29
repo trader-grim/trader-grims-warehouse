@@ -144,6 +144,19 @@ Preserve every current source byte. Continue from attempt {continuation["resume_
 with source fingerprint {continuation["resume_fingerprint"]}. Do not restart,
 clean, reset, stash, or replace the existing implementation.
 """
+    remediation_brief = ""
+    remediation = task.get("remediation")
+    if isinstance(remediation, dict):
+        remediation_brief = f"""
+This is remediation generation {remediation.get("generation")} for the exact
+closed candidate {remediation.get("candidate_commit")}. Address the diagnostic
+finding below by producing one clean successor. Do not restart the original
+implementation or change unrelated behavior.
+
+Failed stage: {remediation.get("failed_stage")}
+Finding: {remediation.get("reason")}
+Evidence: {remediation.get("failure_receipt_hash")}
+"""
     return f"""You are the Codex implementation treatment for TGW Todo #{task["todo_id"]}.
 
 Repository AGENTS.md is your actor contract. CLAUDE.md does not govern Codex.
@@ -152,6 +165,7 @@ configuration or secrets, contact production, access satellite machines, import
 memory, or create workflow receipt files. Implement only this bounded task and
 run proportionate offline tests:
 {continuation_brief}
+{remediation_brief}
 
 {task["body"]}
 

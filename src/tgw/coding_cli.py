@@ -41,6 +41,7 @@ from tgw.development.partial_resume import (
     classify,
     migrate_todo_1747,
     preservation_manifest,
+    source_fingerprint,
     source_tree,
     validate_implementation_lineage,
 )
@@ -267,6 +268,7 @@ def start(
     source_commit: str | None = None,
     resume_only: bool = False,
     lifecycle_job_binding: Mapping[str, Any] | None = None,
+    lifecycle_remediation: Mapping[str, Any] | None = None,
     lifecycle_stage: str | None = None,
     dispatch_jobs: bool = True,
 ) -> dict[str, Any]:
@@ -469,6 +471,11 @@ def start(
             treatments=(CODEX_IMPLEMENT, CONTROLLER_VERIFY),
             receipt_backed_conditions=frozenset({"tested", "linted"}),
             resume_bindings=resume_bindings,
+            remediation_bindings=(
+                {todo_id: dict(lifecycle_remediation)}
+                if lifecycle_remediation is not None
+                else {}
+            ),
             lifecycle_bindings=(
                 {todo_id: dict(lifecycle_job_binding)}
                 if lifecycle_job_binding is not None
@@ -733,7 +740,7 @@ def lifecycle_start(
     solution_path: Path | str = DEFAULT_SOLUTION,
     source_commit: str | None = None,
 ) -> dict[str, Any]:
-    """Create/reuse one durable root and return before coding work begins."""
+    """Bind one Todo, create/reuse its durable root, and return immediately."""
     config = _initialize(config_path)
     solution = __import__(
         "tgw.development.local_workflow", fromlist=["load_solution"]
@@ -769,13 +776,33 @@ def lifecycle_start(
             "supervisor": "tgw-coding-lifecycle-supervisor.service",
             "returns_immediately": True,
             "dependencies": prior["boundaries"],
+            "session": {
+                "cwd": prior["binding"]["worktree"],
+                "argv": ["codex", "-C", prior["binding"]["worktree"]],
+                "observer": [
+                    "tgw", "coding", "status", str(identifier),
+                ],
+            },
             **({"pp_alias": alias} if alias is not None else {}),
             **({"failure": prior["failure"]} if prior.get("failure") else {}),
         }
-    # Lifecycle start is a pure durable-root operation.  The reconciled Todo
-    # card must already carry its exact bounded worktree identity; the managed
-    # supervisor owns every later queue dispatch.
-    _item, plan = _plan_binding_for_todo(identifier)
+    # The ordinary operator command is the one place that may create the exact
+    # Unix-user Plan/Todo/worktree binding.  The managed supervisor owns every
+    # later queue dispatch and is never allowed to silently rebind it.
+    prepared: dict[str, Any] | None = None
+    try:
+        _item, plan = _plan_binding_for_todo(identifier)
+    except CodingCLIError as exc:
+        if "has no exact Plan/Todo binding" not in str(exc):
+            raise
+        prepared = start(
+            identifier,
+            config_path=config_path,
+            solution_path=solution_path,
+            source_commit=runtime["selected_commit"],
+            dispatch_jobs=False,
+        )
+        _item, plan = _plan_binding_for_todo(identifier)
     if (
         plan["plan_commit"] != solution["plan_commit"]
         or plan["solution_hash"] != solution["solution_hash"]
@@ -799,6 +826,12 @@ def lifecycle_start(
         "supervisor": "tgw-coding-lifecycle-supervisor.service",
         "returns_immediately": True,
         "dependencies": record["boundaries"],
+        "session": {
+            "cwd": record["binding"]["worktree"],
+            "argv": ["codex", "-C", record["binding"]["worktree"]],
+            "observer": ["tgw", "coding", "status", str(identifier)],
+        },
+        "binding_created": prepared is not None,
         **({"pp_alias": alias} if alias is not None else {}),
     }
 
@@ -918,9 +951,45 @@ def _queue_evidence(
         )
     row = terminal[0]
     if row.get("state") != "succeeded":
+        worktree = Path(record["binding"]["worktree"])
+        failed_receipt: dict[str, Any] | None = None
+        failed_sha256: str | None = None
+        try:
+            failed_receipt, failed_sha256 = _receipt_file(
+                worktree / receipt_name
+            )
+            coding_lifecycle.validate_job_binding(
+                record, failed_receipt.get("coding_lifecycle")
+            )
+        except (CodingCLIError, coding_lifecycle.LifecycleError):
+            failed_receipt = None
+            failed_sha256 = None
+        detail = None
+        if failed_receipt is not None:
+            detail = "; ".join(
+                str(item.get("detail"))
+                for item in failed_receipt.get("artifacts", [])
+                if isinstance(item, Mapping) and item.get("detail")
+            )
+        evidence = {
+            "schema": "tgw-local-coding-negative-queue-evidence/v1",
+            "root_id": record["root_id"],
+            "binding_hash": record["binding"]["binding_hash"],
+            "job_id": str(row["job_id"]),
+            "queue_name": queue_name,
+            "job_state": row.get("state"),
+            "receipt_file": str(worktree / receipt_name),
+            "receipt_file_sha256": failed_sha256,
+            "result": failed_receipt,
+            "candidate": source_fingerprint(worktree),
+        }
         return _stage(
-            record, stage, "failed",
-            reason=f"{queue_name} exact job ended {row.get('state')}",
+            record, stage, "remediation",
+            receipt=evidence,
+            reason=(
+                f"{queue_name} exact job ended {row.get('state')}"
+                + (f": {detail}" if detail else "")
+            ),
             job_ids=ids,
         )
     payload = row.get("payload_json") or row.get("payload")
@@ -1002,6 +1071,7 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
 
     def implementation(record: dict[str, Any]) -> dict[str, Any]:
         resume_intent = record.get("resume_intent")
+        remediation_intent = record.get("remediation_intent")
         return _queue_evidence(
             record,
             stage="implementation",
@@ -1012,6 +1082,11 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
                 config_path=config_path,
                 source_commit=record["binding"]["source_commit"],
                 lifecycle_job_binding=coding_lifecycle.job_binding(record),
+                lifecycle_remediation=(
+                    remediation_intent
+                    if isinstance(remediation_intent, Mapping)
+                    else None
+                ),
                 lifecycle_stage="implementation",
                 resume_only=isinstance(resume_intent, Mapping),
             ),
@@ -1131,12 +1206,12 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
             or not command
             or command[0] not in allowed
         ):
-            return _stage(record, "review", "satisfied", receipt={
-                "schema": "tgw-local-coding-diagnostic-review-schedule/v1",
-                "status": "UNAVAILABLE",
-                "authority": False,
-                "reason": "diagnostic reviewer is not installed",
-            })
+            return _stage(
+                record,
+                "review",
+                "remediation",
+                reason="independent diagnostic reviewer is not installed",
+            )
 
         def dispatch() -> TickResult:
             return tick(
@@ -1157,19 +1232,13 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
                 todo_ids={int(record["target"])},
             )
 
-        try:
-            scheduled = dataclasses.asdict(dispatch())
-            status = "SCHEDULED" if scheduled.get("errors") == 0 else "UNAVAILABLE"
-        except Exception as exc:
-            scheduled = {"error": str(exc)}
-            status = "UNAVAILABLE"
-        return _stage(record, "review", "satisfied", receipt={
-            "schema": "tgw-local-coding-diagnostic-review-schedule/v1",
-            "status": status,
-            "authority": False,
-            "queue": "claude-review",
-            "result": scheduled,
-        })
+        return _queue_evidence(
+            record,
+            stage="review",
+            queue_name="claude-review",
+            receipt_name="review-receipt.json",
+            dispatch=dispatch,
+        )
 
     def integration(record: dict[str, Any]) -> dict[str, Any]:
         candidate_receipt = record["effects"]["candidate"]["receipt"]
@@ -1240,7 +1309,7 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
                     "schema": "tgw-local-coding-integration/v1",
                     "root_id": record["root_id"],
                     "binding_hash": record["binding"]["binding_hash"],
-                    "diagnostic_review_schedule_hash": record["effects"]["review"]["receipt_hash"],
+                    "diagnostic_review_receipt_hash": record["effects"]["review"]["receipt_hash"],
                     "controller_receipt_hash": record["effects"]["controller"]["receipt_hash"],
                     "base_commit": record["binding"]["source_commit"],
                     "candidate_commit": candidate_commit,

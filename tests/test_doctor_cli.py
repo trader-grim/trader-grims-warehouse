@@ -1563,6 +1563,34 @@ def test_context_staged_probe_rejects_nonmember_before_spawn(
         os.close(descriptor)
 
 
+def test_read_only_shared_tree_inventory_falls_back_when_noatime_is_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preservation = tmp_path / ".tgw-coding-preservation"
+    preservation.mkdir(mode=0o700)
+    (preservation / "evidence.json").write_text('{"preserved":true}\n')
+    noatime = getattr(os, "O_NOATIME", 0)
+    assert noatime
+    real_open = os.open
+
+    def denying_open(path, flags, *args, **kwargs):
+        if flags & noatime and path in {preservation.name, "evidence.json"}:
+            raise PermissionError(errno.EPERM, "forced O_NOATIME denial")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "open", denying_open)
+
+    result = doctor_cli._scan_shared_git_tree(
+        tmp_path,
+        os.getgid(),
+        mutate=False,
+        immutable_directories=[Path(), Path(preservation.name)],
+    )
+
+    assert result["directories"] == 2
+    assert result["files"] == 1
+
+
 def test_context_staged_probe_rejects_mismatched_group_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4081,6 +4109,82 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp
     assert "staged_snapshot_descriptor" in probes[0][3]
 
 
+def test_explicit_exact_context_repair_reconciles_stale_task_source_without_authority_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, head, tree = _fixture(tmp_path)
+    task = json.loads(paths.context_task.read_text())
+    stale_commit = "b" * 40
+    stale_tree = "c" * 40
+    task["source"] = {
+        "repository": str(paths.repository),
+        "commit": stale_commit,
+        "tree": stale_tree,
+        "canonical_working_tree_clean": True,
+    }
+    task["implementation"]["development_source"].update(
+        {"commit": stale_commit, "tree": stale_tree, "state": "OLD_LIVE_STATE"}
+    )
+    cursor = json.loads(paths.context_cursor.read_text())
+    cursor.update({"source_commit": stale_commit, "source_tree": stale_tree})
+    _write_json(paths.context_task, task)
+    _write_json(paths.context_cursor, cursor)
+    _write_json(paths.context_snapshot, _snapshot(task, cursor))
+
+    selected = doctor_cli._selected_context_artifacts(paths)
+    original_run = doctor_cli._run
+
+    def run(command, **kwargs):
+        if Path(command[0]).name == "tgw_context_publish.py":
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            output_path.write_bytes(
+                publish_bytes(
+                    json.loads(task_path.read_text()),
+                    json.loads(cursor_path.read_text()),
+                )
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_source_identity", lambda _paths: (head, tree, ""))
+    monkeypatch.setattr(
+        doctor_cli,
+        "_repair_context_artifacts",
+        lambda *_args, **_kwargs: selected,
+    )
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
+
+    result = doctor_cli.repair_context(
+        paths, desired_commit=head, source_root=tmp_path / "exact-source"
+    )
+
+    repaired_task = json.loads(paths.context_task.read_text())
+    repaired_cursor = json.loads(paths.context_cursor.read_text())
+    history = repaired_task["source_reconciliation_history"]
+    assert result["ok"] is True
+    assert repaired_task["source"]["commit"] == head
+    assert repaired_task["source"]["tree"] == tree
+    assert repaired_task["implementation"]["development_source"]["commit"] == head
+    assert repaired_task["implementation"]["development_source"]["tree"] == tree
+    assert repaired_task["implementation"]["development_source"]["state"] == (
+        "CANONICAL_SOURCE_ADVANCED_RECONCILIATION_PENDING"
+    )
+    assert history[-1]["previous"]["commit"] == stale_commit
+    assert history[-1]["successor"] == {"commit": head, "tree": tree}
+    assert history[-1]["authority"] is False
+    assert repaired_cursor["source_commit"] == head
+    assert repaired_cursor["source_tree"] == tree
+
+
 @pytest.mark.parametrize("hostile_kind", ["symlink", "hardlink"])
 def test_context_repair_rejects_linked_publisher_output_before_open_without_mutating_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hostile_kind: str
@@ -4822,6 +4926,7 @@ def test_doctor_effective_root_source_status_is_demoted_to_ordinary_db(
     monkeypatch.setattr(doctor_cli, "_git", lambda *_args: commit)
     monkeypatch.setattr(doctor_cli.os, "getuid", lambda: 1004)
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli.os, "getresuid", lambda: (1004, 0, 0))
 
     def run(command, **kwargs):
         observed.append((command, kwargs.get("env")))
@@ -5039,6 +5144,80 @@ def test_blanket_repair_all_is_not_exposed(tmp_path: Path) -> None:
 
     with pytest.raises(doctor_cli.DoctorError, match="unknown repair"):
         doctor_cli.repair("all", paths)
+
+
+def test_default_doctor_json_is_bounded_and_full_remains_explicit() -> None:
+    report = {
+        "schema": "diagnosis",
+        "state": "FAIL",
+        "counts": {"FAIL": 1},
+        "exit_code": 1,
+        "checks": [
+            {
+                "id": "context.snapshot",
+                "state": "FAIL",
+                "detail": "stale",
+                "repairable": True,
+                "operator_action": "repair context",
+                "evidence": {"very_large": list(range(1000))},
+            }
+        ],
+    }
+
+    compact = doctor_cli._compact_diagnosis(report)
+
+    assert compact["checks"] == [
+        {
+            "id": "context.snapshot",
+            "state": "FAIL",
+            "detail": "stale",
+            "repairable": True,
+            "operator_action": "repair context",
+        }
+    ]
+    assert doctor_cli._parser().parse_args(["check", "--full"]).full is True
+    assert doctor_cli._parser().parse_args(["inventory", "--full"]).full is True
+
+
+def test_default_inventory_summary_limits_paths_and_counts_safe_cleanup() -> None:
+    safe = {
+        "path": "/worktree/safe",
+        "canonical": False,
+        "exists": True,
+        "dirty": False,
+        "unique_commits": 0,
+        "merged_into_canonical": True,
+        "errors": [],
+        "preservation_required": False,
+    }
+    protected = {
+        **safe,
+        "path": "/worktree/protected",
+        "dirty": True,
+        "preservation_required": True,
+    }
+    report = {
+        "ok": True,
+        "host": "tgw-lib",
+        "actor": "codex",
+        "observed_at": "now",
+        "canonical_source": {"commit": "a" * 40},
+        "counts": {"worktrees": 2},
+        "worktrees": [safe, protected],
+        "cleanup_boundary": "preserve first",
+    }
+
+    compact = doctor_cli._compact_inventory(report)
+
+    assert compact["safe_cleanup_candidates"] == {
+        "count": 1,
+        "sample": ["/worktree/safe"],
+    }
+    assert compact["preservation_required"] == {
+        "count": 1,
+        "sample": ["/worktree/protected"],
+    }
+    assert "worktrees" not in compact
 
 
 def test_operator_launcher_routes_only_local_todo_coding_and_doctor() -> None:
