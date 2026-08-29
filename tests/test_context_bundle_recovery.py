@@ -196,7 +196,7 @@ def test_real_publisher_emits_only_publish_bytes_and_enforces_task_boundary(
     )
     if os.geteuid() != 0:
         assert completed.returncode != 0
-        assert "must run as root" in completed.stderr
+        assert "requires db:tgw-coders" in completed.stderr
         pytest.skip("root-only publisher success path requires root")
     assert completed.returncode == 0, completed.stderr
     assert output.read_bytes() == publish_bytes(task, legacy["cursor"])
@@ -246,7 +246,7 @@ def test_real_publisher_isolated_bootstrap_rejects_cwd_and_pythonpath_shadowing(
     )
     if os.geteuid() != 0:
         assert completed.returncode != 0
-        assert "must run as root" in completed.stderr
+        assert "requires db:tgw-coders" in completed.stderr
         pytest.skip("root-only publisher success path requires root")
     assert completed.returncode == 0, completed.stderr
     assert output.read_bytes() == publish_bytes(legacy["task"], legacy["cursor"])
@@ -282,7 +282,7 @@ def test_real_isolated_publisher_repeatedly_preserves_immutable_release(tmp_path
             env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
         )
         if os.geteuid() != 0:
-            assert "must run as root" in completed.stderr
+            assert "requires db:tgw-coders" in completed.stderr
             pytest.skip("root-only publisher success path requires root")
         assert completed.returncode == 0, completed.stderr
         assert output.read_bytes() == publish_bytes(legacy["task"], legacy["cursor"])
@@ -375,7 +375,7 @@ def test_real_publisher_subprocess_root_guard(tmp_path: Path) -> None:
         command = ["/usr/sbin/runuser", "-u", "nobody", "--", *command]
     completed = subprocess.run(command, capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(ROOT / "src"), "PYTHONDONTWRITEBYTECODE": "1"})
     assert completed.returncode != 0
-    assert "must run as root" in completed.stderr
+    assert "requires db:tgw-coders" in completed.stderr
     assert not output.exists()
 
 
