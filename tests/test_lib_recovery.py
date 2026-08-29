@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from tgw.lib_recovery import REQUIRED_TIERS, ManifestError, object_record, seal_generation, verify_receipt
+from tgw.lib_recovery import REQUIRED_TIERS, ManifestError, canonical_bytes, inventory, object_record, seal_generation, verify_receipt
 
 
 def generation(root: Path) -> dict:
@@ -20,7 +21,7 @@ def generation(root: Path) -> dict:
     tiers["encrypted_secrets"].update({"encryption": "age", "key_custody": "operator-held-offline", "plaintext_excluded": True})
     captured = "2026-08-29T18:00:30Z"
     digest = "sha256:" + "a" * 64
-    return {
+    manifest = {
         "schema": "tgw-lib-recovery-generation/v2",
         "generation": "20260829T180000Z-test",
         "state": "complete",
@@ -47,6 +48,11 @@ def generation(root: Path) -> dict:
         "receipt": {"storage": "worm", "immutability_verified": True},
         "tiers": tiers,
     }
+    object_digest = "sha256:" + hashlib.sha256(canonical_bytes({"generation": manifest["generation"], "barriers": manifest["barriers"], "tiers": manifest["tiers"]})).hexdigest()
+    manifest["object_manifest_sha256"] = object_digest
+    manifest["replicas"]["local_fast"]["manifest_sha256"] = object_digest
+    manifest["replicas"]["off_host_encrypted"]["manifest_sha256"] = object_digest
+    return manifest
 
 
 @pytest.fixture
@@ -147,3 +153,44 @@ def test_object_cannot_escape_generation(tmp_path: Path) -> None:
     root.mkdir()
     with pytest.raises(ManifestError, match="escapes"):
         object_record(outside, root)
+
+
+def test_replica_must_bind_exact_object_manifest(tmp_path: Path, signing_key: Ed25519PrivateKey) -> None:
+    staging = tmp_path / "objects"
+    staging.mkdir()
+    manifest = generation(staging)
+    manifest["replicas"]["off_host_encrypted"]["manifest_sha256"] = "sha256:" + "f" * 64
+    with pytest.raises(ManifestError, match="replica"):
+        seal_generation(staging, manifest, tmp_path / "receipts", signing_key, "operator-2026")
+
+
+@pytest.mark.parametrize("refs", [True, ["refs/heads/main"], {"main": "a" * 40}, {"refs/heads/main": "c" * 40}])
+def test_git_refs_are_a_related_ref_oid_map(tmp_path: Path, signing_key: Ed25519PrivateKey, refs) -> None:
+    staging = tmp_path / "objects"
+    staging.mkdir()
+    manifest = generation(staging)
+    manifest["barriers"]["git_refs"]["source"]["refs"] = refs
+    manifest["object_manifest_sha256"] = "sha256:" + hashlib.sha256(canonical_bytes({"generation": manifest["generation"], "barriers": manifest["barriers"], "tiers": manifest["tiers"]})).hexdigest()
+    for replica in manifest["replicas"].values():
+        replica["manifest_sha256"] = manifest["object_manifest_sha256"]
+    with pytest.raises(ManifestError, match="git ref map"):
+        seal_generation(staging, manifest, tmp_path / "receipts", signing_key, "operator-2026")
+
+
+def test_metadata_collection_failure_is_fatal(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "object"
+    path.write_text("x")
+    monkeypatch.setattr("tgw.lib_recovery.shutil.which", lambda _name: None)
+    with pytest.raises(ManifestError, match="getfacl"):
+        object_record(path, tmp_path)
+
+
+def test_inventory_names_every_bounded_recovery_surface(tmp_path: Path) -> None:
+    names = {surface["name"] for surface in inventory([tmp_path])["surfaces"]}
+    assert names == {
+        "standalone_plan_git", "canonical_source_git", "todo_branches_worktrees",
+        "postgresql_todo_queue_history", "library_plan_materializations_runbooks_archive",
+        "tgw_lib_context_doctor_coding_queue", "master_itemdata_media_history_annex",
+        "unix_users_groups_ownership", "encrypted_secrets_operator_custody",
+        "backup_health_receipts_alerts", "reproducible_projections",
+    }

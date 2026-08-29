@@ -45,19 +45,24 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def _acl(path: Path) -> str | None:
+def _acl(path: Path) -> str:
     command = shutil.which("getfacl")
     if not command:
-        return None
-    result = subprocess.run([command, "-cp", "--", str(path)], capture_output=True, text=True, timeout=5, check=False)
-    return result.stdout if result.returncode == 0 else None
+        raise ManifestError("getfacl is required to capture recovery metadata")
+    try:
+        result = subprocess.run([command, "-cp", "--", str(path)], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ManifestError(f"ACL collection failed: {path}") from exc
+    if result.returncode != 0:
+        raise ManifestError(f"ACL collection failed: {path}: {result.stderr.strip()}")
+    return result.stdout
 
 
 def _xattrs(path: Path) -> dict[str, str]:
     try:
         return {key: base64.b64encode(os.getxattr(path, key, follow_symlinks=False)).decode() for key in sorted(os.listxattr(path, follow_symlinks=False))}
-    except (AttributeError, OSError):
-        return {}
+    except (AttributeError, OSError) as exc:
+        raise ManifestError(f"xattr collection failed: {path}") from exc
 
 
 def object_record(path: Path, root: Path) -> dict[str, Any]:
@@ -108,8 +113,16 @@ def _validate_barriers(value: Any) -> None:
         raise ManifestError("missing barrier git_refs")
     for repo in ("plan", "source"):
         item = git.get(repo)
-        if not isinstance(item, dict) or not OID.fullmatch(str(item.get("commit", ""))) or not OID.fullmatch(str(item.get("tree", ""))) or not item.get("refs"):
+        if not isinstance(item, dict) or not OID.fullmatch(str(item.get("commit", ""))) or not OID.fullmatch(str(item.get("tree", ""))):
             raise ManifestError(f"invalid git barrier {repo}")
+        refs = item.get("refs")
+        if (
+            not isinstance(refs, dict)
+            or not refs
+            or any(not isinstance(ref, str) or not ref.startswith("refs/") or not OID.fullmatch(str(oid)) for ref, oid in refs.items())
+            or item["commit"] not in refs.values()
+        ):
+            raise ManifestError(f"invalid git ref map {repo}")
         _time(item.get("captured_at"), f"git_refs.{repo}.captured_at")
     pg = value.get("postgresql")
     if not isinstance(pg, dict) or not LSN.fullmatch(str(pg.get("start_lsn", ""))) or not LSN.fullmatch(str(pg.get("stop_lsn", ""))):
@@ -142,6 +155,9 @@ def validate_generation(manifest: dict[str, Any], root: Path, verify_objects: bo
     if not isinstance(manifest.get("tools"), dict) or not manifest["tools"]:
         raise ManifestError("missing tool versions")
     _validate_barriers(manifest.get("barriers"))
+    object_manifest_sha256 = "sha256:" + hashlib.sha256(
+        canonical_bytes({"generation": manifest.get("generation"), "barriers": manifest.get("barriers"), "tiers": manifest.get("tiers")})
+    ).hexdigest()
     replicas = manifest.get("replicas")
     if not isinstance(replicas, dict):
         raise ManifestError("missing replica evidence")
@@ -204,6 +220,11 @@ def validate_generation(manifest: dict[str, Any], root: Path, verify_objects: bo
                 prior = hardlink_groups.setdefault(obj["hardlink_group"], identity)
                 if prior != identity or info.st_nlink < obj["hardlinks"]:
                     raise ManifestError(f"object hard-link relationship differs: {rel}")
+    if manifest.get("object_manifest_sha256") != object_manifest_sha256:
+        raise ManifestError("object manifest hash differs")
+    for name in ("local_fast", "off_host_encrypted"):
+        if replicas[name]["manifest_sha256"] != object_manifest_sha256:
+            raise ManifestError(f"replica does not bind object manifest: {name}")
 
 
 def _beneath(base: Path, candidate: Path) -> Path:
@@ -324,6 +345,39 @@ def inventory(paths: Iterable[Path], projected_generation_bytes: int = 0, replic
         "schema_identity": "sha256:" + hashlib.sha256(schema.encode()).hexdigest() if schema else None,
         "migration_identity": _run(["psql", "-Atqc", "SELECT version_num FROM alembic_version ORDER BY version_num"]),
     }
+    plan_repo = Path("/opt/TGW/library/Plan")
+    source_repo = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
+    surface_specs = (
+        ("standalone_plan_git", "authoritative", plan_repo, "approved/evidence refs and off-host readback"),
+        ("canonical_source_git", "authoritative", source_repo, "canonical source refs and clean readback"),
+        ("todo_branches_worktrees", "durable", source_repo, "all branches/worktrees plus dirty/untracked preservation"),
+        ("postgresql_todo_queue_history", "authoritative", Path("/var/lib/postgresql"), "consistent database, schema, migrations and WAL barrier"),
+        ("library_plan_materializations_runbooks_archive", "durable", Path("/opt/TGW/library"), "Plan materializations, runbooks and archive manifests"),
+        ("tgw_lib_context_doctor_coding_queue", "durable", Path("/opt/TGW/tgw-lib"), "configuration, context inputs/projection, lifecycle receipts and queue evidence"),
+        ("master_itemdata_media_history_annex", "authoritative", Path("/opt/TGW/data"), "original ItemData/media/history and annex/GDrive/archive manifests"),
+        ("unix_users_groups_ownership", "authoritative", Path("/etc"), "passwd/group identities plus ownership, ACL and xattr requirements"),
+        ("encrypted_secrets_operator_custody", "authoritative-protected", Path("/opt/TGW/tgw-lib"), "separate encryption; operator-held offline key; no plaintext in generation"),
+        ("backup_health_receipts_alerts", "durable", Path("/opt/TGW/tgw-lib"), "generation age/capacity/health, immutable receipts and alerts"),
+        ("reproducible_projections", "regenerable", Path("/opt/TGW/tgw-lib"), "exclude only under an explicit regeneration contract"),
+    )
+    surfaces = []
+    for name, classification, path, requirement in surface_specs:
+        item: dict[str, Any] = {"name": name, "classification": classification, "path": str(path), "exists": path.exists(), "recovery_requirement": requirement}
+        if name in {"standalone_plan_git", "canonical_source_git"}:
+            item["git"] = _git(path)
+            item["refs"] = _run(["git", "-C", str(path), "for-each-ref", "--format=%(refname) %(objectname)"])
+            item["head_commit"] = _run(["git", "-C", str(path), "rev-parse", "HEAD"])
+            item["head_tree"] = _run(["git", "-C", str(path), "rev-parse", "HEAD^{tree}"])
+        if name == "todo_branches_worktrees":
+            item["worktrees"] = _run(["git", "-C", str(path), "worktree", "list", "--porcelain"])
+            item["dirty_state"] = _run(["git", "-C", str(path), "status", "--porcelain=v1", "--untracked-files=all"])
+        if name == "unix_users_groups_ownership":
+            item["identity_sources"] = ["/etc/passwd", "/etc/group"]
+            item["metadata_required"] = ["uid", "gid", "mode", "ACL", "xattr", "hardlinks"]
+        if name == "encrypted_secrets_operator_custody":
+            item["custody"] = "operator-held-offline"
+            item["plaintext_must_be_excluded"] = True
+        surfaces.append(item)
     return {
         "schema": "tgw-lib-recovery-inventory/v2",
         "observed_at": datetime.now(UTC).isoformat(),
@@ -331,6 +385,7 @@ def inventory(paths: Iterable[Path], projected_generation_bytes: int = 0, replic
         "paths": entries,
         "postgresql": postgresql,
         "replicas": replica_state,
+        "surfaces": surfaces,
         "tools": {name: _run([name, "--version"]) for name in ("git", "pg_dump", "pg_basebackup", "age", "restic", "borg", "btrfs", "zfs", "getfacl")},
     }
 
