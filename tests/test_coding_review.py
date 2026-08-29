@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+import hashlib
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tgw.development import coding_review
+
+
+def _hex(n: int) -> str:
+    return hashlib.sha256(str(n).encode()).hexdigest()
+
+
+def _repo(tmp_path: Path) -> tuple[Path, str, str, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "README").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    (repo / "feature.py").write_text("X = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "candidate"], cwd=repo, check=True, capture_output=True)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repo, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    return repo, base, commit, tree
+
+
+def _payload(base: str, commit: str, tree: str, todo_id: int = 1923) -> dict:
+    root = "coding:" + "0" * 64
+    return {
+        "todo_id": todo_id,
+        "job_id": "job-1",
+        "coding_lifecycle": {
+            "root_id": root,
+            "binding_hash": "sha256:" + _hex(1),
+            "job_binding_hash": "sha256:" + _hex(2),
+            "card_idempotency_key": "card",
+        },
+        "coding_candidate": {
+            "commit": commit,
+            "tree": tree,
+            "candidate_binding_hash": "sha256:" + _hex(3),
+            "root_id": root,
+            "job_binding_hash": "sha256:" + _hex(2),
+        },
+        "plan_binding": {
+            "source_commit": base,
+            "plan_commit": "plan",
+            "solution_hash": "sol",
+            "closure_hash": "closure",
+        },
+        "task_spec": {
+            "schema": "coding-task/v1",
+            "todo_id": todo_id,
+            "agent": "codex",
+            "body": "implement the bounded feature",
+        },
+    }
+
+
+def _backend(commit: str, tree: str):
+    def fake(request: dict, worktree: Path) -> dict:
+        assert request["snapshot_hash"] == coding_review._candidate_snapshot_hash(commit, tree)
+        return {
+            "schema": "tgw-code-review/v1",
+            "verdict": "PASS",
+            "snapshot_hash": request["snapshot_hash"],
+            "summary": "no findings",
+            "findings": [],
+        }
+
+    return fake
+
+
+def test_review_ignores_workflow_evidence_files(tmp_path):
+    repo, base, commit, tree = _repo(tmp_path)
+    (repo / "implementation-receipt.json").write_text("{}", encoding="utf-8")
+    (repo / "controller-harness-receipt.json").write_text("{}", encoding="utf-8")
+    (repo / "review-receipt.json").write_text("{}", encoding="utf-8")
+    history = repo / ".tgw-coding-history" / "implementation"
+    history.mkdir(parents=True)
+    (history / "state.json").write_text("{}", encoding="utf-8")
+    preservation = repo / ".tgw-coding-preservation"
+    preservation.mkdir()
+    (preservation / "manifest.json").write_text("{}", encoding="utf-8")
+
+    result = coding_review.run_local_review(
+        _payload(base, commit, tree), repo, semantic_backend=_backend(commit, tree)
+    )
+    assert result["outcome"] == "satisfied"
+    assert result["established_conditions"] == ["reviewed"]
+
+
+def test_review_still_rejects_real_source_mutation(tmp_path):
+    repo, base, commit, tree = _repo(tmp_path)
+    (repo / "extra.py").write_text("X = 2\n", encoding="utf-8")
+    with pytest.raises(coding_review.ReviewRunnerError, match="mutated the exact candidate"):
+        coding_review.run_local_review(
+            _payload(base, commit, tree), repo, semantic_backend=_backend(commit, tree)
+        )

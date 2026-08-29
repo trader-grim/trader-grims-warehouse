@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from tgw.codex_review_backend import CodexReviewBackendError
 from tgw.codex_review_backend import run as run_codex_review
+from tgw.development.partial_resume import HISTORY, PRESERVATION
 from tgw.protected_git import protected_git_command, protected_git_environment
 from tgw.review_contract import ReviewRunnerError, validate_review_report
 
@@ -28,6 +29,43 @@ _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _ROOT = re.compile(r"coding:[0-9a-f]{64}\Z")
 _VERDICT = "PASS_NON_ADMITTING"
+_RECEIPT_FILES = frozenset({
+    "implementation-receipt.json",
+    "controller-harness-receipt.json",
+    "review-receipt.json",
+    "deployment-receipt.json",
+    "stitch-receipt.json",
+    "operator-admit-pending.json",
+})
+_HISTORY_ROOT = HISTORY.split("/", 1)[0]
+_PRESERVATION_ROOT = PRESERVATION.split("/", 1)[0]
+
+
+def _source_status(worktree: Path) -> str:
+    """Worktree status excluding workflow-evidence files.
+
+    Receipt files and the partial-resume history/preservation trees are
+    deliberately untracked workflow evidence, never candidate source.  The
+    candidate-integrity check must ignore them or every closed candidate
+    is misclassified as mutated.
+    """
+    lines = _git(
+        worktree, "status", "--porcelain=v1", "--untracked-files=all"
+    ).splitlines()
+    kept = []
+    for line in lines:
+        if len(line) < 4:
+            kept.append(line)
+            continue
+        path = line[3:]
+        if path in _RECEIPT_FILES:
+            continue
+        if path == _HISTORY_ROOT or path.startswith(_HISTORY_ROOT + "/"):
+            continue
+        if path == _PRESERVATION_ROOT or path.startswith(_PRESERVATION_ROOT + "/"):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def _canonical(value: Any) -> bytes:
@@ -169,7 +207,7 @@ def run_local_review(
             ),
         ]
     if (
-        _git(worktree, "status", "--porcelain=v1")
+        _source_status(worktree)
         or _git(worktree, "rev-parse", "HEAD") != commit
         or _git(worktree, "rev-parse", "HEAD^{tree}") != tree
     ):
