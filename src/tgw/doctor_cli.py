@@ -799,7 +799,13 @@ def _review_surface_binding(
         or _SHA256.fullmatch(hash_value) is None
     ):
         raise DoctorError(f"current task {label} review evidence is malformed")
-    surface = _surface_snapshot(Path(path_value))
+    try:
+        surface = _surface_snapshot(Path(path_value))
+    except OSError as exc:
+        raise DoctorError(
+            f"current task {label} review evidence is unreadable by the "
+            f"invoking actor: {path_value} ({exc}); root verification required"
+        ) from exc
     if (
         surface.get("kind") != "file"
         or surface.get("nlink") != 1
@@ -6200,7 +6206,14 @@ _UNBOUND_OBSOLETE_NAMES = ("tgw-coding", "tgw-coding-helper")
 
 
 def _lexists(path: Path) -> bool:
-    return path.exists() or path.is_symlink()
+    try:
+        return path.exists() or path.is_symlink()
+    except OSError:
+        # An unreadable parent (for example another actor's home directory)
+        # makes the surface unobservable for this ordinary user.  Treat it as
+        # absent here so the ordinary-user diagnosis completes; root repairs
+        # still observe the full truth.
+        return False
 
 
 def _declared_obsolete_surfaces(paths: DoctorPaths) -> list[dict[str, Any]]:

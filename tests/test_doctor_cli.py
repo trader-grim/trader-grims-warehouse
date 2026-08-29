@@ -8489,6 +8489,33 @@ def test_database_stdin_failure_is_receipted_and_fails_closed(
     assert receipts == ["database-started", "database-failed"]
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read unreadable parents")
+def test_lexists_tolerates_unreadable_parent(tmp_path: Path) -> None:
+    secret = tmp_path / "secret-home"
+    secret.mkdir()
+    (secret / "target").write_text("x", encoding="utf-8")
+    secret.chmod(0)
+    try:
+        assert doctor_cli._lexists(secret / "target") is False
+    finally:
+        secret.chmod(0o700)
+
+
+def test_review_surface_binding_reports_unreadable_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def deny(_path):
+        raise PermissionError(13, "Permission denied", "/home/codex")
+
+    monkeypatch.setattr(doctor_cli, "_surface_snapshot", deny)
+    with pytest.raises(doctor_cli.DoctorError, match="unreadable by the invoking actor"):
+        doctor_cli._review_surface_binding(
+            "/home/codex/review.txt",
+            "sha256:" + "a" * 64,
+            label="plan",
+        )
+
+
 def test_peer_auth_check_is_functional_when_unprivileged(tmp_path: Path) -> None:
     paths, _head, _tree = _fixture(tmp_path)
 
