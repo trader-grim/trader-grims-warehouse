@@ -1,0 +1,29 @@
+{
+  "schema": "tgw-bounded-context-contract/v1",
+  "plan_reconciliation": {
+    "root_todo": 1916,
+    "leaf_todo": 1919,
+    "capability": "context.identity-bound-retrieval@1",
+    "depends_on": [],
+    "does_not_block_candidate": "0f6c9da37fb690d4c42afe7b96e273ff824cc7e8"
+  },
+  "continual_rlm_harness": {
+    "owns": ["task_cursor", "context_variables", "evidence_ledger", "running_status"],
+    "retrieval_evidence_schema": "tgw-context-retrieval-evidence/v1"
+  },
+  "context_mcp": {
+    "authority": false,
+    "dispatch_gate": false,
+    "operations": ["todo-current", "todo-exact", "todo-dependencies", "todo-inventory"]
+  },
+  "tool_selector": {
+    "may": ["find", "rank", "propose"],
+    "may_not": ["authorize", "invoke-effects", "broaden-exact-to-inventory"]
+  },
+  "bounded_roles": [
+    "implementation", "troubleshooting", "remediation", "review", "doctor", "operator-assistant"
+  ],
+  "outcomes": [
+    "CURRENT", "STALE", "MISMATCHED", "ABSENT", "OPEN_BUT_IRRELEVANT", "TRUNCATED"
+  ]
+}

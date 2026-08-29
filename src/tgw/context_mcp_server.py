@@ -27,6 +27,7 @@ from urllib.request import Request, urlopen
 from mcp.server import FastMCP
 
 from tgw.code_graph import CodeGraphService, build_snapshot
+from tgw.bounded_context import BoundedContextService
 from tgw.context_source_guard import (
     ContextSourceGuardError,
     closed_git_environment,
@@ -1553,6 +1554,37 @@ def _json_call(function: Any, *args: Any, **kwargs: Any) -> str:
         return json.dumps({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
 
 
+def _bounded_todo_service() -> BoundedContextService:
+    """Open an explicitly configured, frozen Todo projection.
+
+    Absence is an error: exact retrieval must never fall back to the production
+    MCP's agent-wide backlog operation or to an implicit Plan corpus search.
+    """
+    raw_path = os.environ.get("TGW_CONTEXT_TODO_PROJECTION", "")
+    if not raw_path:
+        raise ContextError("bounded Todo projection is unavailable; scope was not broadened")
+    path = Path(raw_path)
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise ContextError("bounded Todo projection is invalid")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ContextError("bounded Todo projection is invalid") from exc
+    if not isinstance(value, dict) or value.get("schema") != "tgw-bounded-todo-projection/v1":
+        raise ContextError("bounded Todo projection schema is invalid")
+    todos = value.get("todos")
+    if not isinstance(todos, list) or not all(isinstance(item, dict) for item in todos):
+        raise ContextError("bounded Todo projection records are invalid")
+    generation = value.get("source_generation")
+    evidence_head = value.get("evidence_head")
+    current_task_id = value.get("current_task_id")
+    if not isinstance(generation, str) or not generation or not isinstance(evidence_head, str) or not evidence_head:
+        raise ContextError("bounded Todo projection binding is invalid")
+    if current_task_id is not None and (not isinstance(current_task_id, int) or isinstance(current_task_id, bool)):
+        raise ContextError("bounded Todo current-task identity is invalid")
+    return BoundedContextService(todos, generation, evidence_head, current_task_id)
+
+
 def _per_call_guard() -> dict[str, Any]:
     """Revalidate root binding and retained source for every exported tool call."""
 
@@ -1675,6 +1707,59 @@ def tgw_context_onboarding(actor: str) -> str:
 def tgw_context_code_graph(operation: str = "status", query: str = "", limit: int = 20) -> str:
     """Query the CodeGraph snapshot bound to committed application source."""
     return _json_call(code_graph, operation, query, limit)
+
+
+@mcp.tool()
+def tgw_context_todo_exact(
+    todo_id: int, role: str, expected_generation: str = "", expected_evidence_head: str = "",
+) -> str:
+    """Retrieve exactly one identity-bound Todo without backlog fallback."""
+    return _json_call(
+        lambda: _bounded_todo_service().exact(
+            todo_id, role=role, expected_generation=expected_generation,
+            expected_evidence_head=expected_evidence_head,
+        )
+    )
+
+
+@mcp.tool()
+def tgw_context_todo_current(
+    role: str, expected_generation: str = "", expected_evidence_head: str = "",
+) -> str:
+    """Retrieve exactly the harness-bound current Todo without orientation search."""
+    return _json_call(
+        lambda: _bounded_todo_service().current(
+            role=role, expected_generation=expected_generation,
+            expected_evidence_head=expected_evidence_head,
+        )
+    )
+
+
+@mcp.tool()
+def tgw_context_todo_dependencies(
+    todo_id: int, role: str, declared: list[int], expected_generation: str = "",
+    expected_evidence_head: str = "",
+) -> str:
+    """Retrieve only explicitly declared direct Todo dependencies."""
+    return _json_call(
+        lambda: _bounded_todo_service().dependencies(
+            todo_id, role=role, declared=declared,
+            expected_generation=expected_generation,
+            expected_evidence_head=expected_evidence_head,
+        )
+    )
+
+
+@mcp.tool()
+def tgw_context_todo_inventory(
+    purpose: str, limit: int = 20, cursor: str = "", include_bodies: bool = False,
+) -> str:
+    """Explicit paginated administrative/planning inventory; never orientation."""
+    return _json_call(
+        lambda: _bounded_todo_service().inventory(
+            purpose=purpose, limit=limit, cursor=cursor, include_bodies=include_bodies,
+        )
+    )
 
 
 def _sse_binding(*, governed: bool = False) -> tuple[str, int]:
