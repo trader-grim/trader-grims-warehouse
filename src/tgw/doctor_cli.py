@@ -68,6 +68,8 @@ _CONTEXT_COLD_PROBE_STREAM_LIMIT = 1_048_576
 _CONTEXT_COLD_PROBE_TERMINATE_GRACE_SECONDS = 0.25
 _CONTEXT_COLD_PROBE_LOCK = threading.RLock()
 _SERVICE_RUNTIME_PROBE_ATTEMPTS = 2
+_PLAN_RENDER_READINESS_ATTEMPTS = 30
+_PLAN_RENDER_READINESS_INTERVAL_SECONDS = 0.1
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 _CODING_RUNTIME_GROUP = "tgw-coders"
@@ -11425,6 +11427,71 @@ def _repair_plan_render_storage(paths: DoctorPaths) -> bool:
     return changed
 
 
+def _wait_plan_render_repair_readiness(
+    paths: DoctorPaths,
+    *,
+    desired_commit: str | None,
+    obligation: Mapping[str, Any] | None,
+    action_state: Mapping[str, Any] | None,
+    attempts: int | None = None,
+    interval_seconds: float | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Boundedly prove service health and, when owed, a new invocation.
+
+    ``systemctl start`` returning only proves that systemd accepted/completed the
+    job.  The worker may need a short interval before its exact process runtime
+    is observable.  Keep the durable obligation in place until both identities
+    converge, and never put readiness polling in the worker itself.
+    """
+    if attempts is None:
+        attempts = _PLAN_RENDER_READINESS_ATTEMPTS
+    if interval_seconds is None:
+        interval_seconds = _PLAN_RENDER_READINESS_INTERVAL_SECONDS
+    if attempts < 1:
+        raise ValueError("plan_render readiness attempts must be positive")
+    last_check: dict[str, Any] | None = None
+    last_transition: dict[str, Any] | None = None
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            last_check = check_plan_render_worker(
+                paths,
+                desired_commit=desired_commit,
+                observe_restart_obligations=False,
+            )
+            last_transition = None
+            if obligation is not None:
+                if action_state is None:
+                    raise DoctorError("plan_render restart action identity is missing")
+                last_transition = _restart_obligation_transition(
+                    _PLAN_RENDER_UNIT,
+                    obligation,
+                    action_state,
+                    _unit_state(_PLAN_RENDER_UNIT),
+                )
+            if last_check["state"] == "PASS" and (
+                last_transition is None or last_transition["exact"]
+            ):
+                return last_check, last_transition
+            last_error = None
+        except Exception as exc:
+            last_error = exc
+        if attempt + 1 < attempts:
+            time.sleep(interval_seconds)
+    if last_error is not None:
+        raise DoctorError(
+            "plan_render readiness proof failed after bounded restart wait: "
+            f"{last_error}"
+        ) from last_error
+    if last_check is None or last_check.get("state") != "PASS":
+        raise DoctorError(
+            "plan_render unit remains unhealthy after bounded restart wait"
+        )
+    raise DoctorError(
+        "plan_render service did not load a new invocation after bounded restart wait"
+    )
+
+
 def repair_plan_render_worker(
     paths: DoctorPaths, *, desired_commit: str | None = None
 ) -> dict[str, Any]:
@@ -11599,25 +11666,23 @@ def repair_plan_render_worker(
             raise DoctorError(
                 result.stderr.strip() or "plan_render service repair failed"
             )
-    after = check_plan_render_worker(
-        paths,
-        desired_commit=desired if explicit_commit else None,
-        observe_restart_obligations=False,
-    )
-    if after["state"] != "PASS":
-        raise DoctorError("plan_render unit remains unhealthy after repair")
     transition = None
-    if obligation is not None:
-        transition = _restart_obligation_transition(
-            _PLAN_RENDER_UNIT,
-            obligation,
-            action_state,
-            _unit_state(_PLAN_RENDER_UNIT),
+    if action is not None:
+        after, transition = _wait_plan_render_repair_readiness(
+            paths,
+            desired_commit=desired if explicit_commit else None,
+            obligation=obligation,
+            action_state=action_state,
         )
-        if not transition["exact"]:
-            raise DoctorError(
-                "plan_render service did not load a new invocation after restart"
-            )
+    else:
+        after = check_plan_render_worker(
+            paths,
+            desired_commit=desired if explicit_commit else None,
+            observe_restart_obligations=False,
+        )
+        if after["state"] != "PASS":
+            raise DoctorError("plan_render unit remains unhealthy after repair")
+    if obligation is not None:
         _clear_restart_obligation(
             paths,
             _PLAN_RENDER_UNIT,

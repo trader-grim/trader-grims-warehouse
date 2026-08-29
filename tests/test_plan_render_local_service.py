@@ -616,6 +616,8 @@ def _stub_plan_render_repair_action(
         "restart_safe": runtime_status == "STALE",
     }
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_PLAN_RENDER_READINESS_ATTEMPTS", 3)
+    monkeypatch.setattr(doctor_cli, "_PLAN_RENDER_READINESS_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(
         doctor_cli, "_verify_release_tree", lambda *_args: {"tree": "c" * 40}
     )
@@ -727,6 +729,59 @@ def test_plan_render_repair_restarts_only_stable_stale_worker(
         ["systemctl", "enable", doctor_cli._PLAN_RENDER_UNIT],
         ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT],
     ]
+
+
+def test_plan_render_repair_waits_for_restarted_worker_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commands, receipts = _stub_plan_render_repair_action(
+        tmp_path,
+        monkeypatch,
+        runtime_status="STALE",
+        post_state="FAIL",
+    )
+    checks = 0
+
+    def delayed_health(*_args: object, **_kwargs: object) -> dict[str, str]:
+        nonlocal checks
+        checks += 1
+        return {"state": "PASS" if checks == 3 else "FAIL"}
+
+    monkeypatch.setattr(doctor_cli, "check_plan_render_worker", delayed_health)
+
+    result = doctor_cli.repair_plan_render_worker(paths)
+
+    assert result["ok"] is True
+    assert checks == 3
+    assert ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT] in commands
+    assert "plan-render-worker" in receipts
+
+
+def test_plan_render_repair_readiness_failure_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commands, receipts = _stub_plan_render_repair_action(
+        tmp_path,
+        monkeypatch,
+        runtime_status="STALE",
+        post_state="FAIL",
+    )
+    checks = 0
+
+    def unhealthy(*_args: object, **_kwargs: object) -> dict[str, str]:
+        nonlocal checks
+        checks += 1
+        return {"state": "FAIL"}
+
+    monkeypatch.setattr(doctor_cli, "check_plan_render_worker", unhealthy)
+
+    with pytest.raises(doctor_cli.DoctorError, match="bounded restart wait"):
+        doctor_cli.repair_plan_render_worker(paths)
+
+    # One pre-repair diagnosis plus exactly three bounded readiness attempts.
+    assert checks == 4
+    assert ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT] in commands
+    assert "plan-render-worker" not in receipts
 
 
 def test_plan_render_repair_exact_active_worker_is_noop(
