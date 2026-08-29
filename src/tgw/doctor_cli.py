@@ -7865,30 +7865,41 @@ def _write_restart_obligation(
 def _restart_obligation_transition(
     unit: str,
     obligation: Mapping[str, Any],
+    action_state: Mapping[str, Any],
     state: Mapping[str, Any],
 ) -> dict[str, Any]:
-    before = dict(obligation["prechange_service"])
+    marker_before = dict(obligation["prechange_service"])
+    action_before = _restart_obligation_identity(action_state)
     after = _restart_obligation_identity(state)
+    action_before_exact = _restart_obligation_service_identity_exact(
+        unit, action_before
+    )
     after_exact = _restart_obligation_service_identity_exact(unit, after)
-    before_active = before["ActiveState"] == "active"
+    before_active = action_before["ActiveState"] == "active"
     invocation_changed = (
         not before_active
         or (
-            after["InvocationID"] != before["InvocationID"]
+            after["InvocationID"] != action_before["InvocationID"]
             and (
                 not unit.endswith(".service")
                 or (
-                    after["MainPID"] != before["MainPID"]
+                    after["MainPID"] != action_before["MainPID"]
                     and after["ExecMainStartTimestampMonotonic"]
-                    != before["ExecMainStartTimestampMonotonic"]
+                    != action_before["ExecMainStartTimestampMonotonic"]
                 )
             )
         )
     )
-    exact = after["ActiveState"] == "active" and after_exact and invocation_changed
+    exact = (
+        action_before_exact
+        and after["ActiveState"] == "active"
+        and after_exact
+        and invocation_changed
+    )
     return {
         "exact": exact,
-        "before": before,
+        "marker_before": marker_before,
+        "action_before": action_before,
         "after": after,
         "invocation_changed": invocation_changed,
     }
@@ -8024,6 +8035,7 @@ def repair_workers(
         if result.returncode:
             raise DoctorError(result.stderr.strip() or "systemd daemon reload failed")
     actions: list[str] = []
+    action_states: dict[str, dict[str, Any]] = {}
     for unit in _ACTIVE_CODING_UNITS:
         state = _unit_state(unit)
         definition = _unit_definition(
@@ -8052,6 +8064,14 @@ def repair_workers(
         result = _run(["systemctl", "enable", unit], timeout=30)
         if result.returncode:
             raise DoctorError(result.stderr.strip() or f"failed to enable {unit}")
+        if unit in obligations:
+            action_state = _unit_state(unit)
+            action_states[unit] = dict(action_state)
+            operation = (
+                "restart"
+                if action_state.get("ActiveState") == "active"
+                else "start"
+            )
         result = _run(["systemctl", operation, unit], timeout=30)
         if result.returncode:
             raise DoctorError(result.stderr.strip() or f"failed to {operation} {unit}")
@@ -8067,7 +8087,12 @@ def repair_workers(
     for unit, obligation in sorted(obligations.items()):
         state = _unit_state(unit)
         if unit in _ACTIVE_CODING_UNITS:
-            transition = _restart_obligation_transition(unit, obligation, state)
+            transition = _restart_obligation_transition(
+                unit,
+                obligation,
+                action_states[unit],
+                state,
+            )
             transitions[unit] = transition
             if not transition["exact"]:
                 raise DoctorError(
@@ -8329,13 +8354,24 @@ def repair_plan_render_worker(
             f"{runtime_status.lower()}"
         )
     if action is not None:
-        for command in (
-            ["systemctl", "enable", _PLAN_RENDER_UNIT],
-            ["systemctl", action, _PLAN_RENDER_UNIT],
-        ):
-            result = _run(command, timeout=30)
-            if result.returncode:
-                raise DoctorError(result.stderr.strip() or "plan_render service repair failed")
+        result = _run(["systemctl", "enable", _PLAN_RENDER_UNIT], timeout=30)
+        if result.returncode:
+            raise DoctorError(
+                result.stderr.strip() or "plan_render service repair failed"
+            )
+        action_state = state
+        if obligation is not None:
+            action_state = _unit_state(_PLAN_RENDER_UNIT)
+            action = (
+                "restart"
+                if action_state.get("ActiveState") == "active"
+                else "start"
+            )
+        result = _run(["systemctl", action, _PLAN_RENDER_UNIT], timeout=30)
+        if result.returncode:
+            raise DoctorError(
+                result.stderr.strip() or "plan_render service repair failed"
+            )
     after = check_plan_render_worker(
         paths,
         desired_commit=desired if explicit_commit else None,
@@ -8348,6 +8384,7 @@ def repair_plan_render_worker(
         transition = _restart_obligation_transition(
             _PLAN_RENDER_UNIT,
             obligation,
+            action_state,
             _unit_state(_PLAN_RENDER_UNIT),
         )
         if not transition["exact"]:

@@ -846,16 +846,20 @@ def test_plan_render_repair_replays_durable_obligation_after_restart_failure(
         "check_plan_render_worker",
         lambda *_args, **_kwargs: {"state": "PASS"},
     )
+    generation = 2
     monkeypatch.setattr(
         doctor_cli,
         "_unit_state",
-        lambda _unit: _active_plan_render_state(2),
+        lambda _unit: _active_plan_render_state(generation),
     )
 
     def succeed(
         command: list[str], **_kwargs: object
     ) -> subprocess.CompletedProcess[str]:
+        nonlocal generation
         commands.append(command)
+        if command == ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT]:
+            generation += 1
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(doctor_cli, "_run", succeed)
@@ -885,6 +889,14 @@ def test_plan_render_repair_keeps_debt_when_restart_is_a_noop(
     )
     desired = "a" * 40
     tree = "c" * 40
+    state_calls = 0
+
+    def intervening_restart(_unit: str) -> dict[str, str]:
+        nonlocal state_calls
+        state_calls += 1
+        return _active_plan_render_state(1 if state_calls == 1 else 2)
+
+    monkeypatch.setattr(doctor_cli, "_unit_state", intervening_restart)
 
     def no_op(
         command: list[str], **_kwargs: object
