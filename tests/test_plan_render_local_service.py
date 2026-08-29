@@ -35,7 +35,7 @@ def test_local_plan_render_unit_reuses_existing_worker_as_db_user() -> None:
     assert "User=db\n" in unit
     assert "SupplementaryGroups=tgw-coders" in unit
     assert "WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current" in unit
-    assert "PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src" in unit
+    assert "Environment=PYTHONPATH=src" in unit
     assert "-m tgw.workers.plan_render --config " in unit
     assert "/opt/TGW/tgw-lib/config/tgw-plan-render-local.json" in unit
     assert "ReadOnlyPaths=/opt/TGW/library/approved/058e2f" in unit
@@ -98,12 +98,21 @@ def test_plan_render_process_runtime_detects_stale_and_current_worker(tmp_path: 
     proc = tmp_path / "proc"
     (proc / "2374584").mkdir(parents=True)
     (proc / "2374584" / "cwd").symlink_to(previous)
-    state = {"MainPID": "2374584"}
+    state = {
+        "Unit": doctor_cli._PLAN_RENDER_UNIT,
+        "MainPID": "2374584",
+        "InvocationID": "1" * 32,
+        "ExecMainStartTimestampMonotonic": "100",
+    }
 
-    stale = doctor_cli._plan_render_process_runtime_identity(state, selected, proc_root=proc)
+    stale = doctor_cli._plan_render_process_runtime_identity(
+        state, selected, proc_root=proc, state_reader=lambda _unit: state
+    )
     (proc / "2374584" / "cwd").unlink()
     (proc / "2374584" / "cwd").symlink_to(selected)
-    current = doctor_cli._plan_render_process_runtime_identity(state, selected, proc_root=proc)
+    current = doctor_cli._plan_render_process_runtime_identity(
+        state, selected, proc_root=proc, state_reader=lambda _unit: state
+    )
 
     assert stale["exact"] is False
     assert stale["reason"] == "loaded process predates selected immutable runtime"
@@ -137,8 +146,17 @@ def test_plan_render_process_runtime_uses_exact_readlink_when_proc_cwd_is_denied
 
     monkeypatch.setattr(doctor_cli, "_run", run)
 
+    state = {
+        "Unit": doctor_cli._PLAN_RENDER_UNIT,
+        "MainPID": "2374584",
+        "InvocationID": "1" * 32,
+        "ExecMainStartTimestampMonotonic": "100",
+    }
     current = doctor_cli._plan_render_process_runtime_identity(
-        {"MainPID": "2374584"}, selected, proc_root=proc
+        state,
+        selected,
+        proc_root=proc,
+        state_reader=lambda _unit: state,
     )
     monkeypatch.setattr(
         doctor_cli,
@@ -148,7 +166,10 @@ def test_plan_render_process_runtime_uses_exact_readlink_when_proc_cwd_is_denied
         ),
     )
     stale = doctor_cli._plan_render_process_runtime_identity(
-        {"MainPID": "2374584"}, selected, proc_root=proc
+        state,
+        selected,
+        proc_root=proc,
+        state_reader=lambda _unit: state,
     )
 
     assert current["exact"] is True
@@ -211,11 +232,16 @@ def _plan_render_check_fixture(
     plan_render_log_root.mkdir(parents=True)
     plan_render_root.chmod(0o2770)
     plan_render_log_root.chmod(0o2770)
+    receipts = tmp_path / "doctor-receipts"
+    receipts.mkdir()
     paths = doctor_cli.DoctorPaths(
         runtime_root=runtime_root,
         plan_render_config=installed_config,
         plan_render_root=plan_render_root,
         plan_render_log_root=plan_render_log_root,
+        receipts=receipts,
+        systemd_unit_uid=os.getuid(),
+        systemd_unit_gid=os.getgid(),
     )
     monkeypatch.setattr(
         doctor_cli.pwd,
@@ -249,7 +275,11 @@ def _plan_render_check_fixture(
     monkeypatch.setattr(
         doctor_cli,
         "_plan_render_process_runtime_identity",
-        lambda *_args, **_kwargs: {"exact": True},
+        lambda *_args, **_kwargs: {
+            "status": "EXACT",
+            "exact": True,
+            "restart_safe": False,
+        },
     )
     monkeypatch.setattr(
         doctor_cli,
@@ -260,6 +290,17 @@ def _plan_render_check_fixture(
         ),
     )
     return paths, release
+
+
+def _active_plan_render_state(generation: int = 1) -> dict[str, str]:
+    return {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "running",
+        "MainPID": str(1000 + generation),
+        "InvocationID": f"{generation:032x}",
+        "ExecMainStartTimestampMonotonic": str(10000 + generation),
+    }
 
 
 def test_doctor_requires_exact_plan_render_runtime_selector(
@@ -494,6 +535,7 @@ def test_plan_render_repair_receipts_storage_before_service(
         systemd_unit_gid=os.getgid(),
     )
     events: list[str] = []
+    generation = 1
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
     monkeypatch.setattr(
         doctor_cli, "_verify_release_tree", lambda *_args: {"tree": "c" * 40}
@@ -506,10 +548,18 @@ def test_plan_render_repair_receipts_storage_before_service(
     )
     monkeypatch.setattr(
         doctor_cli,
-        "_run",
-        lambda command, **_kwargs: events.append("run:" + " ".join(command))
-        or subprocess.CompletedProcess(command, 0, "", ""),
+        "_unit_state",
+        lambda _unit: _active_plan_render_state(generation),
     )
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal generation
+        events.append("run:" + " ".join(command))
+        if command[:2] == ["systemctl", "restart"]:
+            generation += 1
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
 
     result = doctor_cli.repair_plan_render_worker(paths)
 
@@ -527,18 +577,30 @@ def test_plan_render_repair_receipts_storage_before_service(
     assert storage_receipt_index < min(service_indexes)
 
 
-def test_plan_render_repair_restarts_only_stale_worker_and_then_is_noop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _stub_plan_render_repair_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    runtime_status: str,
+    active: bool = True,
+    unit_changed: bool = False,
+    config_changed: bool = False,
+    storage_changed: bool = False,
+    post_state: str = "PASS",
+    restart_fails: bool = False,
+) -> tuple[doctor_cli.DoctorPaths, list[list[str]], list[str]]:
     paths, release = _plan_render_check_fixture(tmp_path, monkeypatch)
     (release / "systemd").mkdir()
     unit_source = release / "systemd" / doctor_cli._PLAN_RENDER_UNIT
     unit_source.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
     systemd_root = tmp_path / "systemd"
     systemd_root.mkdir()
-    destination = systemd_root / doctor_cli._PLAN_RENDER_UNIT
-    destination.write_bytes(unit_source.read_bytes())
-    destination.chmod(0o444)
+    if not unit_changed:
+        destination = systemd_root / doctor_cli._PLAN_RENDER_UNIT
+        destination.write_bytes(unit_source.read_bytes())
+        destination.chmod(0o444)
+    if config_changed:
+        paths.plan_render_config.write_text("stale config\n", encoding="utf-8")
     paths = replace(
         paths,
         systemd_install_root=systemd_root,
@@ -546,43 +608,359 @@ def test_plan_render_repair_restarts_only_stale_worker_and_then_is_noop(
         systemd_unit_gid=os.getgid(),
     )
     commands: list[list[str]] = []
-    runtime_observations = iter([
-        {"exact": False, "reason": "loaded process predates selected immutable runtime"},
-        {"exact": True},
-    ])
-    checks = iter([
-        {"state": "FAIL", "evidence": {"process_runtime": {"exact": False}}},
-        {"state": "PASS", "evidence": {"process_runtime": {"exact": True}}},
-        {"state": "PASS", "evidence": {"process_runtime": {"exact": True}}},
-        {"state": "PASS", "evidence": {"process_runtime": {"exact": True}}},
-    ])
+    receipts: list[str] = []
+    check_calls = 0
+    runtime = {
+        "status": runtime_status,
+        "exact": runtime_status == "EXACT",
+        "restart_safe": runtime_status == "STALE",
+    }
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
     monkeypatch.setattr(
         doctor_cli, "_verify_release_tree", lambda *_args: {"tree": "c" * 40}
     )
-    monkeypatch.setattr(doctor_cli, "check_plan_render_worker", lambda _paths: next(checks))
-    monkeypatch.setattr(doctor_cli, "_repair_plan_render_storage", lambda _paths: False)
-    monkeypatch.setattr(doctor_cli, "_receipt", lambda *_args: "receipt.json")
+    generation = 1
+
+    def unit_state(_unit: str) -> dict[str, str]:
+        if active:
+            return _active_plan_render_state(generation)
+        return {
+            "LoadState": "loaded",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "MainPID": "0",
+            "InvocationID": "",
+            "ExecMainStartTimestampMonotonic": "0",
+        }
+
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+
+    def check(*_args: object, **_kwargs: object) -> dict[str, str]:
+        nonlocal check_calls
+        check_calls += 1
+        return {"state": "FAIL" if check_calls == 1 else post_state}
+
+    monkeypatch.setattr(doctor_cli, "check_plan_render_worker", check)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_repair_plan_render_storage",
+        lambda _paths: storage_changed,
+    )
+    storage_calls = 0
+
+    def storage_identity(_paths):
+        nonlocal storage_calls
+        storage_calls += 1
+        return {
+            "exact": not storage_changed or storage_calls > 1,
+            "directories": [],
+        }
+
+    monkeypatch.setattr(
+        doctor_cli,
+        "_plan_render_storage_identity",
+        storage_identity,
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_receipt",
+        lambda _paths, operation, *_args: receipts.append(operation)
+        or "receipt.json",
+    )
     monkeypatch.setattr(
         doctor_cli,
         "_plan_render_process_runtime_identity",
-        lambda *_args, **_kwargs: next(runtime_observations),
+        lambda *_args, **_kwargs: runtime,
     )
-    monkeypatch.setattr(
-        doctor_cli,
-        "_run",
-        lambda command, **_kwargs: commands.append(command)
-        or subprocess.CompletedProcess(command, 0, "", ""),
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal generation
+        commands.append(command)
+        if restart_fails and command == [
+            "systemctl",
+            "restart",
+            doctor_cli._PLAN_RENDER_UNIT,
+        ]:
+            return subprocess.CompletedProcess(command, 1, "", "restart failed")
+        if command[:2] in (["systemctl", "restart"], ["systemctl", "start"]):
+            generation += 1
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    return paths, commands, receipts
+
+
+@pytest.mark.parametrize("runtime_status", ("RACED", "UNREADABLE"))
+def test_plan_render_repair_never_restarts_ambiguous_healthy_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_status: str,
+) -> None:
+    paths, commands, receipts = _stub_plan_render_repair_action(
+        tmp_path, monkeypatch, runtime_status=runtime_status
+    )
+
+    with pytest.raises(
+        doctor_cli.DoctorError,
+        match=f"process runtime is {runtime_status.lower()}",
+    ):
+        doctor_cli.repair_plan_render_worker(paths)
+
+    assert commands == []
+    assert "plan-render-worker" not in receipts
+
+
+def test_plan_render_repair_restarts_only_stable_stale_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commands, _receipts = _stub_plan_render_repair_action(
+        tmp_path, monkeypatch, runtime_status="STALE"
     )
 
     repaired = doctor_cli.repair_plan_render_worker(paths)
-    converged = doctor_cli.repair_plan_render_worker(paths)
 
     assert repaired["changed"] is True
     assert repaired["service_action"] == "restart"
-    assert converged["changed"] is False
-    assert converged["service_action"] is None
+    assert repaired["service_action_reason"] == "stale-runtime"
+    assert repaired["process_runtime_status"] == "STALE"
     assert commands == [
         ["systemctl", "enable", doctor_cli._PLAN_RENDER_UNIT],
         ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT],
     ]
+
+
+def test_plan_render_repair_exact_active_worker_is_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commands, _receipts = _stub_plan_render_repair_action(
+        tmp_path, monkeypatch, runtime_status="EXACT"
+    )
+
+    result = doctor_cli.repair_plan_render_worker(paths)
+
+    assert result["changed"] is False
+    assert result["service_action"] is None
+    assert result["service_action_reason"] is None
+    assert result["process_runtime_status"] == "EXACT"
+    assert commands == []
+
+
+@pytest.mark.parametrize("changed_kind", ("unit", "config", "storage"))
+def test_plan_render_materialization_change_independently_justifies_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_kind: str,
+) -> None:
+    paths, commands, _receipts = _stub_plan_render_repair_action(
+        tmp_path,
+        monkeypatch,
+        runtime_status="RACED",
+        unit_changed=changed_kind == "unit",
+        config_changed=changed_kind == "config",
+        storage_changed=changed_kind == "storage",
+    )
+
+    result = doctor_cli.repair_plan_render_worker(paths)
+
+    assert result["service_action"] == "restart"
+    assert result["service_action_reason"] == "materialization-changed"
+    assert result["process_runtime_status"] == "RACED"
+    assert ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT] in commands
+
+
+def test_plan_render_changed_materialization_with_race_requires_exact_postcheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commands, receipts = _stub_plan_render_repair_action(
+        tmp_path,
+        monkeypatch,
+        runtime_status="RACED",
+        config_changed=True,
+        post_state="FAIL",
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="remains unhealthy"):
+        doctor_cli.repair_plan_render_worker(paths)
+
+    assert ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT] in commands
+    assert "plan-render-worker" not in receipts
+
+
+def test_plan_render_repair_starts_inactive_worker_without_stale_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commands, _receipts = _stub_plan_render_repair_action(
+        tmp_path, monkeypatch, runtime_status="UNREADABLE", active=False
+    )
+
+    result = doctor_cli.repair_plan_render_worker(paths)
+
+    assert result["service_action"] == "start"
+    assert result["service_action_reason"] == "inactive"
+    assert result["process_runtime_status"] == "UNREADABLE"
+    assert ["systemctl", "start", doctor_cli._PLAN_RENDER_UNIT] in commands
+
+
+def test_plan_render_repair_failed_stale_restart_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commands, receipts = _stub_plan_render_repair_action(
+        tmp_path,
+        monkeypatch,
+        runtime_status="STALE",
+        restart_fails=True,
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="restart failed"):
+        doctor_cli.repair_plan_render_worker(paths)
+
+    assert ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT] in commands
+    assert "plan-render-worker" not in receipts
+
+
+def test_plan_render_repair_replays_durable_obligation_after_restart_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commands, receipts = _stub_plan_render_repair_action(
+        tmp_path,
+        monkeypatch,
+        runtime_status="EXACT",
+        config_changed=True,
+        restart_fails=True,
+    )
+    desired = "a" * 40
+    tree = "c" * 40
+
+    with pytest.raises(doctor_cli.DoctorError, match="restart failed"):
+        doctor_cli.repair_plan_render_worker(paths)
+    assert doctor_cli._read_restart_obligation(
+        paths,
+        doctor_cli._PLAN_RENDER_UNIT,
+        commit=desired,
+        tree=tree,
+    ) is not None
+    assert "plan-render-worker" not in receipts
+
+    monkeypatch.setattr(
+        doctor_cli,
+        "check_plan_render_worker",
+        lambda *_args, **_kwargs: {"state": "PASS"},
+    )
+    generation = 2
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda _unit: _active_plan_render_state(generation),
+    )
+
+    def succeed(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal generation
+        commands.append(command)
+        if command == ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT]:
+            generation += 1
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(doctor_cli, "_run", succeed)
+    commands.clear()
+    result = doctor_cli.repair_plan_render_worker(paths)
+
+    assert result["service_action"] == "restart"
+    assert result["service_action_reason"] == "durable-restart-obligation"
+    assert ["systemctl", "daemon-reload"] in commands
+    assert ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT] in commands
+    assert doctor_cli._read_restart_obligation(
+        paths,
+        doctor_cli._PLAN_RENDER_UNIT,
+        commit=desired,
+        tree=tree,
+    ) is None
+
+
+def test_plan_render_repair_keeps_debt_when_restart_is_a_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commands, receipts = _stub_plan_render_repair_action(
+        tmp_path,
+        monkeypatch,
+        runtime_status="EXACT",
+        config_changed=True,
+    )
+    desired = "a" * 40
+    tree = "c" * 40
+    state_calls = 0
+
+    def intervening_restart(_unit: str) -> dict[str, str]:
+        nonlocal state_calls
+        state_calls += 1
+        return _active_plan_render_state(1 if state_calls == 1 else 2)
+
+    monkeypatch.setattr(doctor_cli, "_unit_state", intervening_restart)
+
+    def no_op(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(doctor_cli, "_run", no_op)
+
+    with pytest.raises(doctor_cli.DoctorError, match="did not load a new invocation"):
+        doctor_cli.repair_plan_render_worker(paths)
+    assert doctor_cli._read_restart_obligation(
+        paths,
+        doctor_cli._PLAN_RENDER_UNIT,
+        commit=desired,
+        tree=tree,
+    ) is not None
+    assert "plan-render-worker" not in receipts
+
+
+def test_plan_render_repair_refuses_to_join_transitional_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commands, receipts = _stub_plan_render_repair_action(
+        tmp_path,
+        monkeypatch,
+        runtime_status="EXACT",
+        config_changed=True,
+    )
+    desired = "a" * 40
+    tree = "c" * 40
+    original_state = doctor_cli._unit_state
+    original_run = doctor_cli._run
+    enabled = False
+
+    def unit_state(unit: str) -> dict[str, str]:
+        if enabled:
+            return {
+                **_active_plan_render_state(2),
+                "ActiveState": "activating",
+                "SubState": "start",
+            }
+        return original_state(unit)
+
+    def run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal enabled
+        result = original_run(command, **kwargs)
+        if command == ["systemctl", "enable", doctor_cli._PLAN_RENDER_UNIT]:
+            enabled = True
+        return result
+
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+
+    with pytest.raises(doctor_cli.DoctorError, match="service state is activating"):
+        doctor_cli.repair_plan_render_worker(paths)
+    assert ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT] not in commands
+    assert ["systemctl", "start", doctor_cli._PLAN_RENDER_UNIT] not in commands
+    assert doctor_cli._read_restart_obligation(
+        paths,
+        doctor_cli._PLAN_RENDER_UNIT,
+        commit=desired,
+        tree=tree,
+    ) is not None
+    assert "plan-render-worker" not in receipts

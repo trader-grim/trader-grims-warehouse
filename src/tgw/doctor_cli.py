@@ -59,6 +59,7 @@ def _postgres_driver() -> tuple[Any, Any]:
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_INVOCATION_ID = re.compile(r"[0-9a-f]{32}\Z")
 _LOOSE_OBJECT_DIRECTORY = re.compile(r"[0-9a-f]{2}\Z")
 _LOOSE_OBJECT_NAME = re.compile(r"[0-9a-f]{38}\Z")
 _STATES = {"PASS", "WARN", "FAIL", "UNKNOWN", "RESTART_REQUIRED"}
@@ -66,6 +67,7 @@ _CONTEXT_COLD_PROBE_BUDGET_SECONDS = 30.0
 _CONTEXT_COLD_PROBE_STREAM_LIMIT = 1_048_576
 _CONTEXT_COLD_PROBE_TERMINATE_GRACE_SECONDS = 0.25
 _CONTEXT_COLD_PROBE_LOCK = threading.RLock()
+_SERVICE_RUNTIME_PROBE_ATTEMPTS = 2
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 _CODING_RUNTIME_GROUP = "tgw-coders"
@@ -3003,13 +3005,13 @@ def _unit_state(unit: str) -> dict[str, Any]:
             "systemctl",
             "show",
             unit,
-            "--property=LoadState,ActiveState,SubState,FragmentPath,DropInPaths,ExecStart,MainPID,NeedDaemonReload",
+            "--property=LoadState,ActiveState,SubState,FragmentPath,DropInPaths,ExecStart,MainPID,InvocationID,ExecMainStartTimestampMonotonic,NeedDaemonReload",
             "--no-pager",
         ]
     )
     if result.returncode:
         raise DoctorError(result.stderr.strip() or f"cannot inspect {unit}")
-    values: dict[str, str] = {}
+    values: dict[str, str] = {"Unit": unit}
     for line in result.stdout.splitlines():
         key, separator, value = line.partition("=")
         if separator:
@@ -3113,66 +3115,230 @@ def _unit_definition(
     }
 
 
-def _plan_render_process_runtime_identity(
-    state: Mapping[str, str], release: Path, *, proc_root: Path = Path("/proc")
+def _service_process_runtime_identity(
+    state: Mapping[str, str],
+    release: Path,
+    *,
+    proc_root: Path = Path("/proc"),
+    state_reader: Callable[[str], Mapping[str, str]] | None = None,
+    attempts: int = _SERVICE_RUNTIME_PROBE_ATTEMPTS,
 ) -> dict[str, Any]:
-    """Compare the loaded worker's immutable cwd with the selected release."""
-    try:
-        pid = int(state.get("MainPID", "0"))
-    except ValueError:
-        pid = 0
+    """Prove one stable systemd invocation has the selected immutable cwd."""
+    if attempts < 1:
+        raise ValueError("service runtime probe attempts must be positive")
+    selected = release.resolve(strict=True)
+    unit = str(state.get("Unit", ""))
+    read_state = state_reader or _unit_state
     evidence: dict[str, Any] = {
-        "pid": pid,
-        "selected_release": str(release.resolve(strict=True)),
+        "unit": unit or None,
+        "pid": 0,
+        "invocation_id": None,
+        "start_timestamp_monotonic": None,
+        "selected_release": str(selected),
         "loaded_release": None,
+        "status": "UNREADABLE",
         "exact": False,
+        "restart_safe": False,
+        "attempts": [],
     }
-    if pid <= 0:
-        evidence["reason"] = "active service has no MainPID"
+    if not unit:
+        evidence["reason"] = "service runtime identity has no unit name"
         return evidence
-    try:
-        loaded = (proc_root / str(pid) / "cwd").resolve(strict=True)
-    except OSError as exc:
-        # Hardened procfs prevents an ordinary operator from dereferencing the
-        # db worker's cwd.  Use the host's existing non-interactive local sudo
-        # only for exact read-only kernel cwd resolution; never substitute a
-        # mutable selector timestamp or the unit's configured pathname.
-        cwd = proc_root / str(pid) / "cwd"
-        result = _run(
-            ["sudo", "-n", "/usr/bin/readlink", "-e", str(cwd)], timeout=5
+
+    def systemd_identity(value: Mapping[str, str]) -> dict[str, str]:
+        return {
+            "MainPID": str(value.get("MainPID", "")),
+            "InvocationID": str(value.get("InvocationID", "")),
+            "ExecMainStartTimestampMonotonic": str(
+                value.get("ExecMainStartTimestampMonotonic", "")
+            ),
+        }
+
+    snapshot: Mapping[str, str] = state
+    for attempt_number in range(1, attempts + 1):
+        before = systemd_identity(snapshot)
+        try:
+            pid = int(before["MainPID"])
+        except ValueError:
+            pid = 0
+        invocation_id = before["InvocationID"]
+        start_timestamp = before["ExecMainStartTimestampMonotonic"]
+        evidence.update(
+            {
+                "pid": pid,
+                "invocation_id": invocation_id or None,
+                "start_timestamp_monotonic": start_timestamp or None,
+            }
         )
-        raw = result.stdout.strip()
-        if result.returncode or not raw or "\n" in raw or not Path(raw).is_absolute():
+        identity_complete = (
+            pid > 0
+            and _INVOCATION_ID.fullmatch(invocation_id) is not None
+            and start_timestamp.isdigit()
+            and int(start_timestamp) > 0
+        )
+        loaded: Path | None = None
+        verification: str | None = None
+        probe_error: str | None = None
+        if identity_complete:
+            cwd = proc_root / str(pid) / "cwd"
+            try:
+                loaded = cwd.resolve(strict=True)
+            except OSError as exc:
+                # Hardened procfs prevents an ordinary operator from
+                # dereferencing the db worker's cwd. Use the existing bounded
+                # non-interactive read-only probe, then still re-read systemd's
+                # complete process identity before trusting the result.
+                result = _run(
+                    ["sudo", "-n", "/usr/bin/readlink", "-e", str(cwd)],
+                    timeout=5,
+                )
+                raw = result.stdout.strip()
+                if (
+                    result.returncode
+                    or not raw
+                    or "\n" in raw
+                    or not Path(raw).is_absolute()
+                ):
+                    probe_error = (
+                        f"loaded process runtime is unreadable: {exc}; exact "
+                        "read-only privileged cwd probe is unavailable"
+                    )
+                else:
+                    try:
+                        loaded = Path(raw).resolve(strict=True)
+                    except OSError as privileged_exc:
+                        probe_error = (
+                            "loaded process runtime is unreadable after the "
+                            f"privileged cwd probe: {privileged_exc}"
+                        )
+                    else:
+                        verification = "privileged-read-only-proc-cwd"
+        else:
+            probe_error = "active service has incomplete systemd process identity"
+
+        try:
+            after_state = dict(read_state(unit))
+        except Exception as exc:
+            after: dict[str, str] | None = None
+            reread_error = str(exc)
+        else:
+            after_state.setdefault("Unit", unit)
+            after = systemd_identity(after_state)
+            reread_error = None
+        attempt_evidence: dict[str, Any] = {
+            "attempt": attempt_number,
+            "before": before,
+            "after": after,
+            "loaded_release": str(loaded) if loaded is not None else None,
+        }
+        if probe_error:
+            attempt_evidence["probe_error"] = probe_error
+        if reread_error:
+            attempt_evidence["reread_error"] = reread_error
+        evidence["attempts"].append(attempt_evidence)
+        if after is None:
             evidence["reason"] = (
-                f"loaded process runtime is unreadable: {exc}; exact read-only "
-                "privileged cwd probe is unavailable"
+                "service runtime identity is unreadable after the cwd probe: "
+                f"{reread_error}"
             )
             return evidence
-        loaded = Path(raw).resolve(strict=True)
-        evidence["verification"] = "privileged-read-only-proc-cwd"
-    evidence["loaded_release"] = str(loaded)
-    evidence["exact"] = loaded == release.resolve(strict=True)
-    if not evidence["exact"]:
-        evidence["reason"] = "loaded process predates selected immutable runtime"
-    return evidence
+        if before != after:
+            if attempt_number < attempts:
+                snapshot = after_state
+                continue
+            evidence["status"] = "RACED"
+            evidence["reason"] = (
+                "service process identity changed during the runtime probe"
+            )
+            evidence.update(
+                {
+                    "pid": int(after["MainPID"])
+                    if after["MainPID"].isdigit()
+                    else 0,
+                    "invocation_id": after["InvocationID"] or None,
+                    "start_timestamp_monotonic": after[
+                        "ExecMainStartTimestampMonotonic"
+                    ]
+                    or None,
+                }
+            )
+            return evidence
+        if probe_error or loaded is None:
+            evidence["reason"] = probe_error or "loaded process runtime is unreadable"
+            return evidence
+        evidence["loaded_release"] = str(loaded)
+        if verification:
+            evidence["verification"] = verification
+        if loaded == selected:
+            evidence.update({"status": "EXACT", "exact": True})
+        else:
+            evidence.update(
+                {
+                    "status": "STALE",
+                    "restart_safe": True,
+                    "reason": "loaded process predates selected immutable runtime",
+                }
+            )
+        return evidence
+    raise AssertionError("service runtime probe exhausted without evidence")
+
+
+def _plan_render_process_runtime_identity(
+    state: Mapping[str, str],
+    release: Path,
+    *,
+    proc_root: Path = Path("/proc"),
+    state_reader: Callable[[str], Mapping[str, str]] | None = None,
+    attempts: int = _SERVICE_RUNTIME_PROBE_ATTEMPTS,
+) -> dict[str, Any]:
+    """Backward-compatible name for the shared service runtime check."""
+    return _service_process_runtime_identity(
+        state,
+        release,
+        proc_root=proc_root,
+        state_reader=state_reader,
+        attempts=attempts,
+    )
 
 
 def check_units(
-    paths: DoctorPaths, *, desired_commit: str | None = None
+    paths: DoctorPaths,
+    *,
+    desired_commit: str | None = None,
+    observe_restart_obligations: bool = True,
 ) -> dict[str, Any]:
     repair = _privileged_repair_action(paths, "workers")
     try:
         observed = {}
         for unit in _CODING_UNITS:
             state = _unit_state(unit)
+            state["restart_obligation"] = _restart_obligation_presence(
+                paths, unit
+            )
             state["definition"] = _unit_definition(
                 paths, unit, state, desired_commit=desired_commit
             )
+            if unit in _ACTIVE_CODING_UNITS and unit.endswith(".service"):
+                desired = state["definition"]["desired_commit"]
+                release = paths.runtime_root / "releases" / desired
+                state["process_runtime"] = _service_process_runtime_identity(
+                    state, release
+                )
             observed[unit] = state
         unhealthy = [
             unit
             for unit, state in observed.items()
-            if state.get("LoadState") != "loaded" or not state["definition"]["exact"] or (unit in _ACTIVE_CODING_UNITS and state.get("ActiveState") != "active")
+            if state.get("LoadState") != "loaded"
+            or not state["definition"]["exact"]
+            or (
+                unit in _ACTIVE_CODING_UNITS
+                and state.get("ActiveState") != "active"
+            )
+            or not state.get("process_runtime", {"exact": True})["exact"]
+            or (
+                observe_restart_obligations
+                and state["restart_obligation"]["status"] != "ABSENT"
+            )
         ]
         return _check(
             "services.local-coding",
@@ -3292,7 +3458,10 @@ def _plan_render_storage_identity(paths: DoctorPaths) -> dict[str, Any]:
 
 
 def check_plan_render_worker(
-    paths: DoctorPaths, *, desired_commit: str | None = None
+    paths: DoctorPaths,
+    *,
+    desired_commit: str | None = None,
+    observe_restart_obligations: bool = True,
 ) -> dict[str, Any]:
     repair = _privileged_repair_action(paths, "plan-render-worker")
     try:
@@ -3316,6 +3485,9 @@ def check_plan_render_worker(
         process_runtime = _plan_render_process_runtime_identity(state, release)
         config = _json(paths.plan_render_config)
         storage = _plan_render_storage_identity(paths)
+        restart_obligation = _restart_obligation_presence(
+            paths, _PLAN_RENDER_UNIT
+        )
         source = release / "config/tgw-plan-render-local.json"
         exact_config = (
             not source.is_symlink()
@@ -3332,6 +3504,10 @@ def check_plan_render_worker(
             and exact_config
             and runtime["exact"]
             and storage["exact"]
+            and (
+                not observe_restart_obligations
+                or restart_obligation["status"] == "ABSENT"
+            )
         )
         reasons = list(definition["reasons"])
         if not process_runtime["exact"]:
@@ -3344,6 +3520,14 @@ def check_plan_render_worker(
             reasons.append("plan_render output directories differ")
         if state.get("ActiveState") != "active":
             reasons.append("service is not active")
+        if (
+            observe_restart_obligations
+            and restart_obligation["status"] != "ABSENT"
+        ):
+            reasons.append(
+                "durable restart obligation is "
+                + restart_obligation["status"].lower()
+            )
         return _check(
             "services.plan-render",
             "PASS" if healthy else "FAIL",
@@ -3355,6 +3539,7 @@ def check_plan_render_worker(
                 "config": config,
                 "runtime": runtime,
                 "storage": storage,
+                "restart_obligation": restart_obligation,
             },
             repair=None if healthy else repair,
         )
@@ -7378,6 +7563,407 @@ def _unit_destination_exact(paths: DoctorPaths, destination: Path, source: Path)
     )
 
 
+_RESTART_OBLIGATION_SCHEMA = "tgw-doctor-service-restart-obligation/v2"
+_RESTART_OBLIGATION_MODE = 0o400
+_RESTART_OBLIGATION_DIRECTORY_MODE = 0o711
+
+
+def _restart_obligation_root(paths: DoctorPaths) -> Path:
+    return paths.receipts / ".restart-obligations"
+
+
+def _restart_obligation_path(paths: DoctorPaths, unit: str) -> Path:
+    if unit not in {*_CODING_UNITS, _PLAN_RENDER_UNIT}:
+        raise DoctorError(f"restart obligation unit is not declared: {unit}")
+    return _restart_obligation_root(paths) / f"{unit}.json"
+
+
+def _ensure_restart_obligation_root(paths: DoctorPaths) -> Path:
+    root = _restart_obligation_root(paths)
+    _repair_managed_directory(
+        root,
+        uid=paths.systemd_unit_uid,
+        gid=paths.systemd_unit_gid,
+        mode=_RESTART_OBLIGATION_DIRECTORY_MODE,
+    )
+    identity = _directory_identity(
+        root,
+        uid=paths.systemd_unit_uid,
+        gid=paths.systemd_unit_gid,
+        mode=_RESTART_OBLIGATION_DIRECTORY_MODE,
+    )
+    if not identity["exact"]:
+        raise DoctorError("restart obligation directory is unsafe")
+    return root
+
+
+def _restart_obligation_presence(
+    paths: DoctorPaths, unit: str
+) -> dict[str, Any]:
+    """Expose restart debt to an ordinary Doctor without exposing its bytes."""
+    path = _restart_obligation_path(paths, unit)
+    root = _restart_obligation_root(paths)
+    expected = {
+        "path": str(path),
+        "expected_uid": paths.systemd_unit_uid,
+        "expected_gid": paths.systemd_unit_gid,
+        "expected_mode": _RESTART_OBLIGATION_MODE,
+    }
+    try:
+        root_state = root.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return {**expected, "status": "ABSENT"}
+    except OSError as exc:
+        return {**expected, "status": "UNREADABLE", "error": str(exc)}
+    if (
+        root.is_symlink()
+        or not stat.S_ISDIR(root_state.st_mode)
+        or root_state.st_uid != paths.systemd_unit_uid
+        or root_state.st_gid != paths.systemd_unit_gid
+        or stat.S_IMODE(root_state.st_mode) != _RESTART_OBLIGATION_DIRECTORY_MODE
+    ):
+        return {
+            **expected,
+            "status": "UNSAFE",
+            "error": "unsafe restart obligation directory",
+        }
+    try:
+        observed = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return {**expected, "status": "ABSENT"}
+    except OSError as exc:
+        return {**expected, "status": "UNREADABLE", "error": str(exc)}
+    exact = (
+        not path.is_symlink()
+        and stat.S_ISREG(observed.st_mode)
+        and observed.st_nlink == 1
+        and observed.st_uid == paths.systemd_unit_uid
+        and observed.st_gid == paths.systemd_unit_gid
+        and stat.S_IMODE(observed.st_mode) == _RESTART_OBLIGATION_MODE
+    )
+    return {
+        **expected,
+        "status": "PRESENT" if exact else "UNSAFE",
+        "uid": observed.st_uid,
+        "gid": observed.st_gid,
+        "mode": stat.S_IMODE(observed.st_mode),
+    }
+
+
+def _restart_obligation_identity(state: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        key: str(state.get(key, ""))
+        for key in (
+            "MainPID",
+            "InvocationID",
+            "ExecMainStartTimestampMonotonic",
+            "ActiveState",
+            "SubState",
+        )
+    }
+
+
+def _restart_obligation_service_identity_exact(
+    unit: str, identity: Mapping[str, Any]
+) -> bool:
+    expected_keys = {
+        "MainPID",
+        "InvocationID",
+        "ExecMainStartTimestampMonotonic",
+        "ActiveState",
+        "SubState",
+    }
+    if set(identity) != expected_keys or not all(
+        isinstance(value, str) for value in identity.values()
+    ):
+        return False
+    if identity["ActiveState"] != "active":
+        return True
+    if re.fullmatch(r"[0-9a-f]{32}", identity["InvocationID"]) is None:
+        return False
+    if unit.endswith(".service"):
+        return (
+            identity["MainPID"].isdigit()
+            and int(identity["MainPID"]) > 0
+            and identity["ExecMainStartTimestampMonotonic"].isdigit()
+            and int(identity["ExecMainStartTimestampMonotonic"]) > 0
+        )
+    return True
+
+
+def _validated_restart_obligation(
+    unit: str,
+    value: object,
+    *,
+    commit: str | None = None,
+    tree: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise DoctorError(f"restart obligation is invalid: {unit}")
+    record = dict(value)
+    digest = record.pop("obligation_hash", None)
+    if (
+        record.get("schema") != _RESTART_OBLIGATION_SCHEMA
+        or not isinstance(record.get("commit"), str)
+        or _COMMIT.fullmatch(record["commit"]) is None
+        or not isinstance(record.get("tree"), str)
+        or _COMMIT.fullmatch(record["tree"]) is None
+        or (commit is not None and record.get("commit") != commit)
+        or (tree is not None and record.get("tree") != tree)
+        or record.get("unit") != unit
+        or not isinstance(record.get("reasons"), list)
+        or not record["reasons"]
+        or not all(isinstance(reason, str) and reason for reason in record["reasons"])
+        or record["reasons"] != sorted(set(record["reasons"]))
+        or not isinstance(
+            record.get("predecessor_obligation_hash"), (str, type(None))
+        )
+        or (
+            record.get("predecessor_obligation_hash") is not None
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                record["predecessor_obligation_hash"],
+            )
+            is None
+        )
+        or not isinstance(record.get("prechange_service"), Mapping)
+        or not _restart_obligation_service_identity_exact(
+            unit, record["prechange_service"]
+        )
+        or digest != _hash(record)
+    ):
+        raise DoctorError(f"restart obligation binding is invalid: {unit}")
+    return {**record, "obligation_hash": digest}
+
+
+def _read_restart_obligation(
+    paths: DoctorPaths,
+    unit: str,
+    *,
+    commit: str,
+    tree: str,
+    allow_predecessor: bool = False,
+) -> dict[str, Any] | None:
+    root = _ensure_restart_obligation_root(paths)
+    path = _restart_obligation_path(paths, unit)
+    directory = os.open(
+        root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    )
+    descriptor = -1
+    try:
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=directory,
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise DoctorError(f"restart obligation is unreadable: {unit}") from exc
+        observed = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or observed.st_nlink != 1
+            or observed.st_uid != paths.systemd_unit_uid
+            or observed.st_gid != paths.systemd_unit_gid
+            or stat.S_IMODE(observed.st_mode) != _RESTART_OBLIGATION_MODE
+        ):
+            raise DoctorError(f"restart obligation metadata is unsafe: {unit}")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+        final = os.fstat(descriptor)
+        if (
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_size,
+            observed.st_mtime_ns,
+            observed.st_ctime_ns,
+        ) != (
+            final.st_dev,
+            final.st_ino,
+            final.st_size,
+            final.st_mtime_ns,
+            final.st_ctime_ns,
+        ):
+            raise DoctorError(f"restart obligation changed while reading: {unit}")
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DoctorError(f"restart obligation JSON is invalid: {unit}") from exc
+        if raw != _json_bytes(value):
+            raise DoctorError(f"restart obligation encoding is noncanonical: {unit}")
+        return _validated_restart_obligation(
+            unit,
+            value,
+            commit=None if allow_predecessor else commit,
+            tree=None if allow_predecessor else tree,
+        )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory)
+
+
+def _write_restart_obligation(
+    paths: DoctorPaths,
+    unit: str,
+    *,
+    commit: str,
+    tree: str,
+    reasons: Sequence[str],
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    existing = _read_restart_obligation(
+        paths,
+        unit,
+        commit=commit,
+        tree=tree,
+        allow_predecessor=True,
+    )
+    combined_reasons = set(reasons)
+    predecessor_hash = None
+    prechange_service = _restart_obligation_identity(state)
+    if existing is not None:
+        combined_reasons.update(existing["reasons"])
+        if existing["commit"] == commit and existing["tree"] == tree:
+            prechange_service = dict(existing["prechange_service"])
+            predecessor_hash = existing["predecessor_obligation_hash"]
+            if sorted(combined_reasons) == existing["reasons"]:
+                return existing
+        else:
+            combined_reasons.add("carried-forward-restart-debt")
+            predecessor_hash = existing["obligation_hash"]
+    unsigned = {
+        "schema": _RESTART_OBLIGATION_SCHEMA,
+        "commit": commit,
+        "tree": tree,
+        "unit": unit,
+        "reasons": sorted(combined_reasons),
+        "prechange_service": prechange_service,
+        "predecessor_obligation_hash": predecessor_hash,
+    }
+    value = {**unsigned, "obligation_hash": _hash(unsigned)}
+    path = _restart_obligation_path(paths, unit)
+    _atomic_bytes(
+        path,
+        _json_bytes(value),
+        mode=_RESTART_OBLIGATION_MODE,
+        uid=paths.systemd_unit_uid,
+        gid=paths.systemd_unit_gid,
+    )
+    observed = _read_restart_obligation(
+        paths, unit, commit=commit, tree=tree
+    )
+    if observed != value:
+        raise DoctorError(f"restart obligation publication failed: {unit}")
+    return value
+
+
+def _restart_obligation_transition(
+    unit: str,
+    obligation: Mapping[str, Any],
+    action_state: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    marker_before = dict(obligation["prechange_service"])
+    action_before = _restart_obligation_identity(action_state)
+    after = _restart_obligation_identity(state)
+    action_before_exact = _restart_obligation_service_identity_exact(
+        unit, action_before
+    )
+    after_exact = _restart_obligation_service_identity_exact(unit, after)
+    action_active_state = action_before["ActiveState"]
+    before_active = action_active_state == "active"
+    stable_action_state = action_active_state in {"active", "inactive", "failed"}
+    invocation_changed = (
+        not before_active
+        or (
+            after["InvocationID"] != action_before["InvocationID"]
+            and (
+                not unit.endswith(".service")
+                or (
+                    after["MainPID"] != action_before["MainPID"]
+                    and after["ExecMainStartTimestampMonotonic"]
+                    != action_before["ExecMainStartTimestampMonotonic"]
+                )
+            )
+        )
+    )
+    exact = (
+        stable_action_state
+        and action_before_exact
+        and after["ActiveState"] == "active"
+        and after_exact
+        and invocation_changed
+    )
+    return {
+        "exact": exact,
+        "marker_before": marker_before,
+        "action_before": action_before,
+        "after": after,
+        "invocation_changed": invocation_changed,
+    }
+
+
+def _restart_obligation_operation(unit: str, state: Mapping[str, Any]) -> str:
+    active_state = str(state.get("ActiveState", ""))
+    if active_state == "active":
+        return "restart"
+    if active_state in {"inactive", "failed"}:
+        return "start"
+    raise DoctorError(
+        f"refusing restart-obligation action for {unit}: "
+        f"service state is {active_state or 'unreadable'}"
+    )
+
+
+def _clear_restart_obligation(
+    paths: DoctorPaths,
+    unit: str,
+    *,
+    commit: str,
+    tree: str,
+) -> None:
+    expected = _read_restart_obligation(
+        paths, unit, commit=commit, tree=tree
+    )
+    if expected is None:
+        return
+    root = _ensure_restart_obligation_root(paths)
+    path = _restart_obligation_path(paths, unit)
+    directory = os.open(
+        root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    )
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory,
+        )
+        observed = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        current = json.loads(b"".join(chunks))
+        if current != expected:
+            raise DoctorError(f"restart obligation changed before clear: {unit}")
+        final = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        if (observed.st_dev, observed.st_ino) != (final.st_dev, final.st_ino):
+            raise DoctorError(f"restart obligation was replaced before clear: {unit}")
+        os.unlink(path.name, dir_fd=directory)
+        os.fsync(directory)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DoctorError(f"restart obligation clear failed: {unit}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory)
+
+
 def repair_workers(
     paths: DoctorPaths, *, desired_commit: str | None = None
 ) -> dict[str, Any]:
@@ -7401,6 +7987,7 @@ def repair_workers(
     if _COMMIT.fullmatch(tree) is None:
         raise DoctorError("verified coding release has no exact Git tree identity")
     before = check_units(paths, desired_commit=desired)
+    candidate_units: dict[str, bytes] = {}
     installed: list[str] = []
     for unit in _CODING_UNITS:
         destination = paths.systemd_install_root / unit
@@ -7415,8 +8002,41 @@ def repair_workers(
             raise DoctorError(f"exact candidate lacks coding unit: {unit}") from exc
         if source_mode != 0o644:
             raise DoctorError(f"exact candidate coding unit mode differs: {unit}")
+        candidate_units[unit] = source_bytes
         if destination.is_symlink() or (destination.exists() and not destination.is_file()):
             raise DoctorError(f"refusing unsafe coding unit destination: {destination}")
+        if not _unit_destination_bytes_exact(paths, destination, source_bytes):
+            installed.append(unit)
+    obligations: dict[str, dict[str, Any]] = {}
+    for unit in _CODING_UNITS:
+        existing = _read_restart_obligation(
+            paths,
+            unit,
+            commit=desired,
+            tree=tree,
+            allow_predecessor=True,
+        )
+        if existing is not None:
+            obligations[unit] = _write_restart_obligation(
+                paths,
+                unit,
+                commit=desired,
+                tree=tree,
+                reasons=existing["reasons"],
+                state=_unit_state(unit),
+            )
+    for unit in installed:
+        obligations[unit] = _write_restart_obligation(
+            paths,
+            unit,
+            commit=desired,
+            tree=tree,
+            reasons=["unit-definition-change"],
+            state=_unit_state(unit),
+        )
+    for unit in installed:
+        destination = paths.systemd_install_root / unit
+        source_bytes = candidate_units[unit]
         if not _unit_destination_bytes_exact(paths, destination, source_bytes):
             _atomic_bytes(
                 destination,
@@ -7425,12 +8045,12 @@ def repair_workers(
                 uid=paths.systemd_unit_uid,
                 gid=paths.systemd_unit_gid,
             )
-            installed.append(unit)
-    if installed:
+    if installed or obligations:
         result = _run(["systemctl", "daemon-reload"], timeout=30)
         if result.returncode:
             raise DoctorError(result.stderr.strip() or "systemd daemon reload failed")
     actions: list[str] = []
+    action_states: dict[str, dict[str, Any]] = {}
     for unit in _ACTIVE_CODING_UNITS:
         state = _unit_state(unit)
         definition = _unit_definition(
@@ -7438,25 +8058,79 @@ def repair_workers(
         )
         if not definition["exact"]:
             raise DoctorError(f"installed coding unit is not exact: {unit}")
-        operation = "restart" if unit in installed else "start"
-        if operation == "start" and state.get("ActiveState") == "active":
+        active = state.get("ActiveState") == "active"
+        if unit in obligations:
+            operation = "restart" if active else "start"
+        elif unit.endswith(".service") and active:
+            process_runtime = _service_process_runtime_identity(state, release)
+            status = process_runtime["status"]
+            if status == "EXACT":
+                continue
+            if status == "STALE" and process_runtime["restart_safe"] is True:
+                operation = "restart"
+            else:
+                raise DoctorError(
+                    f"refusing to restart {unit}: process runtime is {status.lower()}"
+                )
+        elif active:
             continue
+        else:
+            operation = "start"
         result = _run(["systemctl", "enable", unit], timeout=30)
         if result.returncode:
             raise DoctorError(result.stderr.strip() or f"failed to enable {unit}")
+        if unit in obligations:
+            action_state = _unit_state(unit)
+            action_states[unit] = dict(action_state)
+            operation = _restart_obligation_operation(
+                unit, action_state
+            )
         result = _run(["systemctl", operation, unit], timeout=30)
         if result.returncode:
             raise DoctorError(result.stderr.strip() or f"failed to {operation} {unit}")
         actions.append(f"{operation}:{unit}")
-    after = check_units(paths, desired_commit=desired)
+    after = check_units(
+        paths,
+        desired_commit=desired,
+        observe_restart_obligations=False,
+    )
     if after["state"] != "PASS":
         raise DoctorError("local coding units remain unhealthy after repair")
+    transitions: dict[str, dict[str, Any]] = {}
+    for unit, obligation in sorted(obligations.items()):
+        state = _unit_state(unit)
+        if unit in _ACTIVE_CODING_UNITS:
+            transition = _restart_obligation_transition(
+                unit,
+                obligation,
+                action_states[unit],
+                state,
+            )
+            transitions[unit] = transition
+            if not transition["exact"]:
+                raise DoctorError(
+                    f"{unit} did not load a new invocation after restart"
+                )
+        elif state.get("ActiveState") not in {"inactive", "failed"}:
+            raise DoctorError(
+                f"transient coding unit remains active after reload: {unit}"
+            )
+    for unit in sorted(obligations):
+        _clear_restart_obligation(
+            paths, unit, commit=desired, tree=tree
+        )
+    if obligations:
+        after = check_units(paths, desired_commit=desired)
+        if after["state"] != "PASS":
+            raise DoctorError("local coding restart obligations did not clear")
     receipt = _receipt(paths, "workers", before, after)
     return {
         "ok": True,
         "operation": "workers",
         "changed": bool(installed or actions),
         "installed": installed,
+        "restart_obligations": sorted(obligations),
+        "restart_transitions": transitions,
         "service_actions": actions,
         "receipt": receipt,
     }
@@ -7588,16 +8262,49 @@ def repair_plan_render_worker(
     destination = paths.systemd_install_root / _PLAN_RENDER_UNIT
     if destination.is_symlink() or (destination.exists() and not destination.is_file()):
         raise DoctorError("refusing unsafe plan_render unit destination")
-    changed = False
-    if not paths.plan_render_config.is_file() or paths.plan_render_config.read_bytes() != config_bytes:
+    storage_before = _plan_render_storage_identity(paths)
+    config_changed = (
+        not paths.plan_render_config.is_file()
+        or paths.plan_render_config.read_bytes() != config_bytes
+    )
+    unit_changed = not _unit_destination_bytes_exact(
+        paths, destination, unit_bytes
+    )
+    storage_changed = not storage_before["exact"]
+    existing_obligation = _read_restart_obligation(
+        paths,
+        _PLAN_RENDER_UNIT,
+        commit=desired,
+        tree=tree,
+        allow_predecessor=True,
+    )
+    obligation_preexisting = existing_obligation is not None
+    obligation = existing_obligation
+    if obligation is not None or config_changed or unit_changed or storage_changed:
+        reasons = [] if obligation is None else list(obligation["reasons"])
+        if config_changed:
+            reasons.append("config-change")
+        if unit_changed:
+            reasons.append("unit-definition-change")
+        if storage_changed:
+            reasons.append("storage-change")
+        obligation = _write_restart_obligation(
+            paths,
+            _PLAN_RENDER_UNIT,
+            commit=desired,
+            tree=tree,
+            reasons=reasons,
+            state=_unit_state(_PLAN_RENDER_UNIT),
+        )
+    if config_changed:
         _atomic_bytes(paths.plan_render_config, config_bytes, mode=0o444, uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
-        changed = True
-    if not _unit_destination_bytes_exact(paths, destination, unit_bytes):
+    if unit_changed:
         _atomic_bytes(destination, unit_bytes, mode=paths.systemd_unit_mode, uid=paths.systemd_unit_uid, gid=paths.systemd_unit_gid)
+    if unit_changed or obligation is not None:
         result = _run(["systemctl", "daemon-reload"], timeout=30)
         if result.returncode:
             raise DoctorError(result.stderr.strip() or "systemd daemon reload failed")
-        changed = True
+    changed = config_changed or unit_changed
     state = _unit_state(_PLAN_RENDER_UNIT)
     definition = (
         _unit_definition(
@@ -7608,7 +8315,6 @@ def repair_plan_render_worker(
     )
     if not definition["exact"]:
         raise DoctorError("installed plan_render unit is not exact")
-    storage_before = _plan_render_storage_identity(paths)
     process_runtime = _plan_render_process_runtime_identity(state, release)
     storage_started_receipt = _receipt(
         paths,
@@ -7633,24 +8339,94 @@ def repair_plan_render_worker(
         )
         raise DoctorError(f"plan_render storage repair failed: {exc}; started receipt: {storage_started_receipt}; failure receipt: {storage_failure_receipt}") from exc
     action = None
-    if changed or state.get("ActiveState") != "active" or not process_runtime["exact"]:
-        for command in (["systemctl", "enable", _PLAN_RENDER_UNIT], ["systemctl", "restart" if state.get("ActiveState") == "active" else "start", _PLAN_RENDER_UNIT]):
-            result = _run(command, timeout=30)
-            if result.returncode:
-                raise DoctorError(result.stderr.strip() or "plan_render service repair failed")
-        action = command[1]
-    after = (
-        check_plan_render_worker(paths, desired_commit=desired)
-        if explicit_commit
-        else check_plan_render_worker(paths)
+    action_reason = None
+    active = state.get("ActiveState") == "active"
+    runtime_status = str(process_runtime.get("status", "UNREADABLE"))
+    if obligation is not None:
+        action = "restart" if active else "start"
+        action_reason = (
+            "durable-restart-obligation"
+            if obligation_preexisting
+            else "materialization-changed"
+        )
+    elif not active:
+        action = "start"
+        action_reason = "inactive"
+    elif runtime_status == "EXACT" and process_runtime.get("exact") is True:
+        pass
+    elif (
+        runtime_status == "STALE"
+        and process_runtime.get("exact") is False
+        and process_runtime.get("restart_safe") is True
+    ):
+        action = "restart"
+        action_reason = "stale-runtime"
+    else:
+        raise DoctorError(
+            "refusing to restart plan_render service: process runtime is "
+            f"{runtime_status.lower()}"
+        )
+    if action is not None:
+        result = _run(["systemctl", "enable", _PLAN_RENDER_UNIT], timeout=30)
+        if result.returncode:
+            raise DoctorError(
+                result.stderr.strip() or "plan_render service repair failed"
+            )
+        action_state = state
+        if obligation is not None:
+            action_state = _unit_state(_PLAN_RENDER_UNIT)
+            action = _restart_obligation_operation(
+                _PLAN_RENDER_UNIT, action_state
+            )
+        result = _run(["systemctl", action, _PLAN_RENDER_UNIT], timeout=30)
+        if result.returncode:
+            raise DoctorError(
+                result.stderr.strip() or "plan_render service repair failed"
+            )
+    after = check_plan_render_worker(
+        paths,
+        desired_commit=desired if explicit_commit else None,
+        observe_restart_obligations=False,
     )
     if after["state"] != "PASS":
         raise DoctorError("plan_render unit remains unhealthy after repair")
+    transition = None
+    if obligation is not None:
+        transition = _restart_obligation_transition(
+            _PLAN_RENDER_UNIT,
+            obligation,
+            action_state,
+            _unit_state(_PLAN_RENDER_UNIT),
+        )
+        if not transition["exact"]:
+            raise DoctorError(
+                "plan_render service did not load a new invocation after restart"
+            )
+        _clear_restart_obligation(
+            paths,
+            _PLAN_RENDER_UNIT,
+            commit=desired,
+            tree=tree,
+        )
+    if obligation is not None:
+        after = (
+            check_plan_render_worker(paths, desired_commit=desired)
+            if explicit_commit
+            else check_plan_render_worker(paths)
+        )
+        if after["state"] != "PASS":
+            raise DoctorError("plan_render restart obligation did not clear")
     return {
         "ok": True,
         "operation": "plan-render-worker",
         "changed": changed or action is not None,
         "service_action": action,
+        "service_action_reason": action_reason,
+        "process_runtime_status": runtime_status,
+        "restart_obligation": (
+            None if obligation is None else obligation["obligation_hash"]
+        ),
+        "restart_transition": transition,
         "storage_started_receipt": storage_started_receipt,
         "storage_receipt": storage_receipt,
         "receipt": _receipt(paths, "plan-render-worker", before, after),

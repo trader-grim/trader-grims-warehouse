@@ -11,11 +11,11 @@ User=db
 Group=tgw-coders
 SupplementaryGroups=tgw-coders
 UMask=0002
-WorkingDirectory=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current
 Environment=HOME=/home/db
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=GIT_OPTIONAL_LOCKS=0
-Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src
+Environment=PYTHONPATH=src
 ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.development.coding_lifecycle --config /opt/TGW/tgw-lib/config/tgw-coding-local.json --managed
 Restart=always
 RestartSec=5s

@@ -585,6 +585,105 @@ def test_load_config_normalizes_coding_commands_for_worker(tmp_path):
     assert CodingWorker("claude-review", config)._configured_command("claude-review") == ["echo", "ok"]
 
 
+def test_runtime_resident_review_runner_stays_pinned_to_worker_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    first = runtime / "releases" / ("a" * 40)
+    second = runtime / "releases" / ("b" * 40)
+    for release, value in ((first, "A"), (second, "B")):
+        runner = release / "bin/review-runner"
+        runner.parent.mkdir(parents=True)
+        runner.write_text(f"#!/bin/sh\nprintf '%s\\n' {value}\n", encoding="utf-8")
+        runner.chmod(0o755)
+    current = runtime / "current"
+    current.symlink_to(Path("releases") / first.name, target_is_directory=True)
+    configured_runner = current / "bin/review-runner"
+    worker = CodingWorker(
+        "claude-review",
+        {
+            "coding": {
+                "runtime_root": str(runtime),
+                "commands": {"claude-review": [str(configured_runner), "review"]},
+                "allowed_runners": [str(configured_runner)],
+            }
+        },
+    )
+    monkeypatch.chdir(current)
+    replacement = runtime / "next"
+    replacement.symlink_to(Path("releases") / second.name, target_is_directory=True)
+    os.replace(replacement, current)
+
+    command = worker._configured_command("claude-review")
+
+    assert command == [str(first / "bin/review-runner"), "review"]
+    completed = subprocess.run(command[:1], check=True, text=True, capture_output=True)
+    assert completed.stdout == "A\n"
+
+
+def test_runtime_review_wrapper_imports_from_its_pinned_release() -> None:
+    wrapper = (
+        Path(__file__).resolve().parents[1]
+        / "bin/tgw-local-independent-review-runner"
+    ).read_text(encoding="utf-8")
+
+    assert "review runner requires an absolute pinned path" in wrapper
+    assert 'release_dir=$(CDPATH= cd -P "$runner_dir/.." && pwd)' in wrapper
+    assert 'export PYTHONPATH="$release_dir/src"' in wrapper
+    assert "coding-runtime/current/src" not in wrapper
+
+
+def test_runtime_resident_runner_fails_closed_outside_worker_release(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    release = runtime / "releases" / ("a" * 40)
+    runner = release / "bin/review-runner"
+    runner.parent.mkdir(parents=True)
+    runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runner.chmod(0o755)
+    current = runtime / "current"
+    current.symlink_to(Path("releases") / release.name, target_is_directory=True)
+    configured_runner = current / "bin/review-runner"
+    worker = CodingWorker(
+        "claude-review",
+        {
+            "coding": {
+                "runtime_root": str(runtime),
+                "commands": {"claude-review": [str(configured_runner)]},
+                "allowed_runners": [str(configured_runner)],
+            }
+        },
+    )
+
+    with pytest.raises(HardFailure, match="not bound to the worker release"):
+        worker._configured_command("claude-review")
+
+
+def test_fixed_venv_runner_is_not_rewritten(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    (runtime / "releases").mkdir(parents=True)
+    fixed = tmp_path / "venv/bin/fixed-runner"
+    fixed.parent.mkdir(parents=True)
+    fixed.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fixed.chmod(0o755)
+    worker = CodingWorker(
+        "controller-verify",
+        {
+            "coding": {
+                "runtime_root": str(runtime),
+                "commands": {"controller-verify": [str(fixed), "verify"]},
+                "allowed_runners": [str(fixed)],
+            }
+        },
+    )
+
+    assert worker._configured_command("controller-verify") == [
+        str(fixed),
+        "verify",
+    ]
+
+
 def test_controller_verify_runner_emits_attested_success_only_after_pytest_and_ruff(monkeypatch, capsys):
     """The local runner establishes its full authority only after both checks pass."""
     from tgw.workers import controller_verify
