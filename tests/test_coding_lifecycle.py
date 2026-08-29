@@ -551,6 +551,58 @@ def test_resume_intent_is_durable_before_dispatch_and_retries_use_new_fence(
     ] == ["new"]
 
 
+def test_fast_terminal_resume_job_consumes_intent_before_next_partial(
+    tmp_path: Path,
+) -> None:
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+    partial = advance(
+        store,
+        record["root_id"],
+        {
+            "implementation": lambda current: stage_result(
+                current,
+                "implementation",
+                "resumable_partial",
+                reason="first partial",
+            )
+        },
+    )
+    intent = {
+        "schema": "tgw-local-coding-lifecycle-resume-intent/v1",
+        "root_id": record["root_id"],
+        "binding_hash": record["binding"]["binding_hash"],
+        "todo_id": 1915,
+        "resume_of": "sha256:" + "3" * 64,
+        "resume_fingerprint": "sha256:" + "4" * 64,
+        "worktree": record["binding"]["worktree"],
+        "source_commit": record["binding"]["source_commit"],
+        "source_tree": record["binding"]["source_tree"],
+    }
+    reopened = request_resume(store, partial["root_id"], receipt=intent)
+    first_resume_fence = job_binding(reopened)
+    terminal = advance(
+        store,
+        record["root_id"],
+        {
+            "implementation": lambda current: stage_result(
+                current,
+                "implementation",
+                "resumable_partial",
+                reason="worker completed before queue read",
+                job_ids=["fast-terminal-job"],
+            )
+        },
+    )
+    assert terminal["state"] == "RESUMABLE_PARTIAL"
+    assert terminal.get("resume_intent") is None
+    assert terminal["active_implementation_generation"]["intent_hash"] == (
+        first_resume_fence["resume_intent_hash"]
+    )
+    next_resume = request_resume(store, terminal["root_id"], receipt=intent)
+    assert job_binding(next_resume) != first_resume_fence
+
+
 def test_disposable_start_partial_resume_closes_exact_successor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

@@ -985,9 +985,12 @@ def advance(
                 record["failure"] = {"stage": stage, "reason": str(exc)}
                 break
             outcome = result["outcome"]
+            if stage == "implementation":
+                # A fast worker may become terminal between dispatch and the
+                # first queue read. Bind/consume the one-shot intent whenever
+                # the exact job is visible, not only on an observed WAITING.
+                _bind_active_implementation_generation(record, result)
             if outcome == "waiting":
-                if stage == "implementation":
-                    _bind_active_implementation_generation(record, result)
                 record["state"] = "WAITING"
                 record["stages"][stage] = result
                 break
