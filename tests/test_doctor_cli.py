@@ -239,17 +239,43 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     plan_tree = _git(plan_repository, "rev-parse", "HEAD^{tree}")
     bootstrap_receipt = str(root / "doctor-receipts/bootstrap.json")
     materialization_hash = "sha256:" + "1" * 64
-    review_path = str(tmp_path / "review.md")
-    review_hash = "sha256:" + "2" * 64
-    item_commit = "3" * 40
-    item_tree = "4" * 40
+    review_file = tmp_path / "review.md"
+    review_file.write_text(f"candidate {head}\ntree {tree}\n", encoding="utf-8")
+    review_path = str(review_file)
+    review_hash = "sha256:" + hashlib.sha256(review_file.read_bytes()).hexdigest()
+    item_commit = head
+    item_tree = tree
     item_generation = "item-workflow-current"
-    item_review_path = str(tmp_path / "item-review.md")
-    item_review_hash = "sha256:" + "5" * 64
-    plan_candidate = "6" * 40
-    plan_candidate_tree = "7" * 40
-    plan_review_path = str(tmp_path / "plan-review.md")
-    plan_review_hash = "sha256:" + "8" * 64
+    item_review_file = tmp_path / "item-review.md"
+    item_review_file.write_text(
+        f"candidate {item_commit}\ntree {item_tree}\n", encoding="utf-8"
+    )
+    item_review_path = str(item_review_file)
+    item_review_hash = (
+        "sha256:" + hashlib.sha256(item_review_file.read_bytes()).hexdigest()
+    )
+    plan_candidate = plan_commit
+    plan_candidate_tree = plan_tree
+    plan_review_file = tmp_path / "plan-review.md"
+    plan_review_file.write_text(
+        f"candidate {plan_candidate}\ntree {plan_candidate_tree}\n",
+        encoding="utf-8",
+    )
+    plan_review_path = str(plan_review_file)
+    plan_review_hash = (
+        "sha256:" + hashlib.sha256(plan_review_file.read_bytes()).hexdigest()
+    )
+    plan_solution = "sha256:" + "9" * 64
+    plan_render_config = root / "config/tgw-plan-render-local.json"
+    _write_json(
+        plan_render_config,
+        {
+            "schema": "tgw-local-plan-render/v1",
+            "plan_repository_root": str(plan_repository),
+            "plan_approved_commit": plan_commit,
+            "plan_approved_solution_hash": plan_solution,
+        },
+    )
     task = {
         "schema": "tgw-current-task/v1",
         "id": "recovery",
@@ -257,7 +283,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         "plan": {
             "approved_commit": plan_commit,
             "approved_tree": plan_tree,
-            "approved_solution_hash": "sha256:" + "9" * 64,
+            "approved_solution_hash": plan_solution,
             "evidence_commit": plan_commit,
             "evidence_tree": plan_tree,
             "evidence_descends_from_approved": True,
@@ -417,6 +443,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         plan_repository=plan_repository,
         worktrees=worktrees,
         coding_config=config,
+        plan_render_config=plan_render_config,
         runtime_root=runtime_root,
         local_bin=local_bin,
         operator_cli=operator_cli,
@@ -460,6 +487,204 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     launcher.chmod(0o555)
     publisher.chmod(0o555)
     return paths, head, tree
+
+
+def test_explicit_context_transition_migrates_legacy_projection_without_relabelling(
+    tmp_path: Path,
+) -> None:
+    paths, head, tree = _fixture(tmp_path)
+    task = json.loads(paths.context_task.read_text())
+    cursor = json.loads(paths.context_cursor.read_text())
+    prior_review = json.loads(json.dumps(task["review_admission"]))
+    task["review_admission"] = {
+        "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
+        "todo_1921_review": "PREDECESSOR_DIAGNOSTIC",
+    }
+    task.pop("next_binding_policy")
+    task.pop("next_bindings")
+    task["next"] = [f"Verify exact predecessor {head} before continuing."]
+    review = tmp_path / "successor-review.md"
+    review.write_text(f"candidate {head}\ntree {tree}\n", encoding="utf-8")
+
+    binding = doctor_cli._context_transition_review_binding(
+        review,
+        commit=head,
+        tree=tree,
+    )
+    changed = doctor_cli._stage_context_transition_projections(
+        paths,
+        task,
+        source_commit=head,
+        source_tree=tree,
+        review=binding,
+    )
+    doctor_cli._validate_current_task_projections(
+        paths,
+        task,
+        cursor,
+        source_commit=head,
+        source_tree=tree,
+    )
+
+    assert changed
+    assert task["next_binding_policy"] == (
+        "STRUCTURED_ONLY_NO_INLINE_GENERATION_IDENTITIES"
+    )
+    assert task["next_bindings"]["coding_runtime_commit"] == head
+    assert task["review_admission"]["current"] == {
+        "todo": 1921,
+        "candidate_commit": head,
+        "candidate_tree": tree,
+        "review_path": str(review),
+        "review_sha256": binding["sha256"],
+        "review_state": "NON_ADMITTING_DIAGNOSTIC_RECORDED",
+        "authority": False,
+        "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
+    }
+    assert prior_review != task["review_admission"]
+    migration = task["explicit_projection_migration_history"][-1]
+    assert migration["authority"] is False
+    claimed = migration.pop("migration_hash")
+    assert claimed == doctor_cli._hash(migration)
+
+
+def test_context_transition_review_binding_rejects_wrong_candidate(
+    tmp_path: Path,
+) -> None:
+    report = tmp_path / "review.md"
+    report.write_text(f"candidate {'a' * 40}\ntree {'b' * 40}\n")
+
+    with pytest.raises(
+        doctor_cli.DoctorError,
+        match="does not name the exact commit/tree",
+    ):
+        doctor_cli._context_transition_review_binding(
+            report,
+            commit="c" * 40,
+            tree="d" * 40,
+        )
+
+
+def test_failed_receipt_publication_removes_visible_success_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = doctor_cli.DoctorPaths(receipts=tmp_path / "receipts")
+
+    def publish_then_fail(path: Path, value, *, mode: int = 0o444) -> None:
+        del mode
+        path.write_bytes(doctor_cli._json_bytes(value))
+        raise OSError("injected receipt directory fsync failure")
+
+    monkeypatch.setattr(doctor_cli, "_atomic_json", publish_then_fail)
+
+    with pytest.raises(OSError, match="receipt directory fsync failure"):
+        doctor_cli._receipt(paths, "context", {"old": True}, {"new": True})
+
+    assert not list(paths.receipts.glob("*-context.json"))
+
+
+@pytest.mark.parametrize(
+    "projection",
+    ["development_tree", "item_commit", "item_tree", "item_generation"],
+)
+def test_current_projection_rejects_missing_required_identity(
+    tmp_path: Path,
+    projection: str,
+) -> None:
+    paths, head, tree = _fixture(tmp_path)
+    task = json.loads(paths.context_task.read_text())
+    cursor = json.loads(paths.context_cursor.read_text())
+    if projection == "development_tree":
+        task["implementation"]["development_source"].pop("tree")
+    else:
+        key = projection.removeprefix("item_")
+        task["tracks"]["item_workflow"].pop(key)
+        live_key = f"item_workflow_{key}"
+        task["live_verification"].pop(live_key, None)
+        task["next_bindings"].pop(live_key, None)
+        if key in {"commit", "tree"}:
+            task["review_admission"]["item"][f"candidate_{key}"] = None
+
+    with pytest.raises(doctor_cli.DoctorError):
+        doctor_cli._validate_current_task_projections(
+            paths,
+            task,
+            cursor,
+            source_commit=head,
+            source_tree=tree,
+        )
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    ["coding_review_file", "coding_candidate_tree", "approved_solution"],
+)
+def test_current_projection_binds_real_review_git_and_plan_evidence(
+    tmp_path: Path,
+    evidence: str,
+) -> None:
+    paths, head, tree = _fixture(tmp_path)
+    task = json.loads(paths.context_task.read_text())
+    cursor = json.loads(paths.context_cursor.read_text())
+    if evidence == "coding_review_file":
+        Path(task["implementation"]["development_source"]["review"]).write_text(
+            "changed diagnostic bytes\n",
+            encoding="utf-8",
+        )
+    elif evidence == "coding_candidate_tree":
+        task["implementation"]["development_source"]["reviewed_candidate_tree"] = (
+            "f" * 40
+        )
+        task["tracks"]["coding_lifecycle"]["candidate_tree"] = "f" * 40
+        task["review_admission"]["current"]["candidate_tree"] = "f" * 40
+    else:
+        task["plan"]["approved_solution_hash"] = "sha256:" + "0" * 64
+
+    with pytest.raises(doctor_cli.DoctorError):
+        doctor_cli._validate_current_task_projections(
+            paths,
+            task,
+            cursor,
+            source_commit=head,
+            source_tree=tree,
+        )
+
+
+def test_surface_snapshot_reads_pinned_inode_across_pathname_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    surface = tmp_path / "surface.json"
+    replacement = tmp_path / "replacement.json"
+    displaced = tmp_path / "displaced.json"
+    surface.write_bytes(b"original bytes\n")
+    replacement.write_bytes(b"forged bytes!!\n")
+    real_open = doctor_cli.os.open
+    exchanged = False
+
+    def open_with_exchange(path, flags, *args, **kwargs):
+        nonlocal exchanged
+        if isinstance(path, str) and path.startswith("/proc/self/fd/"):
+            surface.rename(displaced)
+            replacement.rename(surface)
+            try:
+                descriptor = real_open(path, flags, *args, **kwargs)
+            finally:
+                surface.rename(replacement)
+                displaced.rename(surface)
+            exchanged = True
+            return descriptor
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli.os, "open", open_with_exchange)
+
+    captured = doctor_cli._surface_snapshot(surface)
+
+    assert exchanged is True
+    assert captured["raw"] == b"original bytes\n"
+    assert surface.read_bytes() == b"original bytes\n"
+    assert replacement.read_bytes() == b"forged bytes!!\n"
 
 
 def test_coding_bootstrap_is_explicit_and_context_independent(
@@ -1932,6 +2157,19 @@ def _full_current_task_projection(commit: str, tree: str) -> tuple[dict, dict]:
     return task, cursor
 
 
+def _stub_current_projection_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "_require_git_commit_tree",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_require_review_file",
+        lambda *_args, **_kwargs: None,
+    )
+
+
 def test_current_task_projection_validation_rejects_stale_nested_mirror(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1942,6 +2180,7 @@ def test_current_task_projection_validation_rejects_stale_nested_mirror(
         "_plan_evidence_identity",
         lambda _paths, _task: ("e" * 40, "f" * 40),
     )
+    _stub_current_projection_evidence(monkeypatch)
     doctor_cli._validate_current_task_projections(
         doctor_cli.DoctorPaths(),
         task,
@@ -2038,6 +2277,7 @@ def test_current_task_validation_requires_all_current_mirrors(
         "_plan_evidence_identity",
         lambda _paths, _task: ("e" * 40, "f" * 40),
     )
+    _stub_current_projection_evidence(monkeypatch)
 
     with pytest.raises(doctor_cli.DoctorError, match="missing|malformed"):
         doctor_cli._validate_current_task_projections(
@@ -2059,6 +2299,7 @@ def test_current_task_validation_rejects_stale_review_and_item_mirrors(
         "_plan_evidence_identity",
         lambda _paths, _task: ("e" * 40, "f" * 40),
     )
+    _stub_current_projection_evidence(monkeypatch)
     task["review_admission"]["current"]["candidate_commit"] = "9" * 40
     with pytest.raises(doctor_cli.DoctorError, match="review/admission"):
         doctor_cli._validate_current_task_projections(
@@ -2092,6 +2333,7 @@ def test_current_task_validation_rejects_inline_generation_in_next(
         "_plan_evidence_identity",
         lambda _paths, _task: ("e" * 40, "f" * 40),
     )
+    _stub_current_projection_evidence(monkeypatch)
 
     with pytest.raises(doctor_cli.DoctorError, match="inline generation identities"):
         doctor_cli._validate_current_task_projections(

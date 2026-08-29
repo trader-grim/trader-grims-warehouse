@@ -293,6 +293,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
         help="run one exact Doctor repair instead of the coding bootstrap",
     )
+    parser.add_argument(
+        "--review-evidence",
+        type=Path,
+        help=(
+            "bind an explicit non-authoritative diagnostic review while "
+            "atomically migrating a Context source transition"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         _require_installed_root_copy()
@@ -302,6 +310,10 @@ def main(argv: list[str] | None = None) -> int:
             raise BootstrapError("canonical source is not clean")
         if _git("rev-parse", "HEAD").decode().strip() != args.commit:
             raise BootstrapError("canonical source does not select the requested commit")
+        if args.review_evidence is not None and args.repair != "context":
+            raise BootstrapError(
+                "--review-evidence is valid only with --repair context"
+            )
         staging = Path(
             tempfile.mkdtemp(
                 prefix="tgw-coding-bootstrap-", dir=str(_STAGING_PARENT)
@@ -320,6 +332,10 @@ def main(argv: list[str] | None = None) -> int:
                     "--json",
                 ]
             )
+            if args.review_evidence is not None:
+                doctor_arguments.extend(
+                    ["--review-evidence", str(args.review_evidence)]
+                )
             completed = subprocess.run(
                 [str(_PYTHON), "-S", "-P", "-m", "tgw.doctor_cli", *doctor_arguments],
                 cwd=staging,

@@ -271,64 +271,140 @@ def _file_hash(path: Path) -> str:
 
 
 def _surface_snapshot(path: Path) -> dict[str, Any]:
-    """Capture one path without following it and reject a raced read."""
+    """Capture bytes from one pinned inode and reject pathname ABA."""
+    parent_descriptor = -1
+    target_descriptor = -1
+    data_descriptor = -1
     try:
-        before = path.stat(follow_symlinks=False)
-    except FileNotFoundError:
-        if path.is_symlink():
-            raise DoctorError(f"surface disappeared during inspection: {path}")
-        return {"kind": "missing"}
-    common = {
-        "uid": before.st_uid,
-        "gid": before.st_gid,
-        "mode": stat.S_IMODE(before.st_mode),
-        "device": before.st_dev,
-        "inode": before.st_ino,
-        "size": before.st_size,
-        "nlink": before.st_nlink,
-        "mtime_ns": before.st_mtime_ns,
-        "ctime_ns": before.st_ctime_ns,
-    }
-    if stat.S_ISLNK(before.st_mode):
-        target = os.readlink(path)
-        after = path.stat(follow_symlinks=False)
-        result = {"kind": "symlink", "target": target, **common}
-    elif stat.S_ISREG(before.st_mode):
-        raw = path.read_bytes()
-        after = path.stat(follow_symlinks=False)
-        result = {
-            "kind": "file",
-            "raw": raw,
-            "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
-            **common,
+        if not path.name:
+            raise DoctorError(f"surface path has no final component: {path}")
+        parent_descriptor = os.open(
+            path.parent,
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | os.O_CLOEXEC,
+        )
+        parent_before = os.fstat(parent_descriptor)
+        try:
+            target_descriptor = os.open(
+                path.name,
+                os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError:
+            try:
+                os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                parent_after = os.fstat(parent_descriptor)
+                visible_parent = path.parent.stat(follow_symlinks=False)
+                if (
+                    parent_before.st_dev,
+                    parent_before.st_ino,
+                ) != (
+                    parent_after.st_dev,
+                    parent_after.st_ino,
+                ) or (
+                    parent_after.st_dev,
+                    parent_after.st_ino,
+                ) != (
+                    visible_parent.st_dev,
+                    visible_parent.st_ino,
+                ):
+                    raise DoctorError(
+                        f"surface parent changed during inspection: {path.parent}"
+                    )
+                return {"kind": "missing"}
+            raise DoctorError(f"surface appeared during inspection: {path}")
+
+        before = os.fstat(target_descriptor)
+        common = {
+            "uid": before.st_uid,
+            "gid": before.st_gid,
+            "mode": stat.S_IMODE(before.st_mode),
+            "device": before.st_dev,
+            "inode": before.st_ino,
+            "size": before.st_size,
+            "nlink": before.st_nlink,
+            "mtime_ns": before.st_mtime_ns,
+            "ctime_ns": before.st_ctime_ns,
         }
-    else:
-        raise DoctorError(f"surface has an unsupported type: {path}")
-    after_identity = (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        after.st_nlink,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
-        stat.S_IMODE(after.st_mode),
-        after.st_uid,
-        after.st_gid,
-    )
-    before_identity = (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-        before.st_nlink,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
-        stat.S_IMODE(before.st_mode),
-        before.st_uid,
-        before.st_gid,
-    )
-    if after_identity != before_identity:
-        raise DoctorError(f"surface changed during inspection: {path}")
-    return result
+        if stat.S_ISLNK(before.st_mode):
+            target = os.readlink("", dir_fd=target_descriptor)
+            result = {"kind": "symlink", "target": target, **common}
+        elif stat.S_ISREG(before.st_mode):
+            data_descriptor = os.open(
+                f"/proc/self/fd/{target_descriptor}",
+                os.O_RDONLY | os.O_CLOEXEC,
+            )
+            opened = os.fstat(data_descriptor)
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                raise DoctorError(f"surface descriptor identity differs: {path}")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(data_descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+            result = {
+                "kind": "file",
+                "raw": raw,
+                "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                **common,
+            }
+        else:
+            raise DoctorError(f"surface has an unsupported type: {path}")
+
+        after = os.fstat(target_descriptor)
+        visible = os.stat(
+            path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        fields = (
+            "st_dev",
+            "st_ino",
+            "st_size",
+            "st_nlink",
+            "st_mtime_ns",
+            "st_ctime_ns",
+            "st_mode",
+            "st_uid",
+            "st_gid",
+        )
+        if any(
+            getattr(before, field) != getattr(after, field)
+            or getattr(after, field) != getattr(visible, field)
+            for field in fields
+        ):
+            raise DoctorError(f"surface changed during inspection: {path}")
+        parent_after = os.fstat(parent_descriptor)
+        visible_parent = path.parent.stat(follow_symlinks=False)
+        if (
+            parent_before.st_dev,
+            parent_before.st_ino,
+        ) != (
+            parent_after.st_dev,
+            parent_after.st_ino,
+        ) or (
+            parent_after.st_dev,
+            parent_after.st_ino,
+        ) != (
+            visible_parent.st_dev,
+            visible_parent.st_ino,
+        ):
+            raise DoctorError(
+                f"surface parent changed during inspection: {path.parent}"
+            )
+        return result
+    finally:
+        if data_descriptor >= 0:
+            os.close(data_descriptor)
+        if target_descriptor >= 0:
+            os.close(target_descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
 
 
 def _surface_record(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -582,6 +658,23 @@ def _plan_repository_evidence_identity(
         or plan.get("evidence_descends_from_approved") is not True
     ):
         raise DoctorError("current task approved Plan binding is malformed")
+    render_config_surface = _surface_snapshot(paths.plan_render_config)
+    if render_config_surface.get("kind") != "file":
+        raise DoctorError("installed Plan renderer binding is unavailable")
+    render_config = _json_from_surface(
+        paths.plan_render_config,
+        render_config_surface,
+    )
+    if (
+        render_config.get("schema") != "tgw-local-plan-render/v1"
+        or render_config.get("plan_repository_root")
+        != str(paths.plan_repository)
+        or render_config.get("plan_approved_commit") != approved
+        or render_config.get("plan_approved_solution_hash") != solution
+    ):
+        raise DoctorError(
+            "current task approved Plan/solution differs from the installed renderer"
+        )
     repository = paths.plan_repository.resolve(strict=True)
     if _git(repository, "status", "--porcelain"):
         raise DoctorError("current Plan evidence repository is dirty")
@@ -659,10 +752,349 @@ def _required_projection(
     return value
 
 
+def _require_git_commit_tree(
+    repository: Path,
+    *,
+    commit: Any,
+    tree: Any,
+    label: str,
+) -> None:
+    if (
+        not isinstance(commit, str)
+        or _COMMIT.fullmatch(commit) is None
+        or not isinstance(tree, str)
+        or _COMMIT.fullmatch(tree) is None
+    ):
+        raise DoctorError(f"current task {label} Git identity is malformed")
+    try:
+        observed_tree = _git(repository, "rev-parse", f"{commit}^{{tree}}")
+    except DoctorError as exc:
+        raise DoctorError(
+            f"current task {label} commit is unavailable in its repository"
+        ) from exc
+    if observed_tree != tree:
+        raise DoctorError(f"current task {label} commit/tree binding is stale")
+
+
+def _require_review_file(
+    path_value: Any,
+    hash_value: Any,
+    *,
+    label: str,
+) -> None:
+    if (
+        not isinstance(path_value, str)
+        or not path_value
+        or not Path(path_value).is_absolute()
+        or not isinstance(hash_value, str)
+        or _SHA256.fullmatch(hash_value) is None
+    ):
+        raise DoctorError(f"current task {label} review evidence is malformed")
+    surface = _surface_snapshot(Path(path_value))
+    if (
+        surface.get("kind") != "file"
+        or surface.get("nlink") != 1
+        or surface.get("sha256") != hash_value
+    ):
+        raise DoctorError(f"current task {label} review evidence is unavailable or stale")
+
+
+def _context_transition_review_binding(
+    path: Path,
+    *,
+    commit: str,
+    tree: str,
+) -> dict[str, Any]:
+    """Bind diagnostic review bytes for an explicit Context transition.
+
+    Review remains evidence, never authority.  The explicit path avoids
+    guessing a harness-specific report location while the exact commit/tree
+    text check prevents an operator typo from attaching an unrelated report.
+    """
+
+    if not path.is_absolute():
+        raise DoctorError("Context transition review evidence path must be absolute")
+    surface = _surface_snapshot(path)
+    if surface.get("kind") != "file" or surface.get("nlink") != 1:
+        raise DoctorError(
+            "Context transition review evidence must be a single-link regular file"
+        )
+    raw = surface["raw"]
+    if len(raw) > 2 * 1024 * 1024:
+        raise DoctorError("Context transition review evidence exceeds 2 MiB")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DoctorError("Context transition review evidence is not UTF-8") from exc
+    if commit not in text or tree not in text:
+        raise DoctorError(
+            "Context transition review evidence does not name the exact commit/tree"
+        )
+    return {
+        "path": str(path),
+        "sha256": surface["sha256"],
+        "surface": surface,
+    }
+
+
+def _stage_context_transition_projections(
+    paths: DoctorPaths,
+    task: dict[str, Any],
+    *,
+    source_commit: str,
+    source_tree: str,
+    review: Mapping[str, Any],
+) -> list[str]:
+    """Stage one explicit source transition without relabelling old evidence.
+
+    Locally provable runtime and Plan mirrors are still reconciled by the
+    normal Doctor path.  This migration supplies only the otherwise
+    non-derivable diagnostic-review binding and honest pending live states,
+    while converting legacy free-form mirrors to the structured schema in the
+    same task/cursor/snapshot transaction.
+    """
+
+    implementation = task.get("implementation")
+    tracks = task.get("tracks")
+    plan = task.get("plan")
+    if not isinstance(implementation, dict):
+        raise DoctorError("current task implementation projection is malformed")
+    if not isinstance(tracks, dict):
+        raise DoctorError("current task tracks projection is malformed")
+    if not isinstance(plan, dict):
+        raise DoctorError("current task Plan projection is malformed")
+    development = implementation.get("development_source")
+    coding = tracks.get("coding_lifecycle")
+    item = tracks.get("item_workflow")
+    todo_1916 = plan.get("todo_1916")
+    if not isinstance(development, dict) or not isinstance(coding, dict):
+        raise DoctorError("current task coding projections are malformed")
+    if not isinstance(item, dict) or not isinstance(todo_1916, dict):
+        raise DoctorError("current task item/Plan projections are malformed")
+
+    required_item = (
+        "todo",
+        "commit",
+        "tree",
+        "generation",
+        "review_path",
+        "review_sha256",
+        "operator_acceptance",
+    )
+    if any(not item.get(key) for key in required_item):
+        raise DoctorError("current task item evidence is incomplete")
+    required_plan_review = (
+        "candidate_commit",
+        "candidate_tree",
+        "review_path",
+        "review_sha256",
+        "review_disposition",
+    )
+    if any(not todo_1916.get(key) for key in required_plan_review):
+        raise DoctorError("current task Plan review evidence is incomplete")
+    plan_commit, plan_tree = _plan_repository_evidence_identity(paths, plan)
+
+    previous = {
+        "development_source": json.loads(json.dumps(development)),
+        "live_verification": json.loads(json.dumps(task.get("live_verification"))),
+        "coding_lifecycle": json.loads(json.dumps(coding)),
+        "review_admission": json.loads(json.dumps(task.get("review_admission"))),
+        "next": json.loads(json.dumps(task.get("next"))),
+        "next_binding_policy": task.get("next_binding_policy"),
+        "next_bindings": json.loads(json.dumps(task.get("next_bindings"))),
+    }
+
+    review_path = str(review["path"])
+    review_sha256 = str(review["sha256"])
+    development.update(
+        {
+            "candidate_worktree": str(paths.repository),
+            "reviewed_candidate_commit": source_commit,
+            "reviewed_candidate_tree": source_tree,
+            "review": review_path,
+            "review_sha256": review_sha256,
+        }
+    )
+
+    live = task.get("live_verification")
+    if not isinstance(live, dict):
+        raise DoctorError("current task live verification projection is malformed")
+    live.update(
+        {
+            "canonical_commit": source_commit,
+            "canonical_tree": source_tree,
+            "runtime_commit": source_commit,
+            "runtime_tree": source_tree,
+            "item_workflow_commit": item["commit"],
+            "item_workflow_tree": item["tree"],
+            "item_workflow_generation": item["generation"],
+            "context_projection": "PENDING_ATOMIC_CONTEXT_PUBLICATION",
+            "fresh_session_result": "PENDING_FRESH_SESSION_VERIFICATION",
+            "operator_cli": "PENDING_POST_CUTOVER_VERIFICATION",
+            "plan_render": "PASS_EXACT_ACTIVE_BOOTSTRAP_VERIFIED",
+            "unit_check": "PASS_REQUIRED_UNITS_ACTIVE_BOOTSTRAP_VERIFIED",
+            "todo_1921_coding_cli": (
+                "INSTALLED_EXACT_LOCAL_RUNTIME_CONTEXT_COLD_VERIFICATION_PENDING"
+            ),
+        }
+    )
+    for stale_key in (
+        "context_launcher_receipt",
+        "context_launcher_receipt_sha256",
+        "release_file_count",
+    ):
+        live.pop(stale_key, None)
+
+    coding.update(
+        {
+            "candidate_commit": source_commit,
+            "candidate_tree": source_tree,
+            "candidate_installed": True,
+            "integrated_commit": source_commit,
+            "integrated_tree": source_tree,
+            "integration_state": "COMPLETE_CLEAN_EXACT_CANONICAL_SOURCE",
+            "materialization_state": "PASS_EXACT_BOOTSTRAP_VERIFIED",
+            "live_verification_state": (
+                "BOOTSTRAP_UNITS_PASS_CONTEXT_COLD_VERIFICATION_PENDING"
+            ),
+            "state": "LIVE_EXACT_LOCAL_RUNTIME_CONTEXT_PUBLICATION_PENDING",
+            "review_path": review_path,
+            "review_sha256": review_sha256,
+            "review_state": _CONTEXT_TRANSITION_REVIEW_STATE,
+            "review_is_authority": False,
+            "context_required": False,
+            "next": (
+                "Operator fresh-session CLI and Doctor confirmation; do not mark "
+                "Todo, PP, or Plan complete."
+            ),
+            "operator_acceptance": "PENDING_FRESH_SESSION_CLI_CONFIRMATION",
+        }
+    )
+
+    admission = "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE"
+    task["review_admission"] = {
+        "admission": admission,
+        "current": {
+            "todo": coding.get("todo"),
+            "candidate_commit": source_commit,
+            "candidate_tree": source_tree,
+            "review_path": review_path,
+            "review_sha256": review_sha256,
+            "review_state": _CONTEXT_TRANSITION_REVIEW_STATE,
+            "authority": False,
+            "admission": admission,
+        },
+        "item": {
+            "todo": item.get("todo"),
+            "candidate_commit": item.get("commit"),
+            "candidate_tree": item.get("tree"),
+            "review_path": item.get("review_path"),
+            "review_sha256": item.get("review_sha256"),
+            "authority": False,
+            "admission": admission,
+        },
+        "plan_reconciliation": {
+            "todo": 1916,
+            "candidate_commit": todo_1916.get("candidate_commit"),
+            "candidate_tree": todo_1916.get("candidate_tree"),
+            "review_path": todo_1916.get("review_path"),
+            "review_sha256": todo_1916.get("review_sha256"),
+            "review_state": todo_1916.get("review_disposition"),
+            "authority": False,
+            "admission": admission,
+        },
+    }
+    task["next_binding_policy"] = _NEXT_BINDING_POLICY
+    task["next"] = list(_CONTEXT_TRANSITION_NEXT)
+    task["next_bindings"] = {
+        "coding_runtime_commit": source_commit,
+        "coding_runtime_tree": source_tree,
+        "item_workflow_commit": item["commit"],
+        "item_workflow_tree": item["tree"],
+        "item_workflow_generation": item["generation"],
+        "plan_evidence_commit": plan_commit,
+        "plan_evidence_tree": plan_tree,
+    }
+    if "todo_1921" in implementation:
+        implementation["todo_1921"] = (
+            "INSTALLED_EXACT_LOCAL_RUNTIME_CONTEXT_COLD_VERIFICATION_PENDING"
+        )
+
+    successor = {
+        "development_source": development,
+        "live_verification": live,
+        "coding_lifecycle": coding,
+        "review_admission": task["review_admission"],
+        "next": task["next"],
+        "next_binding_policy": task["next_binding_policy"],
+        "next_bindings": task["next_bindings"],
+    }
+    if previous == successor:
+        return []
+    now = datetime.now().astimezone().isoformat()
+    record = {
+        "schema": "tgw-context-explicit-projection-migration/v1",
+        "recorded_at": now,
+        "source_commit": source_commit,
+        "source_tree": source_tree,
+        "review_path": review_path,
+        "review_sha256": review_sha256,
+        "previous_projection_sha256": _hash(previous),
+        "successor_projection_sha256": _hash(successor),
+        "authority": False,
+    }
+    record["migration_hash"] = _hash(record)
+    history = task.setdefault("explicit_projection_migration_history", [])
+    if not isinstance(history, list):
+        raise DoctorError("current task projection migration history is malformed")
+    history.append(record)
+    task["updated_at"] = now
+    return [
+        "implementation.development_source.review",
+        "live_verification",
+        "tracks.coding_lifecycle",
+        "review_admission",
+        "next",
+        "next_bindings",
+    ]
+
+
 _NEXT_BINDING_POLICY = "STRUCTURED_ONLY_NO_INLINE_GENERATION_IDENTITIES"
 _INLINE_NEXT_IDENTITY = re.compile(
     r"(?i)(?:\b[0-9a-f]{7,40}\b|item-workflow-[0-9a-f]{7,40}(?:-[0-9]+)?)"
 )
+_CONTEXT_TRANSITION_REVIEW_STATE = "NON_ADMITTING_DIAGNOSTIC_RECORDED"
+_CONTEXT_TRANSITION_NEXT = [
+    (
+        "Operator browser-check the live Todo 1920 item editor at the route "
+        "recorded by tracks.item_workflow.operator_url; if a defect remains, "
+        "resume Todo 1920 from next_bindings rather than creating another "
+        "recovery root."
+    ),
+    (
+        "Operator fresh-session-check the Todo 1921 coding CLI and Doctor using "
+        "next_bindings; review remains diagnostic and Context remains non-gating."
+    ),
+    (
+        "After those operator checks, execute Todo 1916 through tgw-plan to "
+        "reconcile the named Plan, PP, and specification contracts into bounded "
+        "parallel implementation leaves."
+    ),
+    (
+        "Allow urgent Todo 1917 to proceed independently before the eBay "
+        "retirement deadline."
+    ),
+    (
+        "Execute Todo 1918 independently: first the read-only inventory, "
+        "threat-model, and design leaf, then bounded implementation, independent "
+        "review, local installation, isolated restore verification, and operator "
+        "acceptance."
+    ),
+    (
+        "Keep the current-task projection updated at terminal and generational "
+        "transitions so every harness resumes the structured bindings below."
+    ),
+]
 
 
 def _validate_current_task_projections(
@@ -681,7 +1113,7 @@ def _validate_current_task_projections(
     )
     if development.get("commit") != source_commit:
         raise DoctorError("current task development source commit is stale")
-    if development.get("tree") is not None and development.get("tree") != source_tree:
+    if development.get("tree") != source_tree:
         raise DoctorError("current task development source tree is stale")
 
     source = _required_projection(task, "source", "source")
@@ -724,6 +1156,11 @@ def _validate_current_task_projections(
     tracks = _required_projection(task, "tracks", "tracks")
     coding = _required_projection(tracks, "coding_lifecycle", "coding lifecycle")
     item = _required_projection(tracks, "item_workflow", "item workflow")
+    if (
+        not isinstance(item.get("generation"), str)
+        or not item.get("generation")
+    ):
+        raise DoctorError("current task item workflow generation is malformed")
     _require_projection_pair(
         "coding lifecycle integration",
         coding,
@@ -746,6 +1183,17 @@ def _validate_current_task_projections(
         or _SHA256.fullmatch(review_sha256) is None
     ):
         raise DoctorError("current task reviewed candidate projection is malformed")
+    _require_git_commit_tree(
+        paths.repository,
+        commit=reviewed_commit,
+        tree=reviewed_tree,
+        label="coding review candidate",
+    )
+    _require_review_file(
+        review_path,
+        review_sha256,
+        label="coding",
+    )
     _require_projection_pair(
         "coding lifecycle reviewed candidate",
         coding,
@@ -786,6 +1234,17 @@ def _validate_current_task_projections(
     )
     if live.get("item_workflow_generation") != item.get("generation"):
         raise DoctorError("current task item workflow generation is stale")
+    _require_git_commit_tree(
+        paths.repository,
+        commit=item.get("commit"),
+        tree=item.get("tree"),
+        label="item workflow",
+    )
+    _require_review_file(
+        item.get("review_path"),
+        item.get("review_sha256"),
+        label="item workflow",
+    )
 
     review_admission = _required_projection(
         task, "review_admission", "review/admission"
@@ -876,6 +1335,17 @@ def _validate_current_task_projections(
         plan_identity,
     )
     todo_1916 = _required_projection(plan, "todo_1916", "Todo 1916 Plan")
+    _require_git_commit_tree(
+        paths.plan_repository,
+        commit=todo_1916.get("candidate_commit"),
+        tree=todo_1916.get("candidate_tree"),
+        label="Todo 1916 Plan review candidate",
+    )
+    _require_review_file(
+        todo_1916.get("review_path"),
+        todo_1916.get("review_sha256"),
+        label="Todo 1916 Plan",
+    )
     _require_projection_pair(
         "Todo 1916 current Plan evidence",
         todo_1916,
@@ -5504,7 +5974,42 @@ def _receipt(paths: DoctorPaths, operation: str, before: Any, after: Any) -> str
     }
     body["receipt_sha256"] = _hash(body)
     path = paths.receipts / f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{operation}.json"
-    _atomic_json(path, body)
+    expected = _json_bytes(body)
+    if _surface_snapshot(path).get("kind") != "missing":
+        raise DoctorError(f"Doctor receipt destination already exists: {path}")
+    try:
+        _atomic_json(path, body)
+    except Exception as exc:
+        cleanup_error: Exception | None = None
+        try:
+            published = _surface_snapshot(path)
+            if published.get("kind") != "missing":
+                if (
+                    published.get("kind") != "file"
+                    or published.get("nlink") != 1
+                    or published.get("raw") != expected
+                ):
+                    raise DoctorError(
+                        "failed Doctor receipt destination changed concurrently"
+                    )
+                path.unlink()
+                directory = os.open(
+                    path.parent,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                )
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+        except Exception as cleanup_exc:
+            cleanup_error = cleanup_exc
+        if cleanup_error is not None:
+            raise _preserve_primary_with_cleanup_failure(
+                exc,
+                cleanup_error,
+                resource="failed Doctor success receipt",
+            ).with_traceback(exc.__traceback__)
+        raise
     return str(path)
 
 
@@ -6047,6 +6552,7 @@ def repair_context(
     *,
     desired_commit: str | None = None,
     source_root: Path | None = None,
+    review_evidence: Path | None = None,
 ) -> dict[str, Any]:
     _require_root()
     explicit_source_reconciliation = desired_commit is not None
@@ -6078,6 +6584,19 @@ def repair_context(
     head, tree, status = _source_identity(paths)
     if status:
         raise DoctorError("context repair refuses a dirty canonical source")
+    review_binding = (
+        _context_transition_review_binding(
+            review_evidence,
+            commit=head,
+            tree=tree,
+        )
+        if review_evidence is not None
+        else None
+    )
+    if review_binding is not None and not explicit_source_reconciliation:
+        raise DoctorError(
+            "Context transition review evidence requires an exact commit repair"
+        )
     # The receipt retains ``before`` verbatim.  Reconciliation mutates nested
     # source/cursor structures, so both working projections must be detached
     # recursively rather than with a shallow dict copy.
@@ -6187,6 +6706,15 @@ def repair_context(
                 latest["semantic_reconciliation"] = "CODING_RUNTIME_EXACT"
                 latest.pop("reconciliation_hash", None)
                 latest["reconciliation_hash"] = _hash(latest)
+    migration_changes: list[str] = []
+    if review_binding is not None:
+        migration_changes = _stage_context_transition_projections(
+            paths,
+            task,
+            source_commit=head,
+            source_tree=tree,
+            review=review_binding,
+        )
     workflow_projection = task.get("implementation", {}).get("coding_workflow")
     if not isinstance(workflow_projection, Mapping):
         raise DoctorError("current task coding workflow projection is malformed")
@@ -6356,6 +6884,12 @@ def repair_context(
             raise DoctorError("current Plan evidence changed during context repair")
         if _surface_snapshot(paths.context_task) != task_surface or _surface_snapshot(paths.context_cursor) != cursor_surface or _surface_snapshot(paths.context_snapshot) != snapshot_surface:
             raise DoctorError("context inputs changed concurrently; no live file was replaced")
+        if review_binding is not None and _surface_snapshot(
+            Path(str(review_binding["path"]))
+        ) != review_binding["surface"]:
+            raise DoctorError(
+                "Context transition review evidence changed during repair"
+            )
         committed_task: dict[str, Any] | None = None
         committed_cursor: dict[str, Any] | None = None
         committed_snapshot: dict[str, Any] | None = None
@@ -6473,7 +7007,16 @@ def repair_context(
         "changed": changed,
         "receipt": receipt,
         "staged_cold_stdio_probe": staged_probe,
-        "projection_changes": projection_changes,
+        "projection_changes": sorted(set(projection_changes + migration_changes)),
+        "review_evidence": (
+            {
+                "path": review_binding["path"],
+                "sha256": review_binding["sha256"],
+                "authority": False,
+            }
+            if review_binding is not None
+            else None
+        ),
         **restart_report,
     }
 
@@ -10302,6 +10845,7 @@ def repair(
     *,
     desired_commit: str | None = None,
     source_root: Path | None = None,
+    review_evidence: Path | None = None,
 ) -> dict[str, Any]:
     function = _REPAIRS.get(operation)
     if function is None:
@@ -10348,11 +10892,17 @@ def repair(
         )
         try:
             if operation in {"context", "context-launcher"}:
-                result = function(
-                    paths,
-                    desired_commit=desired_commit,
-                    source_root=exact_root,
-                )
+                context_arguments: dict[str, Any] = {
+                    "desired_commit": desired_commit,
+                    "source_root": exact_root,
+                }
+                if operation == "context":
+                    context_arguments["review_evidence"] = review_evidence
+                elif review_evidence is not None:
+                    raise DoctorError(
+                        "review evidence is valid only for Context publication"
+                    )
+                result = function(paths, **context_arguments)
             elif operation in {
                 "runtime",
                 "database",
@@ -10757,6 +11307,14 @@ def _parser() -> argparse.ArgumentParser:
     repair_parser = sub.add_parser("repair", help="restore an exact declared local state")
     repair_parser.add_argument("target", choices=[*_REPAIRS])
     repair_parser.add_argument("--commit", required=True)
+    repair_parser.add_argument(
+        "--review-evidence",
+        type=Path,
+        help=(
+            "bind exact non-authoritative diagnostic review bytes during an "
+            "explicit Context source transition"
+        ),
+    )
     repair_parser.add_argument("--json", action="store_true", dest="repair_json_output")
     return parser
 
@@ -10769,6 +11327,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.target,
                 desired_commit=args.commit,
                 source_root=Path(__file__).resolve().parents[2],
+                review_evidence=args.review_evidence,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             # A completed bounded repair is successful when the resulting
