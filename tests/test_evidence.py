@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 import pytest
 
-from tgw.workflow_kernel.contracts import EvidenceAssertion, EvidenceReference, FingerprintResult
 from tgw.workflow.evidence import (  # noqa: E402
     assert_ai_identified,
     assert_condition,
@@ -27,6 +26,7 @@ from tgw.workflow.evidence import (  # noqa: E402
     assert_staged,
     assert_tested,
 )
+from tgw.workflow_kernel.contracts import EvidenceAssertion, EvidenceReference, FingerprintResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -363,6 +363,18 @@ class TestAssertStaged:
 class TestAssertPublished:
     def test_true_active(self):
         r = assert_published({"ebay_listing": {"status": "Active"}})
+        assert r.result is FingerprintResult.TRUE
+
+    @pytest.mark.parametrize(
+        "listing",
+        (
+            {"status": "PUBLISHED"},
+            {"listing_status": "ACTIVE"},
+            {"listingStatus": "Active"},
+        ),
+    )
+    def test_true_for_canonical_inventory_and_provider_status_shapes(self, listing):
+        r = assert_published({"ebay_listing": listing})
         assert r.result is FingerprintResult.TRUE
 
     def test_false_ended(self):

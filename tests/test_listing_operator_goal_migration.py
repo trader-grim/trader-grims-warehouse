@@ -20,7 +20,6 @@ from tgw.workflow.profiles import (
     TGW_EBAY_LISTABLE,
     TGW_EBAY_PRICED,
 )
-from tgw.workflow_kernel.scheduler import DispatchResult
 from tgw.workflow.treatments import (
     AI_IDENTIFY,
     EBAY_DRAFT,
@@ -28,6 +27,7 @@ from tgw.workflow.treatments import (
     EBAY_STAGE,
     TGW_TREATMENTS,
 )
+from tgw.workflow_kernel.scheduler import DispatchResult
 
 
 @pytest.mark.parametrize(
@@ -436,6 +436,38 @@ def test_goal_scope_ceiling_defaults_and_blocks_escalation():
         "stage",
     )
     assert _evaluator_authorized_scopes(["stage"]) == ("stage",)
+
+
+def test_update_dispatch_requires_fresh_stage_even_when_item_is_published(monkeypatch):
+    from tgw.workflow import listing_migration
+
+    captured = {}
+    expected = SimpleNamespace(dispatched=SimpleNamespace(job_id="job-update"))
+
+    def authorize(*args, **kwargs):
+        captured.update(kwargs)
+        return expected, "authority-1", True
+
+    monkeypatch.setattr(
+        listing_migration,
+        "authorize_and_request_item_goal",
+        authorize,
+    )
+
+    result, dispatched, authority_id, created = (
+        listing_migration.authorize_and_dispatch_update_item(
+            "/items/SKU-1.json",
+            operator_identity="operator:test",
+            surface="http:operator-object:update-item",
+            provider_identity="ebay:account",
+        )
+    )
+
+    assert result is expected
+    assert dispatched.job_id == "job-update"
+    assert authority_id == "authority-1"
+    assert created is True
+    assert captured["require_current_stage_when_published"] is True
 
 
 def test_goal_uses_exact_canonical_stage_marker_not_latest_effect(tmp_path, monkeypatch):

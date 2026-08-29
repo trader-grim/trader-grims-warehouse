@@ -4,14 +4,16 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
+from tgw.workflow.item_snapshot import build_item_snapshot  # noqa: E402
 from tgw.workflow_kernel.contracts import (  # noqa: E402
     FingerprintResult,
     GoalProfile,
     ObjectSnapshot,
 )
-from tgw.workflow.item_snapshot import build_item_snapshot  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -414,6 +416,19 @@ def test_published_true():
     assert _result(snap, "published") == FingerprintResult.TRUE
 
 
+@pytest.mark.parametrize(
+    "listing",
+    (
+        {"status": "PUBLISHED"},
+        {"listing_status": "ACTIVE"},
+        {"listingStatus": "Active"},
+    ),
+)
+def test_published_accepts_canonical_inventory_and_provider_status_shapes(listing):
+    snap = _snapshot(_make_item(ebay_listing=listing))
+    assert _result(snap, "published") == FingerprintResult.TRUE
+
+
 def test_published_false_other_status():
     item = _make_item(ebay_listing={"status": "Draft"})
     snap = _snapshot(item)
@@ -644,6 +659,28 @@ def test_published_listing_supersedes_staged_content_freshness(tmp_path):
     assert assertions["staged_content_current"].result == (
         FingerprintResult.NOT_APPLICABLE
     )
+    assert assertions["published"].result == FingerprintResult.TRUE
+
+
+def test_update_evaluation_requires_current_stage_for_published_listing(tmp_path):
+    path = tmp_path / "item.json"
+    item = _make_item(
+        ebay_offer={"offer_id": "offer-1"},
+        ebay_listing={"listing_id": "listing-1", "status": "PUBLISHED"},
+    )
+    path.write_text(json.dumps(item), encoding="utf-8")
+    goal = GoalProfile("update", "1", ("staged_content_current", "published"))
+    snapshot = build_item_snapshot(
+        path,
+        goal,
+        stage_receipt_lookup=lambda sku: {
+            "receipt_id": "stage-receipt-old",
+            "content_identity": "old",
+        },
+        require_current_stage_when_published=True,
+    )
+    assertions = {item.condition_id: item for item in snapshot.assertions}
+    assert assertions["staged_content_current"].result == FingerprintResult.STALE
     assert assertions["published"].result == FingerprintResult.TRUE
 
 

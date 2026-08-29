@@ -12,7 +12,6 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-from .condition_normalization import normalized_condition
 from tgw.workflow_kernel.contracts import (
     EvidenceAssertion,
     EvidenceReference,
@@ -21,6 +20,8 @@ from tgw.workflow_kernel.contracts import (
     ObjectSnapshot,
     TreatmentContract,
 )
+
+from .condition_normalization import normalized_condition
 from .operator_authority import listing_content_identity
 
 # ---------------------------------------------------------------------------
@@ -264,9 +265,24 @@ def _staged(item: Dict[str, Any]) -> bool:
 
 
 def _published(item: Dict[str, Any]) -> bool:
-    """ebay_listing.status == 'Active'."""
+    """Return whether the canonical provider projection says the listing is live.
+
+    Inventory API mirrors use ``status=PUBLISHED`` while Trading/API
+    observations use either ``status=Active`` or ``listing_status=ACTIVE``.
+    These are serializations of the same provider fact.
+    """
     listing = item.get("ebay_listing") or {}
-    return listing.get("status") == "Active"
+    if not isinstance(listing, Mapping):
+        return False
+    statuses = (
+        listing.get("status"),
+        listing.get("listing_status"),
+        listing.get("listingStatus"),
+    )
+    return any(
+        str(status or "").strip().upper() in {"ACTIVE", "PUBLISHED"}
+        for status in statuses
+    )
 
 
 def inventory_available(item: Mapping[str, Any]) -> bool:
@@ -409,6 +425,7 @@ def build_item_snapshot(
     authority_identity: str = "",
     stage_receipt_lookup: Callable[[str], Mapping[str, Any] | None] | None = None,
     provider_projection_receipt: Mapping[str, Any] | None = None,
+    require_current_stage_when_published: bool = False,
 ) -> ObjectSnapshot:
     """Build an ObjectSnapshot from one item JSON file, scoped to goal_profile.
 
@@ -478,7 +495,7 @@ def build_item_snapshot(
         if condition_id == "staged_content_current":
             offer_exists = _staged(item)
             receipt = stage_receipt_lookup(sku) if stage_receipt_lookup else None
-            if _published(item):
+            if _published(item) and not require_current_stage_when_published:
                 result = FingerprintResult.NOT_APPLICABLE
                 reason = "published listing supersedes staged content freshness"
             elif not offer_exists:

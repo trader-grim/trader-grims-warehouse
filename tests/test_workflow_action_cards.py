@@ -34,6 +34,60 @@ def test_projection_exposes_current_graph_evidence_waits_and_legal_actions(tmp_p
                for reason in upload["reasons"])
 
 
+def test_missing_provider_contract_does_not_hide_list_command(tmp_path):
+    path = _item(tmp_path, condition="Used")
+    path.write_text(
+        json.dumps(
+            {
+                "sku": "SKU-1",
+                "condition": "Used",
+                "image": "a.jpg",
+                "ebay_category_id": "123",
+                "draft_listing": {
+                    "title": "Example",
+                    "category_id": "123",
+                    "price": 10,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    card = build_item_action_card(path)
+
+    upload = next(
+        waiting
+        for waiting in card["waiting_treatments"]
+        if waiting["treatment_id"] == "ebay-upload"
+    )
+    assert len(upload["reasons"]) == 1
+    assert upload["reasons"][0].startswith("operator_authorized_upload=false:")
+    assert card["operator_projection"]["commands"]["list-item"] == {
+        "enabled": True,
+        "reason": None,
+    }
+
+
+def test_published_inventory_projection_exposes_update_not_list(tmp_path):
+    path = _item(tmp_path, condition="Used")
+    item = json.loads(path.read_text(encoding="utf-8"))
+    item.update(
+        ebay_offer={"offer_id": "offer-1", "status": "PUBLISHED"},
+        ebay_listing={
+            "listing_id": "listing-1",
+            "status": "PUBLISHED",
+        },
+    )
+    path.write_text(json.dumps(item), encoding="utf-8")
+
+    card = build_item_action_card(path)
+    commands = card["operator_projection"]["commands"]
+
+    assert card["operator_projection"]["state"] == "published"
+    assert commands["list-item"]["enabled"] is False
+    assert commands["update-item"] == {"enabled": True, "reason": None}
+
+
 def test_attempts_join_results_and_ambiguous_external_effect_becomes_gate(tmp_path):
     attempts = [{
         "job_id": "job-1", "queue_name": "ebay_publish", "state": "dead_letter",
@@ -50,6 +104,8 @@ def test_attempts_join_results_and_ambiguous_external_effect_becomes_gate(tmp_pa
     assert "listing.publish" in card["operator_gates"]
     assert card["blind_retry_allowed"] is False
     assert not any(action.get("action") == "retry" for action in card["legal_actions"])
+    assert card["operator_projection"]["commands"]["list-item"]["enabled"] is False
+    assert card["operator_projection"]["commands"]["update-item"]["enabled"] is False
 
 
 def test_legacy_unbound_reconciliation_receipt_still_blocks_retry(tmp_path):

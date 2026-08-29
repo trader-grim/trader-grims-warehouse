@@ -362,7 +362,7 @@ def assert_staged(item_dict: dict[str, Any] | None) -> EvidenceAssertion:
 def assert_published(item_dict: dict[str, Any] | None) -> EvidenceAssertion:
     """Evidence that the item is published (live on marketplace).
 
-    Checks ebay_listing.status == Active.
+    Recognizes the canonical Inventory and Trading/API live-state shapes.
 
     * TRUE    — status is 'Active'
     * FALSE   — ebay_listing present but status != Active
@@ -380,10 +380,30 @@ def assert_published(item_dict: dict[str, Any] | None) -> EvidenceAssertion:
     ebay_listing = item_dict.get("ebay_listing")
     if ebay_listing is None or not isinstance(ebay_listing, dict):
         return EvidenceAssertion(_cond, FingerprintResult.UNKNOWN, ("no ebay_listing data",), ())
-    status = ebay_listing.get("status") or ebay_listing.get("listingStatus", "")
-    if status == "Active":
-        return EvidenceAssertion(_cond, FingerprintResult.TRUE, ("listing is Active",), _ev)
-    return EvidenceAssertion(_cond, FingerprintResult.FALSE, (f"listing status is '{status}' (not Active)",), _ev)
+    statuses = (
+        ebay_listing.get("status"),
+        ebay_listing.get("listing_status"),
+        ebay_listing.get("listingStatus"),
+    )
+    active = next(
+        (
+            status
+            for status in statuses
+            if str(status or "").strip().upper() in {"ACTIVE", "PUBLISHED"}
+        ),
+        None,
+    )
+    if active is not None:
+        return EvidenceAssertion(
+            _cond, FingerprintResult.TRUE, (f"listing is {active}",), _ev
+        )
+    status = next((status for status in statuses if status not in (None, "")), "")
+    return EvidenceAssertion(
+        _cond,
+        FingerprintResult.FALSE,
+        (f"listing status is '{status}' (not Active or PUBLISHED)",),
+        _ev,
+    )
 
 
 def assert_valid_condition(item_dict: dict[str, Any] | None) -> EvidenceAssertion:

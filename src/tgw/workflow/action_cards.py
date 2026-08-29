@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 
 from tgw.workflow_kernel.contracts import EffectClass, FingerprintResult, TreatmentAttempt
 from tgw.workflow_kernel.evaluator import evaluate
+
 from .item_snapshot import build_item_snapshot
 from .profiles import TGW_EBAY_LISTABLE
 from .treatments import TGW_TREATMENTS
@@ -186,9 +187,31 @@ def build_item_action_card(
     def command(enabled: bool, reason: str | None) -> dict[str, Any]:
         return {"enabled": enabled, "reason": None if enabled else reason}
 
-    first_gate = exact_operator_gates[0] if exact_operator_gates else None
-    list_enabled = bool(legal_actions) and not active and not first_gate and not published
-    update_enabled = staged and not active and not first_gate
+    # The operator command is what supplies the missing provider contract.
+    # Hiding it because that contract is absent creates a circular lockout.
+    # Reconciliation or ownership ambiguity still blocks all provider work.
+    blocking_gates = sorted(set(graph.reconciliation_gates))
+    if graph.ownership_conflicts:
+        blocking_gates.append("workflow ownership conflict")
+    first_gate = blocking_gates[0] if blocking_gates else None
+    authorizable_external = any(
+        contracts[(waiting.treatment_id, waiting.treatment_version)].effect_class
+        is EffectClass.EXTERNAL
+        and bool(waiting.reasons)
+        and all("operator_authorized_" in reason for reason in waiting.reasons)
+        for waiting in graph.waiting_treatments
+    )
+    list_enabled = (
+        (bool(legal_actions) or authorizable_external)
+        and not active
+        and not first_gate
+        and not published
+    )
+    provider_stage_present = (
+        fingerprint_results.get("staged") == FingerprintResult.TRUE.value
+        or published
+    )
+    update_enabled = provider_stage_present and not active and not first_gate
     operator_projection = {
         "state": operator_state,
         "reasons": exact_operator_gates,

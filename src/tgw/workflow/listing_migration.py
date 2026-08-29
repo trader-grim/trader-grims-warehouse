@@ -16,6 +16,8 @@ from tgw.workflow_kernel.contracts import (
     TreatmentDisposition,
 )
 from tgw.workflow_kernel.evaluator import evaluate
+from tgw.workflow_kernel.scheduler import DispatchResult, dispatch_treatment
+
 from .item_snapshot import build_item_snapshot
 from .operator_authority import (
     get_authority,
@@ -24,7 +26,6 @@ from .operator_authority import (
     validate_authority,
 )
 from .profiles import TGW_EBAY_IDENTIFIED
-from tgw.workflow_kernel.scheduler import DispatchResult, dispatch_treatment
 from .treatments import (
     AI_IDENTIFY,
     EBAY_PUBLISH,
@@ -208,6 +209,7 @@ def authorize_and_request_item_goal(
     surface: str, provider_identity: str, scopes: tuple[str, ...],
     ttl_seconds: int = 300, enqueue_fn=None, issuer=issue_or_reuse_authority,
     authority_lookup=get_authority,
+    require_current_stage_when_published: bool = False,
 ) -> tuple[GoalRequestResult, str, bool]:
     """Issue/reuse one authenticated exact authority, then evaluate it."""
     if not provider_identity.strip():
@@ -222,6 +224,7 @@ def authorize_and_request_item_goal(
     snapshot = build_item_snapshot(
         item_path, goal, treatments=TGW_TREATMENTS,
         stage_receipt_lookup=stage_lookup,
+        require_current_stage_when_published=require_current_stage_when_published,
     )
     graph = evaluate(
         snapshot=snapshot, goal=goal, treatments=TGW_TREATMENTS,
@@ -242,6 +245,7 @@ def authorize_and_request_item_goal(
         authority_id=authority_id, provider_identity=provider_identity,
         authority_lookup=authority_lookup, stage_receipt_lookup=stage_lookup,
         operator_identity=operator_identity, operator_surface=surface,
+        require_current_stage_when_published=require_current_stage_when_published,
     )
     return result, authority_id, created
 
@@ -394,6 +398,7 @@ def authorize_and_dispatch_update_item(
         scopes=("upload", "stage", "force-restage"),
         ttl_seconds=ttl_seconds, enqueue_fn=enqueue_fn,
         issuer=issuer, authority_lookup=authority_lookup,
+        require_current_stage_when_published=True,
     )
     if result.dispatched is not None:
         return result, result.dispatched, authority_id, created
@@ -460,6 +465,7 @@ def request_item_goal(
     stage_receipt_lookup=None,
     operator_identity: str = "",
     operator_surface: str = "",
+    require_current_stage_when_published: bool = False,
 ) -> GoalRequestResult:
     """Evaluate one exact generation and dispatch at most one local treatment.
 
@@ -473,6 +479,7 @@ def request_item_goal(
     base_snapshot = build_item_snapshot(
         item_path, goal, treatments=treatments,
         stage_receipt_lookup=stage_receipt_lookup,
+        require_current_stage_when_published=require_current_stage_when_published,
     )
     base_graph = evaluate(
         snapshot=base_snapshot, goal=goal, treatments=treatments,
@@ -496,6 +503,7 @@ def request_item_goal(
         authorized_scopes=_evaluator_authorized_scopes(authorized_scopes),
         authority_identity=authority_id or "",
         stage_receipt_lookup=stage_receipt_lookup,
+        require_current_stage_when_published=require_current_stage_when_published,
     )
     graph = evaluate(
         snapshot=snapshot, goal=goal, treatments=treatments,
