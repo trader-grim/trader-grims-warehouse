@@ -58,6 +58,7 @@ def _postgres_driver() -> tuple[Any, Any]:
     return psycopg2, psycopg2.extras
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _LOOSE_OBJECT_DIRECTORY = re.compile(r"[0-9a-f]{2}\Z")
 _LOOSE_OBJECT_NAME = re.compile(r"[0-9a-f]{38}\Z")
 _STATES = {"PASS", "WARN", "FAIL", "UNKNOWN", "RESTART_REQUIRED"}
@@ -718,6 +719,82 @@ def _repair_context_artifacts(
         return _selected_context_artifacts(paths)
     return _selected_context_artifacts(
         paths, desired_commit=desired_commit, source_root=source_root
+    )
+
+
+def _exact_bootstrap_workflow_projection(
+    paths: DoctorPaths,
+    selected: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recover exact installed-runtime facts from a root bootstrap receipt.
+
+    Context is orientation, so these facts never authorize installation. The
+    explicit bootstrap has already selected and verified the immutable release;
+    this helper only prevents the subsequent atomic Context publication from
+    retaining a predecessor runtime as its desired state.
+    """
+
+    commit = str(selected["commit"])
+    tree = str(selected["release_tree"]["tree"])
+    release = Path(selected["release"]).resolve(strict=True)
+    current = paths.runtime_root / "current"
+    if not current.is_symlink() or current.resolve(strict=True) != release:
+        raise DoctorError(
+            "Context runtime reconciliation requires the exact release to be selected"
+        )
+    for receipt_path in sorted(
+        paths.receipts.glob("*-coding-bootstrap.json"), reverse=True
+    ):
+        observed = receipt_path.stat(follow_symlinks=False)
+        if (
+            receipt_path.is_symlink()
+            or not stat.S_ISREG(observed.st_mode)
+            or observed.st_nlink != 1
+            or observed.st_uid != paths.context_install_uid
+            or observed.st_mode & 0o022
+        ):
+            continue
+        receipt = _json(receipt_path)
+        claimed_hash = receipt.get("receipt_sha256")
+        unsigned = {
+            key: value for key, value in receipt.items() if key != "receipt_sha256"
+        }
+        after = receipt.get("after")
+        if (
+            receipt.get("schema") != "tgw-local-doctor-repair-receipt/v1"
+            or receipt.get("operation") != "coding-bootstrap"
+            or claimed_hash != _hash(unsigned)
+            or not isinstance(after, Mapping)
+            or after.get("schema") != "tgw-local-coding-bootstrap/v1"
+            or after.get("ok") is not True
+            or after.get("commit") != commit
+            or after.get("tree") != tree
+        ):
+            continue
+        materialization = after.get("materialization")
+        if (
+            not isinstance(materialization, Mapping)
+            or materialization.get("commit") != commit
+            or materialization.get("tree") != tree
+            or _SHA256.fullmatch(str(materialization.get("receipt_hash", "")))
+            is None
+            or _SHA256.fullmatch(str(after.get("configuration_sha256", "")))
+            is None
+        ):
+            continue
+        return {
+            "state": "LIVE_EXACT_LOCAL_RUNTIME",
+            "commit": commit,
+            "tree": tree,
+            "release": str(release),
+            "bootstrap_receipt": str(receipt_path),
+            "materialization_receipt_hash": materialization["receipt_hash"],
+            "configuration_sha256": after["configuration_sha256"],
+            "context_required": False,
+            "review_authority": False,
+        }
+    raise DoctorError(
+        "Context runtime reconciliation found no exact root bootstrap receipt"
     )
 
 
@@ -4749,6 +4826,56 @@ def repair_context(
             }
         )
         task["updated_at"] = now
+    if explicit_source_reconciliation:
+        # Bootstrap selects and verifies the immutable runtime before this
+        # repair. Reconcile its semantic projection in the same
+        # task/cursor/snapshot CAS so a fresh Doctor never treats the
+        # predecessor release as desired state.
+        workflow = _exact_bootstrap_workflow_projection(paths, selected)
+        implementation = task.setdefault("implementation", {})
+        if not isinstance(implementation, dict):
+            raise DoctorError("current task implementation projection is malformed")
+        previous_workflow = implementation.get("coding_workflow")
+        if not isinstance(previous_workflow, Mapping):
+            raise DoctorError("current task coding workflow projection is malformed")
+        if dict(previous_workflow) != workflow:
+            now = datetime.now().astimezone().isoformat()
+            workflow_history = task.setdefault(
+                "coding_workflow_reconciliation_history", []
+            )
+            if not isinstance(workflow_history, list):
+                raise DoctorError(
+                    "current task coding workflow reconciliation history is malformed"
+                )
+            reconciliation = {
+                "schema": "tgw-context-coding-workflow-reconciliation/v1",
+                "recorded_at": now,
+                "disposition": "EXPLICIT_EXACT_INSTALLED_RUNTIME",
+                "previous": json.loads(json.dumps(previous_workflow)),
+                "successor": json.loads(json.dumps(workflow)),
+                "authority": False,
+            }
+            reconciliation["reconciliation_hash"] = _hash(reconciliation)
+            workflow_history.append(reconciliation)
+            implementation["coding_workflow"] = workflow
+            task["updated_at"] = now
+        development_source = implementation.get("development_source")
+        if isinstance(development_source, dict) and (
+            development_source.get("commit"), development_source.get("tree")
+        ) == (head, tree):
+            development_source["state"] = "CANONICAL_SOURCE_CURRENT"
+        source_history = task.get("source_reconciliation_history")
+        if isinstance(source_history, list) and source_history:
+            latest = source_history[-1]
+            if (
+                isinstance(latest, dict)
+                and latest.get("successor") == {"commit": head, "tree": tree}
+                and latest.get("semantic_reconciliation")
+                != "CODING_RUNTIME_EXACT"
+            ):
+                latest["semantic_reconciliation"] = "CODING_RUNTIME_EXACT"
+                latest.pop("reconciliation_hash", None)
+                latest["reconciliation_hash"] = _hash(latest)
     if cursor.get("plan_commit") != task.get("plan", {}).get("approved_commit"):
         raise DoctorError("task and cursor Plan commits disagree; source-only repair is unsafe")
     capability = task.get("implementation", {}).get("development_source", {}).get("next_leaf")

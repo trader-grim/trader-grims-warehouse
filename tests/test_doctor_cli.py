@@ -4130,6 +4130,30 @@ def test_explicit_exact_context_repair_reconciles_stale_task_source_without_auth
     _write_json(paths.context_task, task)
     _write_json(paths.context_cursor, cursor)
     _write_json(paths.context_snapshot, _snapshot(task, cursor))
+    bootstrap_after = {
+        "schema": "tgw-local-coding-bootstrap/v1",
+        "ok": True,
+        "commit": head,
+        "tree": tree,
+        "configuration_sha256": "sha256:" + "1" * 64,
+        "materialization": {
+            "commit": head,
+            "tree": tree,
+            "receipt_hash": "sha256:" + "2" * 64,
+        },
+    }
+    bootstrap_receipt = {
+        "schema": "tgw-local-doctor-repair-receipt/v1",
+        "operation": "coding-bootstrap",
+        "performed_at": "2026-08-24T00:00:00+00:00",
+        "actor": "root",
+        "before": {},
+        "after": bootstrap_after,
+    }
+    bootstrap_receipt["receipt_sha256"] = doctor_cli._hash(bootstrap_receipt)
+    bootstrap_path = paths.receipts / "20260824T000000000000Z-coding-bootstrap.json"
+    _write_json(bootstrap_path, bootstrap_receipt)
+    bootstrap_path.chmod(0o444)
 
     selected = doctor_cli._selected_context_artifacts(paths)
     original_run = doctor_cli._run
@@ -4176,8 +4200,24 @@ def test_explicit_exact_context_repair_reconciles_stale_task_source_without_auth
     assert repaired_task["implementation"]["development_source"]["commit"] == head
     assert repaired_task["implementation"]["development_source"]["tree"] == tree
     assert repaired_task["implementation"]["development_source"]["state"] == (
-        "CANONICAL_SOURCE_ADVANCED_RECONCILIATION_PENDING"
+        "CANONICAL_SOURCE_CURRENT"
     )
+    workflow = repaired_task["implementation"]["coding_workflow"]
+    assert workflow == {
+        "state": "LIVE_EXACT_LOCAL_RUNTIME",
+        "commit": head,
+        "tree": tree,
+        "release": str((paths.runtime_root / "releases" / head).resolve()),
+        "bootstrap_receipt": str(bootstrap_path),
+        "materialization_receipt_hash": "sha256:" + "2" * 64,
+        "configuration_sha256": "sha256:" + "1" * 64,
+        "context_required": False,
+        "review_authority": False,
+    }
+    workflow_history = repaired_task["coding_workflow_reconciliation_history"]
+    assert workflow_history[-1]["previous"] == {"commit": head}
+    assert workflow_history[-1]["successor"] == workflow
+    assert workflow_history[-1]["authority"] is False
     assert history[-1]["previous"]["commit"] == stale_commit
     assert history[-1]["previous"]["task_source"] == {
         "repository": str(paths.repository),
@@ -4187,6 +4227,7 @@ def test_explicit_exact_context_repair_reconciles_stale_task_source_without_auth
     }
     assert history[-1]["successor"] == {"commit": head, "tree": tree}
     assert history[-1]["authority"] is False
+    assert history[-1]["semantic_reconciliation"] == "CODING_RUNTIME_EXACT"
     reconciliation = dict(history[-1])
     claimed_hash = reconciliation.pop("reconciliation_hash")
     assert claimed_hash == doctor_cli._hash(reconciliation)
