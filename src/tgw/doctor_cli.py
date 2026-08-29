@@ -4806,13 +4806,38 @@ def _live_ident_entries(paths: DoctorPaths) -> list[tuple[str, str, str]]:
     return rows
 
 
+def _ordinary_tgw_coders_members() -> list[str]:
+    """Return tgw-coders members that can actually log in (not nologin).
+
+    Service accounts (nologin shells) are not ordinary coding actors and are
+    intentionally absent from the peer map; the map must cover every member
+    with a real login shell so future harness onboarding updates the
+    group/peer mapping rather than creating another PostgreSQL role.
+    """
+    try:
+        group = grp.getgrnam(_PEER_MAP_NAME)
+    except KeyError as exc:
+        raise DoctorError("tgw-coders group is unavailable for peer verification") from exc
+    members: list[str] = []
+    for name in group.gr_mem:
+        try:
+            shell = pwd.getpwnam(name).pw_shell
+        except KeyError:
+            continue
+        if shell not in ("/usr/sbin/nologin", "/sbin/nologin", "/bin/false", "/usr/bin/false"):
+            members.append(name)
+    return members
+
+
 def _peer_auth_materialization(paths: DoctorPaths) -> dict[str, Any]:
     """Verify the installed peer-auth host materialization (root-only).
 
     The unprivileged functional proof is the database.local-coding check
     itself: connecting through the universal DSN as each ordinary actor can
     succeed only when pg_hba ordering and the pg_ident map are correct.  This
-    file-state verification additionally guards the root bootstrap/repair path.
+    file-state verification additionally guards the root bootstrap/repair path
+    and enforces that the canonical map covers every ordinary tgw-coders
+    member with a login shell.
     """
     if os.geteuid() != 0:
         return {
@@ -4833,14 +4858,18 @@ def _peer_auth_materialization(paths: DoctorPaths) -> dict[str, Any]:
     }
     live_users = {system_user for map_name, system_user in live_map}
     missing = sorted(expected_users - live_users)
+    unexpected = sorted(live_users - expected_users)
     wrong = sorted(
         f"{system_user}->{role}"
         for (map_name, system_user), role in live_map.items()
         if role != _PEER_TARGET_ROLE
     )
+    unmapped_members = sorted(set(_ordinary_tgw_coders_members()) - expected_users)
     ident_exact = (
         not missing
+        and not unexpected
         and not wrong
+        and not unmapped_members
         and all(
             live_map.get((map_name, system_user)) == role
             for map_name, system_user, role in canonical
@@ -4880,6 +4909,8 @@ def _peer_auth_materialization(paths: DoctorPaths) -> dict[str, Any]:
         "pg_ident": {
             "exact": ident_exact,
             "missing": missing,
+            "unexpected": unexpected,
+            "unmapped_group_members": unmapped_members,
             "wrong_target": wrong,
             "canonical_entries": len(canonical),
             "live_entries": len(live_map),
@@ -4918,6 +4949,13 @@ def check_database_peer_auth(paths: DoctorPaths) -> dict[str, Any]:
             detail_parts = []
             if pg_ident["missing"]:
                 detail_parts.append("missing " + ", ".join(pg_ident["missing"]))
+            if pg_ident["unexpected"]:
+                detail_parts.append("unexpected " + ", ".join(pg_ident["unexpected"]))
+            if pg_ident["unmapped_group_members"]:
+                detail_parts.append(
+                    "unmapped ordinary members "
+                    + ", ".join(pg_ident["unmapped_group_members"])
+                )
             if pg_ident["wrong_target"]:
                 detail_parts.append("wrong " + ", ".join(pg_ident["wrong_target"]))
             parts.append("pg_ident: " + "; ".join(detail_parts))
@@ -5016,6 +5054,19 @@ def _materialize_peer_auth(
             ),
             0,
         )
+    # The managed line must precede any catch-all ``local ... all ... peer``
+    # line under pg_hba first-match semantics; clamp the insertion position
+    # even when the postgres peer line sits behind an odd catch-all order.
+    catch_all_index = next(
+        (
+            index
+            for index, line in enumerate(existing_hba)
+            if re.match(r"^local\s+\S+\s+all\s+peer\b", line)
+        ),
+        None,
+    )
+    if catch_all_index is not None and insert_at > catch_all_index:
+        insert_at = catch_all_index
     existing_hba.insert(insert_at, managed_line)
     _atomic_bytes(
         hba_path,

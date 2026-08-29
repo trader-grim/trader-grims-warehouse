@@ -8504,6 +8504,14 @@ def test_peer_auth_check_requires_complete_ident_and_ordered_hba(
 ) -> None:
     paths, head, _tree = _fixture(tmp_path)
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_ordinary_tgw_coders_members",
+        lambda: sorted(
+            user
+            for _map_name, user, _role in doctor_cli._canonical_peer_ident_entries(paths)
+        ),
+    )
     conf = paths.postgresql_conf_dir
     (conf / "pg_hba.conf").write_text(
         "local   all             all                                     peer\n"
@@ -8532,6 +8540,14 @@ def test_peer_auth_check_passes_when_materialization_is_exact(
 ) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_ordinary_tgw_coders_members",
+        lambda: sorted(
+            user
+            for _map_name, user, _role in doctor_cli._canonical_peer_ident_entries(paths)
+        ),
+    )
 
     result = doctor_cli.check_database_peer_auth(paths)
 
@@ -8539,6 +8555,54 @@ def test_peer_auth_check_passes_when_materialization_is_exact(
     assert result["evidence"]["checked"] is True
     assert result["evidence"]["pg_ident"]["exact"] is True
     assert result["evidence"]["pg_hba"]["exact"] is True
+
+
+def test_peer_auth_check_rejects_unexpected_live_map_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_ordinary_tgw_coders_members",
+        lambda: sorted(
+            user
+            for _map_name, user, _role in doctor_cli._canonical_peer_ident_entries(paths)
+        ),
+    )
+    conf = paths.postgresql_conf_dir
+    (conf / "pg_ident.conf").write_text(
+        (conf / "pg_ident.conf").read_text(encoding="utf-8")
+        + "tgw-coders      mallory                 tgw_coding\n",
+        encoding="utf-8",
+    )
+
+    result = doctor_cli.check_database_peer_auth(paths)
+
+    assert result["state"] == "FAIL"
+    assert result["evidence"]["pg_ident"]["unexpected"] == ["mallory"]
+
+
+def test_peer_auth_check_rejects_unmapped_ordinary_group_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_ordinary_tgw_coders_members",
+        lambda: sorted(
+            {
+                *(user for _map_name, user, _role in doctor_cli._canonical_peer_ident_entries(paths)),
+                "newharness",
+            }
+        ),
+    )
+
+    result = doctor_cli.check_database_peer_auth(paths)
+
+    assert result["state"] == "FAIL"
+    assert result["evidence"]["pg_ident"]["unmapped_group_members"] == ["newharness"]
 
 
 def test_peer_auth_check_rejects_no_map_shadow_line(
@@ -8567,8 +8631,11 @@ def test_database_repair_materializes_peer_auth_and_reloads(
 ) -> None:
     paths, head, tree = _fixture(tmp_path)
     conf = paths.postgresql_conf_dir
+    # Deliberately odd order: catch-all peer line before the postgres line.
+    # The repair must still place the managed line ahead of the catch-all.
     (conf / "pg_hba.conf").write_text(
-        "local   all             all                                     peer\n",
+        "local   all             all                                     peer\n"
+        "local   all             postgres                                peer\n",
         encoding="utf-8",
     )
     (conf / "pg_ident.conf").write_text("# stale ident\n", encoding="utf-8")

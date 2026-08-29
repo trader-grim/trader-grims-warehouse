@@ -11,14 +11,21 @@
 - Every ordinary Unix member of `tgw-coders` reaches that role through peer
   authentication: `pg_hba.conf` resolves local connections that request
   `tgw_coding` through the `tgw-coders` pg_ident map
-  (`config/environment/postgresql/pg_ident.conf`).
+  (`config/environment/postgresql/pg_ident.conf`). The map covers every
+  `tgw-coders` member with a real login shell; service accounts with nologin
+  shells are not ordinary coding actors and are intentionally absent. Doctor's
+  `database.local-coding-peer-auth` check enforces both directions against the
+  live group, so onboarding a new harness without updating the map fails
+  closed.
 - The shared development DSN explicitly names the role:
   `dbname=tgw_lib_dev_state_machine user=tgw_coding`
   (`config/tgw-coding-local.json` and `config/tgw-plan-render-local.json`).
 - No `codex`, `claude`, `deepseek`, `model`, or harness-named PostgreSQL login
   role may exist. The obsolete `db`/`codex` login roles are retired only after
   an ownership/dependency inventory proves them safe to drop
-  (`config/tgw-coding-local-roles.sql` fails closed otherwise).
+  (`config/tgw-coding-local-roles.sql` fails closed otherwise); their legacy
+  membership in `tgw_coding` is revoked by the migration itself and is not a
+  blocking dependency.
 - The separate database owner/admin role (owner of
   `tgw_lib_dev_state_machine` and its schema objects) is preserved untouched.
 - Onboarding a new harness updates `tgw-coders` Unix membership and the peer

@@ -56,7 +56,9 @@ GRANT EXECUTE ON FUNCTION public.recover_expired_jobs()
 -- inventory proves they are safe to drop.  This block fails closed: it lists
 -- every owned object, membership, grant, or ACL dependency it finds and
 -- refuses to drop the role, so the operator can transfer ownership or revoke
--- the dependency explicitly before rerunning the repair.
+-- the dependency explicitly before rerunning the repair.  Membership in the
+-- universal ``tgw_coding`` role itself is revoked by this migration and is
+-- therefore not a blocking dependency.
 DO $$
 DECLARE
     obsolete CONSTANT text[] := ARRAY['db', 'codex'];
@@ -71,10 +73,10 @@ BEGIN
         SELECT string_agg(line, E'\n' ORDER BY line)
           INTO inventory
           FROM (
-            SELECT 'owns database ' || datname AS line
+            SELECT 'owns database ' || datname::text AS line
               FROM pg_database WHERE datdba = r.oid
             UNION ALL
-            SELECT 'owns ' || c.relkind || ' ' || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+            SELECT 'owns ' || c.relkind::text || ' ' || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
               FROM pg_class c
               JOIN pg_namespace n ON n.oid = c.relnamespace
              WHERE c.relowner = r.oid
@@ -85,18 +87,18 @@ BEGIN
             SELECT 'owns function ' || p.oid::regprocedure::text
               FROM pg_proc p WHERE p.proowner = r.oid
             UNION ALL
-            SELECT 'member of ' || g.rolname
+            SELECT 'member of ' || g.rolname::text
               FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
-             WHERE m.member = r.oid
+             WHERE m.member = r.oid AND g.rolname <> 'tgw_coding'
             UNION ALL
-            SELECT 'granted to ' || g.rolname
+            SELECT 'granted to ' || g.rolname::text
               FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.member
              WHERE m.roleid = r.oid
             UNION ALL
             SELECT 'ACL reference in table ' || quote_ident(c.relname)
               FROM pg_class c WHERE c.relacl::text LIKE '%' || r.oid::text || '%'
             UNION ALL
-            SELECT 'ACL reference in database ' || datname
+            SELECT 'ACL reference in database ' || datname::text
               FROM pg_database WHERE datacl::text LIKE '%' || r.oid::text || '%'
             UNION ALL
             SELECT 'ACL reference in schema ' || quote_ident(n.nspname)
@@ -110,7 +112,13 @@ BEGIN
                 'refusing to retire obsolete login role % with ownership/dependencies:%',
                 r.rolname, E'\n' || inventory;
         END IF;
-        EXECUTE format('REVOKE tgw_coding FROM %I', r.rolname);
+        IF EXISTS (
+            SELECT 1 FROM pg_auth_members m
+            JOIN pg_roles g ON g.oid = m.roleid
+            WHERE m.member = r.oid AND g.rolname = 'tgw_coding'
+        ) THEN
+            EXECUTE format('REVOKE tgw_coding FROM %I', r.rolname);
+        END IF;
         EXECUTE format('DROP ROLE %I', r.rolname);
     END LOOP;
 END
