@@ -8,6 +8,7 @@ emits one stable object which every client can render.
 
 from __future__ import annotations
 
+import math
 from copy import deepcopy
 from typing import Any, Mapping, Sequence
 
@@ -93,12 +94,29 @@ def _validate_schema_value(schema: Mapping[str, Any], value: Any, label: str) ->
         if not isinstance(value, str):
             raise OperatorObjectBindingError(f"{label} must be a string")
         allowed = schema.get("enum")
-        if allowed is not None and (not isinstance(allowed, list) or value not in allowed):
-            raise OperatorObjectBindingError(f"{label} is not an allowed value")
+        if allowed is not None:
+            if not isinstance(allowed, list):
+                raise OperatorObjectBindingError(f"{label} has an invalid value schema")
+            if value not in allowed:
+                if schema.get("case_insensitive_enum") is True:
+                    canonical = next(
+                        (
+                            candidate
+                            for candidate in allowed
+                            if isinstance(candidate, str)
+                            and candidate.casefold() == value.casefold()
+                        ),
+                        None,
+                    )
+                    if canonical is not None:
+                        return canonical
+                raise OperatorObjectBindingError(f"{label} is not an allowed value")
         return value
     if field_type == "number":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise OperatorObjectBindingError(f"{label} must be a number")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise OperatorObjectBindingError(f"{label} must be a finite number")
         return value
     if field_type == "integer":
         if isinstance(value, bool) or not isinstance(value, int):
@@ -450,8 +468,23 @@ def build_item_operator_object(
         field_schema["condition"]["required_flag_valid"] = required_flag_valid
     if group_options or record_conditions:
         field_schema["item_fields"].update({
-            "condition": {"type": "string", "label": "Inventory condition", "value": canonical_record_condition,
-                          "options": [{"value": value, "label": value} for value in record_conditions]},
+            "condition": {
+                "type": "string",
+                "label": "Inventory condition",
+                "value": canonical_record_condition,
+                "options": [
+                    {"value": value, "label": value}
+                    for value in record_conditions
+                ],
+                **(
+                    {
+                        "enum": record_conditions,
+                        "case_insensitive_enum": True,
+                    }
+                    if record_conditions
+                    else {}
+                ),
+            },
             "category_group": {"type": "string", "label": "TGW category group", "value": item.get("category_group") or "", "options": group_options},
             "size_class": {"type": "string", "label": "Size class", "value": item.get("size_class") or ""},
             "ai_hint": {"type": "string", "label": "AI hint", "value": item.get("ai_hint") or ""},
@@ -488,7 +521,20 @@ def build_item_operator_object(
             "item_fields": {
                 "type": "object",
                 "additionalProperties": False,
-                "properties": {name: {key: value for key, value in descriptor.items() if key in {"type", "nullable"}} for name, descriptor in field_schema["item_fields"].items()},
+                "properties": {
+                    name: {
+                        key: value
+                        for key, value in descriptor.items()
+                        if key
+                        in {
+                            "type",
+                            "nullable",
+                            "enum",
+                            "case_insensitive_enum",
+                        }
+                    }
+                    for name, descriptor in field_schema["item_fields"].items()
+                },
             },
         },
     }

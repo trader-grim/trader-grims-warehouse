@@ -306,6 +306,59 @@ def test_optional_108857_keeps_independent_record_condition_and_global_vocabular
     assert commands["save-listing-draft"]["enabled"] is True
     assert commands["list-item"]["enabled"] is True
     assert commands["update-item"]["enabled"] is True
+    condition_schema = commands["save-inventory"]["input_schema"][
+        "properties"
+    ]["item_fields"]["properties"]["condition"]
+    assert condition_schema == {
+        "type": "string",
+        "enum": ["New", "Very Good", "Good"],
+        "case_insensitive_enum": True,
+    }
+    assert validate_operator_command_values(
+        published,
+        "save-inventory",
+        {"item_fields": {"condition": "good"}},
+    ) == {"item_fields": {"condition": "Good"}}
+    with pytest.raises(OperatorObjectBindingError, match="allowed value"):
+        validate_operator_command_values(
+            published,
+            "save-inventory",
+            {"item_fields": {"condition": "FABRICATED"}},
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("price", float("nan"), "finite number"),
+        ("price", float("inf"), "finite number"),
+        ("price", "12.5", "must be a number"),
+        ("quantity", "12items", "must be an integer"),
+        ("quantity", 12.5, "must be an integer"),
+        ("quantity", True, "must be an integer"),
+    ],
+)
+def test_save_listing_numeric_schema_rejects_nonfinite_and_type_confused_values(
+    field, value, message
+):
+    published = build_item_operator_object(
+        item=_item(),
+        workflow_card=_workflow_card(),
+        category_context=_category_context(),
+    )
+
+    with pytest.raises(OperatorObjectBindingError, match=message):
+        validate_operator_command_values(
+            published,
+            "save-listing-draft",
+            {"draft_listing": {field: value}},
+        )
+
+    assert validate_operator_command_values(
+        published,
+        "save-listing-draft",
+        {"draft_listing": {field: None}},
+    ) == {"draft_listing": {field: None}}
 
 
 @pytest.mark.parametrize(

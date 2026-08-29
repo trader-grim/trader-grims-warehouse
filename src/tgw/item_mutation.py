@@ -15,10 +15,11 @@ import os
 import tempfile
 import zipfile
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 DocumentMutator = Callable[[dict[str, JsonValue]], dict[str, JsonValue]]
@@ -177,6 +178,19 @@ def _operation_dir(journal_root: Path, operation_id: str) -> Path:
 
 def _item_lock_path(journal_root: Path, sku: str) -> Path:
     return journal_root / "locks" / f"{hashlib.sha256(sku.encode()).hexdigest()}.lock"
+
+
+@contextmanager
+def item_mutation_lock(*, journal_root: str | Path, sku: str) -> Iterator[None]:
+    """Serialize a canonical item read-mutate-write at the shared item lock."""
+    lock_path = _item_lock_path(Path(journal_root), sku)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _next_attempt_path(operation_dir: Path) -> Path:

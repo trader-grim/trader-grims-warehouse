@@ -45,7 +45,7 @@ from .ebay.description import build_listing_description
 from .ebay.draft_specifics import get_ebay_aspects, set_ebay_aspects
 from .ebay.draft_specifics import is_envelope as _is_ebay_draft_envelope
 from .ebay.inventory_diff import apply_inventory_diff, diff_ebay_draft_to_inventory
-from .item_mutation import item_generation
+from .item_mutation import item_generation, item_mutation_lock
 from .items import _archive_before_overwrite, atomic_write_json, create_item, locationupdate
 from .operator_console_host import configured_authority_principal, configured_console_mount
 from .operator_console_plugin import mount_operator_console
@@ -708,6 +708,7 @@ def _sqlite_conn() -> sqlite3.Connection:
 
 class PatchBody(BaseModel):
     fields: Dict[str, Any]
+    expected_generation: Optional[str] = None
 
 
 class ActionBody(BaseModel):
@@ -1281,7 +1282,10 @@ def execute_item_operator_command(
         if patch_fields:
             patch_item(
                 sku,
-                PatchBody(fields=patch_fields),
+                PatchBody(
+                    fields=patch_fields,
+                    expected_generation=body.object_generation,
+                ),
                 Request({
                     "type": "http",
                     "headers": [],
@@ -1678,7 +1682,22 @@ def patch_item(
                 },
             )
 
-    updated_keys, resulting_generation = _apply_patch(json_path, body.fields)
+    try:
+        updated_keys, resulting_generation = _apply_patch(
+            json_path,
+            body.fields,
+            expected_generation=body.expected_generation,
+        )
+    except _ItemGenerationConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "generation_conflict",
+                "expected": exc.observed,
+                "received": exc.expected,
+                "refresh": f"/api/operator/items/{sku}",
+            },
+        ) from exc
 
     # Price edits leave a history trail (session 42): manual/UI price changes
     # previously appended nothing to price_history — Dave's $82.99 and every
@@ -1950,7 +1969,15 @@ def _enqueue_thumbnail_gen(sku: str, reason: str) -> None:
         log.warning("thumbnail_gen enqueue failed for %s (%s)", sku, reason)
 
 
-def _persist_finding(json_path: "Path", sku: str, code: str, detail: str, source: str) -> None:
+def _persist_finding(
+    json_path: "Path",
+    sku: str,
+    code: str,
+    detail: str,
+    source: str,
+    *,
+    item_lock_held: bool = False,
+) -> None:
     """Write a C11 guard finding to pipeline_error — a persisted, queryable
     reason the pipeline skipped/failed something, never just a log line.
     Canonical {code, detail, ts, source} shape (see draft_sync.py,
@@ -1976,15 +2003,61 @@ def _persist_finding(json_path: "Path", sku: str, code: str, detail: str, source
                 }
             },
             _skip_catalog_upsert=True,
+            _item_lock_held=item_lock_held,
         )
     except Exception:
         log.exception("failed to persist %s finding for %s", code, sku)
+
+
+class _ItemGenerationConflict(RuntimeError):
+    def __init__(self, *, expected: str, observed: str) -> None:
+        super().__init__("expected item generation is stale")
+        self.expected = expected
+        self.observed = observed
+
+
+def _item_mutation_journal_root(json_path: "Path") -> Path:
+    configured = _cfg.get("item_mutation_journal_root")
+    if configured is not None:
+        return Path(configured)
+    itemdata_root = Path(_cfg.get("itemdata_root", json_path.parent.parent))
+    return itemdata_root.parent / "var" / "item-mutations"
 
 
 def _apply_patch(
     json_path: "Path",
     fields: Dict[str, Any],
     _skip_catalog_upsert: bool = False,
+    *,
+    expected_generation: Optional[str] = None,
+    _item_lock_held: bool = False,
+) -> Tuple[List[str], str]:
+    """Apply an item patch under the shared per-item mutation lock."""
+    if _item_lock_held:
+        return _apply_patch_locked(
+            json_path,
+            fields,
+            _skip_catalog_upsert,
+            expected_generation=expected_generation,
+        )
+    with item_mutation_lock(
+        journal_root=_item_mutation_journal_root(json_path),
+        sku=json_path.stem,
+    ):
+        return _apply_patch_locked(
+            json_path,
+            fields,
+            _skip_catalog_upsert,
+            expected_generation=expected_generation,
+        )
+
+
+def _apply_patch_locked(
+    json_path: "Path",
+    fields: Dict[str, Any],
+    _skip_catalog_upsert: bool = False,
+    *,
+    expected_generation: Optional[str] = None,
 ) -> Tuple[List[str], str]:
     """Core item patch: deep-merge dict fields, write atomically, schedule rebuild.
 
@@ -2013,6 +2086,15 @@ def _apply_patch(
     # and CI-1's mutation-audit stream.
     _original_field_keys = list(fields.keys())
     doc = load_item_doc(json_path)
+    observed_generation = item_generation(doc)
+    if (
+        expected_generation is not None
+        and observed_generation != expected_generation
+    ):
+        raise _ItemGenerationConflict(
+            expected=expected_generation,
+            observed=observed_generation,
+        )
     _before_doc = dict(doc)
     for dmk in ("draft_listing", "item_attributes"):
         if dmk in fields and isinstance(fields[dmk], dict):
@@ -2148,6 +2230,7 @@ def _apply_patch(
                 "sqlite_catalog_upsert_failed",
                 f"SQLite catalog upsert failed after write: {_uc_exc}",
                 "apply_patch",
+                item_lock_held=True,
             )
     _changed_keys = _original_field_keys
     # Publish to audit stream (PP-AIOPS-001 Phase 1 / PP-CATALOG-INCR-001 CI-1) —
