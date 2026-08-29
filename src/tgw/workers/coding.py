@@ -330,7 +330,6 @@ def _archive_prior_implementation_receipt(
         existing.get("status") != "FAIL"
         or existing.get("treatment_id") != "codex-implement"
         or existing.get("outcome") not in {OUTCOME_PARTIAL, OUTCOME_FAILED}
-        or existing.get("implementation_attempt_hash") != predecessor
         or existing.get("plan_binding") != receipt.get("plan_binding")
         or existing.get("object_id") != receipt.get("object_id")
     ):
@@ -342,12 +341,90 @@ def _archive_prior_implementation_receipt(
     if not old_has_lifecycle and not new_has_lifecycle:
         # Compatibility is deliberately preservation-only. It cannot replace
         # a projection, cross into a lifecycle generation, or authorize a
-        # lifecycle supervisor transition.
+        # lifecycle supervisor transition. The fixed projection can remain an
+        # older generation, so bind it and the new result independently to the
+        # canonical append-only attempt chain instead of treating the
+        # projection as the immediately preceding attempt.
+        try:
+            attempts = history(path.parent)
+        except (OSError, TypeError, ValueError, AttributeError) as exc:
+            raise HardFailure(
+                "record-less coding implementation lineage is invalid"
+            ) from exc
+        stable_fields = (
+            "todo_id",
+            "plan_commit",
+            "solution_hash",
+            "source_commit",
+            "source_tree",
+            "actor",
+            "worktree",
+            "treatment_id",
+            "treatment_version",
+        )
+
+        def binds_attempt(value: dict[str, Any], attempt: dict[str, Any]) -> bool:
+            plan = value.get("plan_binding")
+            return (
+                isinstance(plan, dict)
+                and value.get("status") == "FAIL"
+                and value.get("receipt_schema_id") == "receipt/tgw-development/v1"
+                and value.get("treatment_id") == attempt.get("treatment_id")
+                and value.get("treatment_version") == attempt.get("treatment_version")
+                and value.get("object_id") == attempt.get("worktree")
+                and value.get("outcome") == attempt.get("outcome")
+                and value.get("established_conditions") == []
+                and value.get("artifacts") == attempt.get("artifacts")
+                and value.get("implementation_attempt_hash")
+                == attempt.get("attempt_hash")
+                and all(
+                    plan.get(field) == attempt.get(field)
+                    for field in (
+                        "plan_commit",
+                        "solution_hash",
+                        "source_commit",
+                        "worktree",
+                    )
+                )
+            )
+
+        projected = attempts[0] if attempts else None
+        latest = attempts[-1] if attempts else None
+        if (
+            len(attempts) < 2
+            or projected is None
+            or latest is None
+            or existing.get("implementation_attempt_hash")
+            != projected.get("attempt_hash")
+            or predecessor != attempts[-2].get("attempt_hash")
+            or latest.get("predecessor") != predecessor
+            or receipt.get("implementation_attempt_hash")
+            != latest.get("attempt_hash")
+            or any(
+                attempts[0].get(field) in (None, "")
+                for field in stable_fields
+            )
+            or any(
+                attempt.get(field) != attempts[0].get(field)
+                for attempt in attempts
+                for field in stable_fields
+            )
+            or any(
+                attempt.get("outcome") not in {OUTCOME_PARTIAL, OUTCOME_FAILED}
+                for attempt in attempts
+            )
+            or not binds_attempt(existing, projected)
+            or not binds_attempt(receipt, latest)
+        ):
+            raise HardFailure(
+                "prior coding implementation receipt does not bind the archived generation"
+            )
         return False
     if (
         old_has_lifecycle != new_has_lifecycle
         or not isinstance(old_lifecycle, dict)
         or not isinstance(new_lifecycle, dict)
+        or existing.get("implementation_attempt_hash") != predecessor
         or any(
             old_lifecycle.get(field) != new_lifecycle.get(field)
             for field in stable_fence_fields

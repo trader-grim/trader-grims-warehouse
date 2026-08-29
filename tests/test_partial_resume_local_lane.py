@@ -13,6 +13,7 @@ import pytest
 
 from tgw.development.partial_resume import (
     append_attempt,
+    candidate_changed_paths,
     classify,
     history,
     make_attempt,
@@ -918,6 +919,299 @@ def test_recordless_resume_preserves_projection_across_second_partial(
     assert "coding_lifecycle" not in failure.value.result
 
 
+@pytest.mark.parametrize(
+    ("partial_count", "terminal"),
+    [
+        (3, "success"),
+        (5, "success"),
+        (3, "mechanical_failure"),
+        (3, "cancelled"),
+    ],
+)
+def test_recordless_queue_worker_preserves_arbitrary_partial_lineage(
+    tmp_path: Path,
+    monkeypatch,
+    partial_count: int,
+    terminal: str,
+) -> None:
+    """Exercise the inherited queue seam, not hand-seeded terminal rows."""
+    from tgw.workers.coding import CodingWorker
+
+    root, head, tree = _repo(tmp_path)
+    plan_binding = {
+        "plan_commit": "a" * 40,
+        "solution_hash": "sha256:" + "b" * 64,
+        "source_commit": head,
+        "worktree": str(root),
+        "worktree_identity": {},
+    }
+    base_payload = {
+        "treatment_id": "codex-implement",
+        "treatment_version": "1",
+        "todo_id": 1752,
+        "todo_agent": "codex",
+        "graph_id": "recordless-queue-canary",
+        "object_generation": "recordless-generation",
+        "worktree": str(root),
+        "object_id": str(root),
+        "plan_binding": plan_binding,
+    }
+    expected = {
+        **_binding(root, head, tree),
+        "job_id": None,
+        "attempt_count": None,
+    }
+    config = {
+        "postgres_dsn": "disposable-recordless-canary",
+        "coding": {
+            "worktree_root": str(root.parent),
+            "repository_root": str(root),
+        },
+    }
+    rows: dict[str, dict] = {}
+
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.init", lambda _dsn: None
+    )
+    monkeypatch.setattr("tgw.apis.nats_client.init_nats", lambda _config: None)
+    monkeypatch.setattr("tgw.notify.notify", lambda *_args, **_kwargs: None)
+
+    def queue_row(job_id: str) -> dict | None:
+        return rows.get(job_id)
+
+    def mark_running(job_id: str, owner: str, lease_token: str) -> None:
+        rows[job_id].update(
+            state="running", lease_owner=owner, lease_token=lease_token
+        )
+
+    def mark_dead_letter(
+        job_id: str,
+        _owner: str,
+        _lease_token: str,
+        detail: str,
+        *,
+        result=None,
+    ) -> None:
+        row = rows[job_id]
+        row.update(
+            state="dead_letter",
+            error_code="HARD_FAILURE",
+            error_detail=detail,
+            finished_at="2026-08-28T00:00:00+00:00",
+            lease_owner=None,
+            lease_token=None,
+        )
+        row["payload_json"]["result"] = result
+
+    def close_local_success(
+        job_id: str,
+        _owner: str,
+        _lease_token: str,
+        result: dict,
+        publish,
+    ) -> bool:
+        compensators = []
+        publish(compensators.append)
+        assert len(compensators) == 1
+        row = rows[job_id]
+        row.update(
+            state="succeeded",
+            error_code=None,
+            error_detail=None,
+            finished_at="2026-08-28T00:01:00+00:00",
+            lease_owner=None,
+            lease_token=None,
+        )
+        row["payload_json"]["result"] = result
+        return True
+
+    def acknowledge_cancellation(job_id: str, acknowledgement: dict) -> dict:
+        rows[job_id]["cancellation_ack"] = acknowledgement
+        return acknowledgement
+
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.mark_running", mark_running
+    )
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.mark_dead_letter", mark_dead_letter
+    )
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.close_local_success",
+        close_local_success,
+    )
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.get_job", queue_row
+    )
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.acknowledge_cancellation",
+        acknowledge_cancellation,
+    )
+
+    def process(index: int, payload: dict, launcher) -> dict:
+        job_id = f"recordless-job-{index}"
+        job = {
+            "job_id": job_id,
+            "queue_name": "codex-implement",
+            "state": "queued",
+            "attempt_count": index,
+            "lease_token": (
+                "00000000-0000-4000-8000-" f"{index:012d}"
+            ),
+            "payload_json": dict(payload),
+        }
+        rows[job_id] = job
+        worker = CodingWorker("codex-implement", config, launcher=launcher)
+        monkeypatch.setattr(
+            worker,
+            "_validated_plan_binding",
+            lambda _payload, _worktree: plan_binding,
+        )
+        worker._process(job)
+        return job
+
+    fixed_projection = None
+    for index in range(1, partial_count + 1):
+        payload = dict(base_payload)
+        if index > 1:
+            state = classify(root, expected)
+            assert state["state"] == "RESUMABLE_PARTIAL"
+            payload.update(
+                resume_of=state["resume_of"],
+                resume_fingerprint=state["fingerprint"],
+            )
+
+        def partial(_treatment, _payload, selected_worktree, *, generation=index):
+            (selected_worktree / "partial.py").write_text(
+                "partial = True\n", encoding="utf-8"
+            )
+            return {
+                "outcome": "partial",
+                "established_conditions": [],
+                "artifacts": [
+                    {"kind": "recordless_partial", "generation": generation}
+                ],
+            }
+
+        row = process(index, payload, partial)
+        attempts = history(root)
+        result = row["payload_json"]["result"]
+        assert row["state"] == "dead_letter"
+        assert result["implementation_attempt_hash"] == attempts[-1][
+            "attempt_hash"
+        ]
+        assert "coding_lifecycle" not in result
+        if fixed_projection is None:
+            fixed_projection = (root / "implementation-receipt.json").read_bytes()
+        else:
+            assert (root / "implementation-receipt.json").read_bytes() == (
+                fixed_projection
+            )
+
+    terminal_payload = dict(base_payload)
+    resumable = classify(root, expected)
+    terminal_payload.update(
+        resume_of=resumable["resume_of"],
+        resume_fingerprint=resumable["fingerprint"],
+    )
+    terminal_index = partial_count + 1
+    if terminal == "cancelled":
+
+        def cancel_before_publication(_treatment, _payload, _worktree):
+            rows[f"recordless-job-{terminal_index}"]["state"] = "cancelled"
+            return {
+                "outcome": "partial",
+                "established_conditions": [],
+                "artifacts": [{"kind": "must_not_publish"}],
+            }
+
+        terminal_row = process(
+            terminal_index, terminal_payload, cancel_before_publication
+        )
+        assert terminal_row["state"] == "cancelled"
+        assert terminal_row["cancellation_ack"]["job_id"] == (
+            f"recordless-job-{terminal_index}"
+        )
+        assert [item["outcome"] for item in history(root)] == [
+            "partial"
+        ] * partial_count
+        assert (root / "implementation-receipt.json").read_bytes() == (
+            fixed_projection
+        )
+        assert "result" not in terminal_row["payload_json"]
+        return
+    if terminal == "mechanical_failure":
+        terminal_row = process(
+            terminal_index,
+            terminal_payload,
+            lambda *_args: (_ for _ in ()).throw(RuntimeError("later crash")),
+        )
+        attempts = history(root)
+        assert terminal_row["state"] == "dead_letter"
+        assert terminal_row["payload_json"]["result"]["outcome"] == "failed"
+        assert terminal_row["payload_json"]["result"][
+            "implementation_attempt_hash"
+        ] == attempts[-1]["attempt_hash"]
+        assert [item["outcome"] for item in attempts] == [
+            *(["partial"] * partial_count),
+            "failed",
+        ]
+        assert (root / "implementation-receipt.json").read_bytes() == (
+            fixed_projection
+        )
+        return
+
+    def close_candidate(_treatment, _payload, selected_worktree):
+        subprocess.run(
+            ["git", "add", "partial.py"], cwd=selected_worktree, check=True
+        )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Disposable Recordless Canary",
+                "-c",
+                "user.email=canary@example.invalid",
+                "commit",
+                "-m",
+                "close recordless canary",
+            ],
+            cwd=selected_worktree,
+            check=True,
+            capture_output=True,
+        )
+        candidate = source_fingerprint(selected_worktree)
+        return {
+            "outcome": "satisfied",
+            "established_conditions": ["implemented"],
+            "artifacts": [
+                {
+                    "kind": "closed_candidate",
+                    "commit": candidate["head"],
+                    "tree": candidate["tree"],
+                    "base_commit": head,
+                    "changed_paths": candidate_changed_paths(
+                        selected_worktree, head, candidate["head"]
+                    ),
+                }
+            ],
+        }
+
+    terminal_row = process(terminal_index, terminal_payload, close_candidate)
+    attempts = history(root)
+    assert terminal_row["state"] == "succeeded"
+    assert [item["outcome"] for item in attempts] == [
+        *(["partial"] * partial_count),
+        "satisfied",
+    ]
+    assert classify(root, expected)["state"] == "CLOSED_CANDIDATE"
+    projection = json.loads(
+        (root / "implementation-receipt.json").read_text(encoding="utf-8")
+    )
+    assert projection["status"] == "PASS"
+    assert projection["outcome"] == "satisfied"
+    assert "coding_lifecycle" not in projection
+
+
 @pytest.mark.parametrize(("old_lifecycle", "new_lifecycle"), [(None, {}), ({}, None)])
 def test_recordless_receipt_preservation_cannot_cross_lifecycle_boundary(
     tmp_path: Path,
@@ -982,6 +1276,141 @@ def test_recordless_receipt_preservation_rejects_forged_predecessor(
         match="does not bind the archived generation",
     ):
         _write_receipt(path, dict(prior), predecessor=predecessor)
+    assert path.read_bytes() == fixed
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing_history",
+        "forged_history",
+        "reordered_history",
+        "branched_history",
+        "stale_predecessor",
+        "projection_not_first",
+        "forged_replacement",
+    ],
+)
+def test_recordless_receipt_preservation_rejects_noncanonical_lineage(
+    tmp_path: Path,
+    defect: str,
+) -> None:
+    from tgw.errors import HardFailure
+    from tgw.workers.coding import _write_receipt
+
+    root, head, tree = _repo(tmp_path)
+    (root / "partial.py").write_text("partial = True\n", encoding="utf-8")
+    attempts = []
+    predecessor = None
+    for generation in range(1, 4):
+        attempt = make_attempt(
+            _binding(
+                root,
+                head,
+                tree,
+                job=f"job-{generation}",
+                count=generation,
+            ),
+            root,
+            outcome="partial",
+            predecessor=predecessor,
+            artifacts=[
+                {"kind": "recordless_partial", "generation": generation}
+            ],
+        )
+        append_attempt(root, attempt)
+        attempts.append(attempt)
+        predecessor = attempt["attempt_hash"]
+
+    plan = {
+        "plan_commit": attempts[0]["plan_commit"],
+        "solution_hash": attempts[0]["solution_hash"],
+        "source_commit": attempts[0]["source_commit"],
+        "worktree": attempts[0]["worktree"],
+    }
+
+    def receipt(attempt: dict) -> dict:
+        return {
+            "status": "FAIL",
+            "treatment_id": "codex-implement",
+            "treatment_version": attempt["treatment_version"],
+            "graph_id": "recordless-adversarial",
+            "object_id": str(root),
+            "object_generation": "recordless-generation",
+            "outcome": attempt["outcome"],
+            "established_conditions": [],
+            "artifacts": attempt["artifacts"],
+            "receipt_schema_id": "receipt/tgw-development/v1",
+            "plan_binding": plan,
+            "implementation_attempt_hash": attempt["attempt_hash"],
+        }
+
+    prior = receipt(attempts[0])
+    replacement = receipt(attempts[-1])
+    supplied_predecessor = attempts[-2]["attempt_hash"]
+    paths = sorted(
+        (root / ".tgw-coding-history" / "implementation").glob("*.json")
+    )
+
+    if defect == "missing_history":
+        paths[1].unlink()
+    elif defect == "forged_history":
+        value = json.loads(paths[1].read_text(encoding="utf-8"))
+        value["artifacts"] = [{"kind": "forged"}]
+        paths[1].unlink()
+        paths[1].write_text(
+            json.dumps(value, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    elif defect == "reordered_history":
+        paths[1].rename(
+            paths[1].with_name("000004-" + paths[1].name.split("-", 1)[1])
+        )
+    elif defect == "branched_history":
+        value = json.loads(paths[-1].read_text(encoding="utf-8"))
+        value["predecessor"] = attempts[0]["attempt_hash"]
+        value.pop("attempt_hash")
+        value["attempt_hash"] = "sha256:" + hashlib.sha256(
+            json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode()
+        ).hexdigest()
+        paths[-1].unlink()
+        branch = paths[-1].with_name(
+            "000003-"
+            + value["attempt_hash"].removeprefix("sha256:")
+            + ".json"
+        )
+        branch.write_text(
+            json.dumps(value, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    elif defect == "stale_predecessor":
+        supplied_predecessor = attempts[0]["attempt_hash"]
+    elif defect == "projection_not_first":
+        prior = receipt(attempts[1])
+    elif defect == "forged_replacement":
+        replacement["implementation_attempt_hash"] = attempts[1][
+            "attempt_hash"
+        ]
+
+    path = root / "implementation-receipt.json"
+    path.write_text(json.dumps(prior, sort_keys=True) + "\n", encoding="utf-8")
+    fixed = path.read_bytes()
+
+    with pytest.raises(
+        HardFailure,
+        match=(
+            "record-less coding implementation lineage is invalid|"
+            "prior coding implementation receipt does not bind"
+        ),
+    ):
+        _write_receipt(
+            path,
+            replacement,
+            predecessor=supplied_predecessor,
+        )
     assert path.read_bytes() == fixed
 
 
