@@ -285,24 +285,28 @@ def run_local_review(
     }
 
 
-def validate_review_artifact(
+def _validate_bound_review_artifact(
     value: object,
     *,
     payload: Mapping[str, Any],
     worktree: Path,
     expected_job_id: str,
+    passed: bool,
 ) -> dict[str, Any]:
-    """Validate semantic review evidence independently of queue state."""
+    """Validate exact positive or diagnostic-negative semantic evidence."""
 
     if not isinstance(value, Mapping):
         raise ReviewRunnerError("review launcher result is not an object")
-    if value.get("outcome") != "satisfied" or value.get(
-        "established_conditions"
-    ) != ["reviewed"]:
-        raise ReviewRunnerError("review success conditions are absent")
+    expected_outcome = "satisfied" if passed else "failed"
+    expected_conditions = ["reviewed"] if passed else []
+    if (
+        value.get("outcome") != expected_outcome
+        or value.get("established_conditions") != expected_conditions
+    ):
+        raise ReviewRunnerError("review outcome conditions are contradictory")
     artifacts = value.get("artifacts")
     if not isinstance(artifacts, list) or len(artifacts) != 1:
-        raise ReviewRunnerError("review success requires one report artifact")
+        raise ReviewRunnerError("review requires one report artifact")
     artifact = artifacts[0]
     lifecycle = payload.get("coding_lifecycle")
     candidate = payload.get("coding_candidate")
@@ -319,7 +323,8 @@ def validate_review_artifact(
     checks = artifact.get("checks")
     if (
         artifact.get("kind") != "tgw_review_report"
-        or artifact.get("diagnostic_verdict") != _VERDICT
+        or artifact.get("diagnostic_verdict")
+        != (_VERDICT if passed else "FAIL")
         or artifact.get("root_id") != lifecycle.get("root_id")
         or artifact.get("binding_hash") != lifecycle.get("binding_hash")
         or artifact.get("job_binding_hash") != lifecycle.get("job_binding_hash")
@@ -424,9 +429,48 @@ def validate_review_artifact(
     ):
         raise ReviewRunnerError("review execution context binding is invalid")
     validated = validate_review_report(dict(report), snapshot_hash, worktree)
-    if validated["verdict"] != "PASS" or validated["findings"]:
-        raise ReviewRunnerError("review did not return PASS with zero findings")
+    if passed:
+        if validated["verdict"] != "PASS" or validated["findings"]:
+            raise ReviewRunnerError("review did not return PASS with zero findings")
+    elif validated["verdict"] != "FAIL" or not validated["findings"]:
+        raise ReviewRunnerError("failed review has no diagnostic findings")
     return dict(artifact)
+
+
+def validate_review_artifact(
+    value: object,
+    *,
+    payload: Mapping[str, Any],
+    worktree: Path,
+    expected_job_id: str,
+) -> dict[str, Any]:
+    """Validate semantic PASS evidence independently of queue state."""
+
+    return _validate_bound_review_artifact(
+        value,
+        payload=payload,
+        worktree=worktree,
+        expected_job_id=expected_job_id,
+        passed=True,
+    )
+
+
+def validate_failed_review_artifact(
+    value: object,
+    *,
+    payload: Mapping[str, Any],
+    worktree: Path,
+    expected_job_id: str,
+) -> dict[str, Any]:
+    """Validate a diagnostic FAIL before it may request code remediation."""
+
+    return _validate_bound_review_artifact(
+        value,
+        payload=payload,
+        worktree=worktree,
+        expected_job_id=expected_job_id,
+        passed=False,
+    )
 
 
 def main() -> int:

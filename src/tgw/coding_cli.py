@@ -952,8 +952,7 @@ def _queue_evidence(
     row = terminal[0]
     if row.get("state") != "succeeded":
         worktree = Path(record["binding"]["worktree"])
-        failed_receipt: dict[str, Any] | None = None
-        failed_sha256: str | None = None
+        payload = row.get("payload_json") or row.get("payload")
         try:
             failed_receipt, failed_sha256 = _receipt_file(
                 worktree / receipt_name
@@ -961,16 +960,96 @@ def _queue_evidence(
             coding_lifecycle.validate_job_binding(
                 record, failed_receipt.get("coding_lifecycle")
             )
-        except (CodingCLIError, coding_lifecycle.LifecycleError):
-            failed_receipt = None
-            failed_sha256 = None
-        detail = None
-        if failed_receipt is not None:
-            detail = "; ".join(
-                str(item.get("detail"))
-                for item in failed_receipt.get("artifacts", [])
-                if isinstance(item, Mapping) and item.get("detail")
+            if (
+                failed_receipt.get("status") != "FAIL"
+                or failed_receipt.get("outcome") != "failed"
+                or failed_receipt.get("established_conditions") != []
+                or failed_receipt.get("treatment_id") != queue_name
+                or failed_receipt.get("plan_binding")
+                != record["binding"]["plan_todo_binding"]
+            ):
+                raise CodingCLIError(
+                    f"{queue_name} negative receipt is stale or contradictory"
+                )
+        except (CodingCLIError, coding_lifecycle.LifecycleError) as exc:
+            return _stage(
+                record,
+                stage,
+                "failed",
+                reason=(
+                    f"{queue_name} terminal job has no exact negative receipt: {exc}"
+                ),
+                job_ids=ids,
             )
+        findings: list[dict[str, Any]] = []
+        artifacts = failed_receipt.get("artifacts")
+        if not isinstance(artifacts, list):
+            return _stage(
+                record,
+                stage,
+                "failed",
+                reason=f"{queue_name} negative receipt artifacts are invalid",
+                job_ids=ids,
+            )
+        detail = "; ".join(
+            str(item.get("detail"))
+            for item in artifacts
+            if isinstance(item, Mapping) and item.get("detail")
+        )
+        if stage == "review":
+            if not isinstance(payload, Mapping):
+                return _stage(
+                    record,
+                    stage,
+                    "failed",
+                    reason="failed review queue payload is unavailable",
+                    job_ids=ids,
+                )
+            from tgw.development.coding_review import (
+                validate_failed_review_artifact,
+            )
+            from tgw.review_contract import ReviewRunnerError
+
+            try:
+                if any(
+                    failed_receipt.get(key) != payload.get(key)
+                    for key in (
+                        "plan_binding",
+                        "coding_lifecycle",
+                        "coding_candidate",
+                        "task_spec",
+                    )
+                ):
+                    raise ReviewRunnerError(
+                        "failed review receipt differs from its queue bindings"
+                    )
+                artifact = validate_failed_review_artifact(
+                    failed_receipt,
+                    payload=payload,
+                    worktree=worktree,
+                    expected_job_id=str(row["job_id"]),
+                )
+            except ReviewRunnerError as exc:
+                return _stage(
+                    record,
+                    stage,
+                    "failed",
+                    reason=f"failed independent review evidence is invalid: {exc}",
+                    job_ids=ids,
+                )
+            findings = [dict(item) for item in artifact["report"]["findings"]]
+            detail = "; ".join(
+                f"{item.get('severity', 'unknown')} "
+                f"{item.get('path', '<unknown>')}:{item.get('line', 1)} "
+                f"{item.get('message', '')}"
+                for item in findings
+            )
+            candidate = {
+                "head": artifact["candidate_commit"],
+                "tree": artifact["candidate_tree"],
+            }
+        else:
+            candidate = source_fingerprint(worktree)
         evidence = {
             "schema": "tgw-local-coding-negative-queue-evidence/v1",
             "root_id": record["root_id"],
@@ -981,7 +1060,8 @@ def _queue_evidence(
             "receipt_file": str(worktree / receipt_name),
             "receipt_file_sha256": failed_sha256,
             "result": failed_receipt,
-            "candidate": source_fingerprint(worktree),
+            "candidate": candidate,
+            **({"findings": findings} if findings else {}),
         }
         return _stage(
             record, stage, "remediation",

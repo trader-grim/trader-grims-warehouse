@@ -4703,7 +4703,9 @@ def repair_context(
             "commit": task_source,
             "tree": task.get("implementation", {}).get("development_source", {}).get("tree"),
             "state": task.get("implementation", {}).get("development_source", {}).get("state"),
-            "task_source": task.get("source"),
+            # History must retain predecessor bytes after the live projection
+            # is advanced below; never retain a mutable alias into ``task``.
+            "task_source": json.loads(json.dumps(task.get("source"))),
         }
         implementation = task.setdefault("implementation", {})
         if not isinstance(implementation, dict):

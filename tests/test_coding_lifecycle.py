@@ -26,7 +26,11 @@ from tgw.development.coding_lifecycle import (
     stage_result,
     validate_job_binding_payload,
 )
-from tgw.development.coding_review import run_local_review, validate_review_artifact
+from tgw.development.coding_review import (
+    run_local_review,
+    validate_failed_review_artifact,
+    validate_review_artifact,
+)
 from tgw.development.coding_root_effect import (
     RootEffectError,
     RootEffectPaths,
@@ -552,6 +556,12 @@ def test_controller_finding_automatically_starts_one_fenced_remediation_generati
 ) -> None:
     store = store_at(tmp_path / "journal")
     record = new(store)
+    resume_intent = {
+        "schema": "tgw-local-coding-lifecycle-resume-intent/v1",
+        "resume_intent_hash": "sha256:" + "8" * 64,
+    }
+    record["resume_intent"] = resume_intent
+    record = store.put(record)
     original_fence = job_binding(record)
     implementation_calls = 0
 
@@ -597,6 +607,8 @@ def test_controller_finding_automatically_starts_one_fenced_remediation_generati
     assert len(observed["remediation_history"]) == 1
     assert observed["remediation_intent"]["failed_stage"] == "controller"
     assert observed["remediation_intent"]["candidate_commit"] == "e" * 40
+    assert "resume_intent" not in observed
+    assert observed["remediation_history"][0]["resume_intent"] == resume_intent
     assert job_binding(observed) != original_fence
 
 
@@ -808,7 +820,16 @@ def test_review_runner_and_both_receipt_boundaries_require_semantic_pass(
     assert failed["outcome"] == "failed"
     assert failed["established_conditions"] == []
     assert failed["artifacts"][0]["diagnostic_verdict"] == "FAIL"
-    with pytest.raises(ReviewRunnerError, match="success conditions"):
+    failed_artifact = validate_failed_review_artifact(
+        failed,
+        payload=payload,
+        worktree=worktree,
+        expected_job_id="review-job",
+    )
+    assert failed_artifact["report"]["findings"][0]["message"] == (
+        "bounded task behavior is incomplete"
+    )
+    with pytest.raises(ReviewRunnerError, match="outcome conditions"):
         validate_review_artifact(
             failed,
             payload=payload,
@@ -859,6 +880,55 @@ def test_review_runner_and_both_receipt_boundaries_require_semantic_pass(
         dispatch=lambda: None,
     )
     assert refused["outcome"] == "remediation"
+
+    failed_receipt = {
+        **failed,
+        "status": "FAIL",
+        "treatment_id": "claude-review",
+        "plan_binding": payload["plan_binding"],
+        "coding_lifecycle": payload["coding_lifecycle"],
+        "coding_candidate": payload["coding_candidate"],
+        "task_spec": payload["task_spec"],
+    }
+    (worktree / "review-receipt.json").write_text(json.dumps(failed_receipt))
+    rows[:] = [
+        {
+            "job_id": "review-job",
+            "queue_name": "claude-review",
+            "state": "failed",
+            "attempt_count": 1,
+            "payload_json": payload,
+        }
+    ]
+    negative = coding_cli._queue_evidence(
+        record,
+        stage="review",
+        queue_name="claude-review",
+        receipt_name="review-receipt.json",
+        dispatch=lambda: None,
+    )
+    assert negative["outcome"] == "remediation"
+    assert "bounded task behavior is incomplete" in negative["reason"]
+    assert negative["receipt"]["findings"] == failed_artifact["report"]["findings"]
+    transitioned = dict(record)
+    assert coding_lifecycle._begin_bounded_remediation(
+        transitioned, stage="review", result=negative
+    )
+    assert transitioned["remediation_intent"]["diagnostic_findings"] == (
+        failed_artifact["report"]["findings"]
+    )
+
+    failed_receipt["artifacts"][0]["job_id"] = "forged-review-job"
+    (worktree / "review-receipt.json").write_text(json.dumps(failed_receipt))
+    rejected = coding_cli._queue_evidence(
+        record,
+        stage="review",
+        queue_name="claude-review",
+        receipt_name="review-receipt.json",
+        dispatch=lambda: None,
+    )
+    assert rejected["outcome"] == "failed"
+    assert "invalid" in rejected["reason"]
 
 
 def test_root_request_rejects_forbidden_fields_and_is_idempotent_after_recovery(

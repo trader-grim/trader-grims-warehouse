@@ -4179,8 +4179,17 @@ def test_explicit_exact_context_repair_reconciles_stale_task_source_without_auth
         "CANONICAL_SOURCE_ADVANCED_RECONCILIATION_PENDING"
     )
     assert history[-1]["previous"]["commit"] == stale_commit
+    assert history[-1]["previous"]["task_source"] == {
+        "repository": str(paths.repository),
+        "commit": stale_commit,
+        "tree": stale_tree,
+        "canonical_working_tree_clean": True,
+    }
     assert history[-1]["successor"] == {"commit": head, "tree": tree}
     assert history[-1]["authority"] is False
+    reconciliation = dict(history[-1])
+    claimed_hash = reconciliation.pop("reconciliation_hash")
+    assert claimed_hash == doctor_cli._hash(reconciliation)
     assert repaired_cursor["source_commit"] == head
     assert repaired_cursor["source_tree"] == tree
 

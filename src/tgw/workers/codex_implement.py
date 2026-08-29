@@ -147,14 +147,22 @@ clean, reset, stash, or replace the existing implementation.
     remediation_brief = ""
     remediation = task.get("remediation")
     if isinstance(remediation, dict):
+        findings = remediation.get("diagnostic_findings")
+        findings_brief = (
+            json.dumps(findings, sort_keys=True, indent=2)
+            if isinstance(findings, list) and findings
+            else "[]"
+        )
         remediation_brief = f"""
 This is remediation generation {remediation.get("generation")} for the exact
 closed candidate {remediation.get("candidate_commit")}. Address the diagnostic
-finding below by producing one clean successor. Do not restart the original
+findings below by producing one clean successor. Do not restart the original
 implementation or change unrelated behavior.
 
 Failed stage: {remediation.get("failed_stage")}
-Finding: {remediation.get("reason")}
+Summary: {remediation.get("reason")}
+Validated findings:
+{findings_brief}
 Evidence: {remediation.get("failure_receipt_hash")}
 """
     return f"""You are the Codex implementation treatment for TGW Todo #{task["todo_id"]}.

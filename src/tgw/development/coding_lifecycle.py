@@ -201,11 +201,14 @@ def job_binding(record: Mapping[str, Any]) -> dict[str, Any]:
         "execution_root_identity": binding["execution_root_identity"],
         "card_idempotency_key": binding["card_idempotency_key"],
         "closure_hash": binding["closure_hash"],
+        # A remediation generation supersedes an earlier resume generation.
+        # Prefer its hash even when old journals still carry the archived
+        # resume intent so queue deduplication cannot reuse a terminal resume.
         "resume_intent_hash": (
-            record.get("resume_intent", {}).get("resume_intent_hash")
-            or record.get("remediation_intent", {}).get(
+            record.get("remediation_intent", {}).get(
                 "remediation_intent_hash"
             )
+            or record.get("resume_intent", {}).get("resume_intent_hash")
         ),
     }
     return {**unsigned, "job_binding_hash": _hash(unsigned)}
@@ -793,6 +796,7 @@ def _begin_bounded_remediation(
         "stages": record.get("stages", {}),
         "effects": record.get("effects", {}),
         "job_ids": record.get("job_ids", []),
+        "resume_intent": record.get("resume_intent"),
         "failure_result": dict(result),
     }
     archived["history_hash"] = _hash(archived)
@@ -809,10 +813,19 @@ def _begin_bounded_remediation(
         "candidate_tree": candidate["tree"],
         "requested_at": _now(),
     }
+    findings = receipt.get("findings") if isinstance(receipt, Mapping) else None
+    if isinstance(findings, list) and findings and all(
+        isinstance(item, Mapping) for item in findings
+    ):
+        intent["diagnostic_findings"] = [dict(item) for item in findings]
     record["remediation_intent"] = {
         **intent,
         "remediation_intent_hash": _hash(intent),
     }
+    # The resume generation is preserved in the history above.  It must not
+    # remain live beside remediation because implementation dispatch treats a
+    # live resume intent as resume-only work.
+    record.pop("resume_intent", None)
     record["stages"] = {}
     record["effects"] = {}
     record["job_ids"] = []
