@@ -602,6 +602,12 @@ def _plan_evidence_identity(
     )
     if ancestor.returncode != 0:
         raise DoctorError("current Plan evidence does not descend from the approved Plan")
+    if (
+        _git(repository, "status", "--porcelain")
+        or _git(repository, "rev-parse", "HEAD^{commit}") != head
+        or _git(repository, "rev-parse", "HEAD^{tree}") != tree
+    ):
+        raise DoctorError("current Plan evidence changed during inspection")
     return head, tree
 
 
@@ -642,6 +648,8 @@ def _validate_current_task_projections(
         raise DoctorError("current task development source tree is stale")
 
     source = task.get("source")
+    if source is not None and not isinstance(source, Mapping):
+        raise DoctorError("current task source projection is malformed")
     if isinstance(source, Mapping):
         _require_projection_pair(
             "source", source, "commit", "tree", (source_commit, source_tree)
@@ -659,10 +667,14 @@ def _validate_current_task_projections(
         bootstrap_receipt = workflow.get("bootstrap_receipt")
         materialization_hash = workflow.get("materialization_receipt_hash")
         deployment = task.get("deployment")
+        if deployment is not None and not isinstance(deployment, Mapping):
+            raise DoctorError("current task deployment projection is malformed")
         if isinstance(deployment, Mapping) and deployment.get("scope") == "tgw-lib-coding-runtime":
             if deployment.get("bootstrap_receipt") != bootstrap_receipt:
                 raise DoctorError("current task deployment bootstrap receipt is stale")
         live = task.get("live_verification")
+        if live is not None and not isinstance(live, Mapping):
+            raise DoctorError("current task live verification projection is malformed")
         if isinstance(live, Mapping):
             for label, first, second in (
                 ("canonical live verification", "canonical_commit", "canonical_tree"),
@@ -672,6 +684,8 @@ def _validate_current_task_projections(
                     label, live, first, second, (source_commit, source_tree)
                 )
         tracks = task.get("tracks")
+        if tracks is not None and not isinstance(tracks, Mapping):
+            raise DoctorError("current task track projection is malformed")
         if isinstance(tracks, Mapping):
             coding = tracks.get("coding_lifecycle")
             if isinstance(coding, Mapping):
@@ -725,9 +739,13 @@ def _validate_current_task_projections(
                 raise DoctorError("current task item workflow generation is stale")
 
     next_actions = task.get("next")
-    if isinstance(next_actions, list) and all(
-        isinstance(action, str) for action in next_actions
+    if next_actions is not None and (
+        not isinstance(next_actions, list)
+        or not next_actions
+        or not all(isinstance(action, str) and action for action in next_actions)
     ):
+        raise DoctorError("current task next-action projection is malformed")
+    if isinstance(next_actions, list):
         if workflow is not None and not any(
             source_commit in action for action in next_actions
         ):
@@ -812,6 +830,9 @@ def check_context_snapshot(paths: DoctorPaths) -> dict[str, Any]:
             source_commit=head,
             source_tree=tree,
         )
+        final_head, final_tree, _final_status = _source_identity(paths)
+        if (final_head, final_tree) != (head, tree):
+            raise DoctorError("canonical source changed during Context inspection")
         return _check(
             "context.snapshot",
             "PASS",
@@ -5775,6 +5796,13 @@ def repair_context(
         cursor["source_commit"] = head
         cursor["source_tree"] = tree
         cursor["updated_at"] = datetime.now().astimezone().isoformat()
+    _validate_current_task_projections(
+        paths,
+        task,
+        cursor,
+        source_commit=head,
+        source_tree=tree,
+    )
     paths.context_cursor.parent.mkdir(parents=True, exist_ok=True)
     task_fd, task_text = tempfile.mkstemp(
         prefix=paths.context_task.name + ".doctor-stage.",
@@ -5906,6 +5934,13 @@ def repair_context(
         current_head, current_tree, current_status = _source_identity(paths)
         if current_status or (current_head, current_tree) != (head, tree):
             raise DoctorError("canonical source changed during context repair")
+        current_plan_evidence = _plan_evidence_identity(paths, task)
+        task_plan = task.get("plan", {})
+        if current_plan_evidence is not None and current_plan_evidence != (
+            task_plan.get("evidence_commit"),
+            task_plan.get("evidence_tree"),
+        ):
+            raise DoctorError("current Plan evidence changed during context repair")
         if _surface_snapshot(paths.context_task) != task_surface or _surface_snapshot(paths.context_cursor) != cursor_surface or _surface_snapshot(paths.context_snapshot) != snapshot_surface:
             raise DoctorError("context inputs changed concurrently; no live file was replaced")
         committed_task: dict[str, Any] | None = None
