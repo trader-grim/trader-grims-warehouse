@@ -238,7 +238,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
                 "commit": head,
                 "next_leaf": "tgw.context-recovery@1",
             },
-            "coding_workflow": {"commit": head},
+            "coding_workflow": {"commit": head, "tree": tree},
         },
     }
     cursor = {
@@ -1319,6 +1319,199 @@ def test_context_process_match_ignores_parent_shell_command_text() -> None:
     assert doctor_cli._is_context_process(["python3", "/opt/TGW/tgw-lib/bin/tgw-context-mcp"])
     assert doctor_cli._is_context_process(["python3", "-m", "tgw.context_mcp_server"])
     assert not doctor_cli._is_context_process(["bash", "-c", "/opt/TGW/tgw-lib/bin/tgw-context-mcp"])
+
+
+def test_context_process_entrypoint_rejects_legacy_module_mode(tmp_path: Path) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    selected = (
+        paths.context_generation_pointer.resolve(strict=True) / "tgw-context-mcp"
+    )
+
+    installed = doctor_cli._context_process_entrypoint(
+        paths,
+        [sys.executable, str(paths.context_generation_pointer / "tgw-context-mcp")],
+        selected,
+    )
+    legacy = doctor_cli._context_process_entrypoint(
+        paths,
+        [sys.executable, "-m", "tgw.context_mcp_server"],
+        selected,
+    )
+
+    assert installed["installed"] is True
+    assert installed["kind"] == "installed-launcher"
+    assert legacy == {"kind": "legacy-module", "path": None, "installed": False}
+
+
+@pytest.mark.parametrize(
+    "process",
+    [
+        {
+            "pid": 41,
+            "installed_entrypoint": True,
+            "predates_launcher": False,
+            "predates_generation": False,
+            "predates_snapshot": True,
+        },
+        {
+            "pid": 42,
+            "installed_entrypoint": False,
+            "predates_launcher": False,
+            "predates_generation": False,
+            "predates_snapshot": False,
+        },
+    ],
+)
+def test_context_clients_require_current_snapshot_and_installed_entrypoint(
+    monkeypatch: pytest.MonkeyPatch, process: dict[str, object]
+) -> None:
+    monkeypatch.setattr(doctor_cli, "_context_processes", lambda _paths: [process])
+
+    result = doctor_cli.check_context_processes(doctor_cli.DoctorPaths())
+
+    assert result["state"] == "RESTART_REQUIRED"
+    assert result["evidence"]["stale_pids"] == [process["pid"]]
+    assert "affected parent harness" in result["operator_action"]
+
+
+def _full_current_task_projection(commit: str, tree: str) -> tuple[dict, dict]:
+    evidence_commit = "e" * 40
+    evidence_tree = "f" * 40
+    receipt = "/receipts/bootstrap.json"
+    materialization = "sha256:" + "1" * 64
+    item_commit = "a" * 40
+    item_tree = "b" * 40
+    item_generation = "item-generation"
+    task = {
+        "plan": {
+            "approved_commit": "c" * 40,
+            "evidence_commit": evidence_commit,
+            "evidence_tree": evidence_tree,
+            "todo_1916": {
+                "current_plan_evidence_commit": evidence_commit,
+                "current_plan_evidence_tree": evidence_tree,
+            },
+        },
+        "source": {"commit": commit, "tree": tree},
+        "implementation": {
+            "development_source": {"commit": commit, "tree": tree},
+            "coding_workflow": {
+                "commit": commit,
+                "tree": tree,
+                "bootstrap_receipt": receipt,
+                "materialization_receipt_hash": materialization,
+            },
+        },
+        "deployment": {
+            "scope": "tgw-lib-coding-runtime",
+            "bootstrap_receipt": receipt,
+        },
+        "live_verification": {
+            "canonical_commit": commit,
+            "canonical_tree": tree,
+            "runtime_commit": commit,
+            "runtime_tree": tree,
+            "item_workflow_commit": item_commit,
+            "item_workflow_tree": item_tree,
+            "item_workflow_generation": item_generation,
+        },
+        "tracks": {
+            "coding_lifecycle": {
+                "integrated_commit": commit,
+                "integrated_tree": tree,
+                "candidate_installed": True,
+                "candidate_tree": tree,
+                "bootstrap_receipt": receipt,
+                "materialization_receipt_hash": materialization,
+            },
+            "item_workflow": {
+                "commit": item_commit,
+                "tree": item_tree,
+                "generation": item_generation,
+            },
+        },
+        "next": [
+            f"Use coding runtime {commit}",
+            f"Check item generation {item_generation}",
+        ],
+    }
+    cursor = {
+        "resolved": {
+            "plan_evidence_commit": evidence_commit,
+            "plan_evidence_tree": evidence_tree,
+        }
+    }
+    return task, cursor
+
+
+def test_current_task_projection_validation_rejects_stale_nested_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commit, tree = "1" * 40, "2" * 40
+    task, cursor = _full_current_task_projection(commit, tree)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_plan_evidence_identity",
+        lambda _paths, _task: ("e" * 40, "f" * 40),
+    )
+    doctor_cli._validate_current_task_projections(
+        doctor_cli.DoctorPaths(),
+        task,
+        cursor,
+        source_commit=commit,
+        source_tree=tree,
+    )
+
+    task["tracks"]["coding_lifecycle"]["integrated_commit"] = "9" * 40
+    with pytest.raises(doctor_cli.DoctorError, match="coding lifecycle integration"):
+        doctor_cli._validate_current_task_projections(
+            doctor_cli.DoctorPaths(),
+            task,
+            cursor,
+            source_commit=commit,
+            source_tree=tree,
+        )
+
+
+def test_current_task_reconciliation_updates_only_deterministic_current_mirrors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_commit, old_tree = "1" * 40, "2" * 40
+    commit, tree = "3" * 40, "4" * 40
+    task, cursor = _full_current_task_projection(old_commit, old_tree)
+    reviewed = {"commit": "5" * 40, "tree": "6" * 40}
+    task["reviewed_history"] = reviewed.copy()
+    workflow = {
+        "commit": commit,
+        "tree": tree,
+        "bootstrap_receipt": "/receipts/new.json",
+        "materialization_receipt_hash": "sha256:" + "7" * 64,
+    }
+    task["implementation"]["coding_workflow"] = workflow.copy()
+    monkeypatch.setattr(
+        doctor_cli,
+        "_plan_evidence_identity",
+        lambda _paths, _task: ("8" * 40, "9" * 40),
+    )
+
+    changed = doctor_cli._reconcile_current_task_projections(
+        doctor_cli.DoctorPaths(),
+        task,
+        cursor,
+        workflow=workflow,
+        source_commit=commit,
+        source_tree=tree,
+    )
+
+    assert changed
+    assert task["source"]["commit"] == commit
+    assert task["deployment"]["bootstrap_receipt"] == "/receipts/new.json"
+    assert task["tracks"]["coding_lifecycle"]["integrated_tree"] == tree
+    assert task["plan"]["evidence_commit"] == "8" * 40
+    assert cursor["resolved"]["plan_evidence_tree"] == "9" * 40
+    assert commit in task["next"][0]
+    assert task["reviewed_history"] == reviewed
+    assert task["current_projection_reconciliation_history"][-1]["authority"] is False
 
 
 def test_context_cold_probe_keeps_stdin_open_until_eof_sensitive_fourth_response(
@@ -4582,7 +4775,7 @@ def test_explicit_exact_context_repair_reconciles_stale_task_source_without_auth
         "review_authority": False,
     }
     workflow_history = repaired_task["coding_workflow_reconciliation_history"]
-    assert workflow_history[-1]["previous"] == {"commit": head}
+    assert workflow_history[-1]["previous"] == {"commit": head, "tree": tree}
     assert workflow_history[-1]["successor"] == workflow
     assert workflow_history[-1]["authority"] is False
     assert history[-1]["previous"]["commit"] == stale_commit

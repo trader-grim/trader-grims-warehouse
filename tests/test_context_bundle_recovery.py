@@ -1358,8 +1358,20 @@ def test_doctor_context_launcher_check_and_receipted_atomic_repair(
         doctor_cli,
         "_context_processes",
         lambda _paths: [
-            {"pid": 41, "predates_launcher": True},
-            {"pid": 42, "predates_launcher": False},
+            {
+                "pid": 41,
+                "installed_entrypoint": True,
+                "predates_launcher": True,
+                "predates_generation": False,
+                "predates_snapshot": False,
+            },
+            {
+                "pid": 42,
+                "installed_entrypoint": True,
+                "predates_launcher": False,
+                "predates_generation": False,
+                "predates_snapshot": False,
+            },
         ],
     )
 

@@ -209,6 +209,7 @@ def _preserve_primary_with_cleanup_failure(
 @dataclass(frozen=True)
 class DoctorPaths:
     repository: Path = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
+    plan_repository: Path = Path("/opt/TGW/library/plans")
     worktrees: Path = Path("/opt/TGW/var/worktrees")
     coding_config: Path = Path("/opt/TGW/tgw-lib/config/tgw-coding-local.json")
     plan_render_config: Path = Path("/opt/TGW/tgw-lib/config/tgw-plan-render-local.json")
@@ -560,6 +561,216 @@ def _validate_snapshot(
     return expanded
 
 
+def _plan_evidence_identity(
+    paths: DoctorPaths, task: Mapping[str, Any]
+) -> tuple[str, str] | None:
+    """Return the current Plan evidence head when this task projects one.
+
+    The approved Plan remains the immutable intent binding.  The evidence head
+    is only the current documentation/reconciliation projection, but silently
+    retaining an older evidence head was one source of stale MCP orientation.
+    """
+
+    plan = task.get("plan")
+    if not isinstance(plan, Mapping):
+        raise DoctorError("current task Plan projection is malformed")
+    evidence_commit = plan.get("evidence_commit")
+    evidence_tree = plan.get("evidence_tree")
+    if evidence_commit is None and evidence_tree is None:
+        return None
+    if (
+        not isinstance(evidence_commit, str)
+        or _COMMIT.fullmatch(evidence_commit) is None
+        or not isinstance(evidence_tree, str)
+        or _COMMIT.fullmatch(evidence_tree) is None
+    ):
+        raise DoctorError("current task Plan evidence identity is malformed")
+    repository = paths.plan_repository.resolve(strict=True)
+    if _git(repository, "status", "--porcelain"):
+        raise DoctorError("current Plan evidence repository is dirty")
+    head = _git(repository, "rev-parse", "HEAD^{commit}")
+    tree = _git(repository, "rev-parse", "HEAD^{tree}")
+    approved = plan.get("approved_commit")
+    if not isinstance(approved, str) or _COMMIT.fullmatch(approved) is None:
+        raise DoctorError("current task approved Plan identity is malformed")
+    ancestor = _run(
+        protected_git_command(
+            repository, "merge-base", "--is-ancestor", approved, head
+        ),
+        cwd=repository,
+        env=protected_git_environment(),
+    )
+    if ancestor.returncode != 0:
+        raise DoctorError("current Plan evidence does not descend from the approved Plan")
+    return head, tree
+
+
+def _require_projection_pair(
+    label: str,
+    projection: Mapping[str, Any],
+    first_key: str,
+    second_key: str,
+    expected: tuple[Any, Any],
+) -> None:
+    observed = (projection.get(first_key), projection.get(second_key))
+    if observed != expected:
+        raise DoctorError(
+            f"current task {label} projection is stale: "
+            f"{first_key}/{second_key} {observed!r} != {expected!r}"
+        )
+
+
+def _validate_current_task_projections(
+    paths: DoctorPaths,
+    task: Mapping[str, Any],
+    cursor: Mapping[str, Any],
+    *,
+    source_commit: str,
+    source_tree: str,
+) -> None:
+    """Reject divergent *current* mirrors while leaving histories untouched."""
+
+    implementation = task.get("implementation")
+    if not isinstance(implementation, Mapping):
+        raise DoctorError("current task implementation projection is malformed")
+    development = implementation.get("development_source")
+    if not isinstance(development, Mapping):
+        raise DoctorError("current task development source projection is malformed")
+    if development.get("commit") != source_commit:
+        raise DoctorError("current task development source commit is stale")
+    if development.get("tree") is not None and development.get("tree") != source_tree:
+        raise DoctorError("current task development source tree is stale")
+
+    source = task.get("source")
+    if isinstance(source, Mapping):
+        _require_projection_pair(
+            "source", source, "commit", "tree", (source_commit, source_tree)
+        )
+
+    workflow = implementation.get("coding_workflow")
+    if isinstance(workflow, Mapping):
+        _require_projection_pair(
+            "coding workflow",
+            workflow,
+            "commit",
+            "tree",
+            (source_commit, source_tree),
+        )
+        bootstrap_receipt = workflow.get("bootstrap_receipt")
+        materialization_hash = workflow.get("materialization_receipt_hash")
+        deployment = task.get("deployment")
+        if isinstance(deployment, Mapping) and deployment.get("scope") == "tgw-lib-coding-runtime":
+            if deployment.get("bootstrap_receipt") != bootstrap_receipt:
+                raise DoctorError("current task deployment bootstrap receipt is stale")
+        live = task.get("live_verification")
+        if isinstance(live, Mapping):
+            for label, first, second in (
+                ("canonical live verification", "canonical_commit", "canonical_tree"),
+                ("runtime live verification", "runtime_commit", "runtime_tree"),
+            ):
+                _require_projection_pair(
+                    label, live, first, second, (source_commit, source_tree)
+                )
+        tracks = task.get("tracks")
+        if isinstance(tracks, Mapping):
+            coding = tracks.get("coding_lifecycle")
+            if isinstance(coding, Mapping):
+                _require_projection_pair(
+                    "coding lifecycle integration",
+                    coding,
+                    "integrated_commit",
+                    "integrated_tree",
+                    (source_commit, source_tree),
+                )
+                if coding.get("candidate_installed") is True and coding.get("candidate_tree") != source_tree:
+                    raise DoctorError("current task installed coding candidate tree is stale")
+                reviewed_commit = development.get("reviewed_candidate_commit")
+                reviewed_tree = development.get("reviewed_candidate_tree")
+                if reviewed_commit is not None or reviewed_tree is not None:
+                    _require_projection_pair(
+                        "coding lifecycle reviewed candidate",
+                        coding,
+                        "candidate_commit",
+                        "candidate_tree",
+                        (reviewed_commit, reviewed_tree),
+                    )
+                    if coding.get("candidate_installed") is True and reviewed_tree != source_tree:
+                        raise DoctorError("current task installed reviewed candidate tree is stale")
+                for track_key, development_key in (
+                    ("review_path", "review"),
+                    ("review_sha256", "review_sha256"),
+                ):
+                    if development.get(development_key) is not None and coding.get(track_key) != development.get(development_key):
+                        raise DoctorError(
+                            f"current task coding lifecycle {track_key} is stale"
+                        )
+                if coding.get("bootstrap_receipt") != bootstrap_receipt:
+                    raise DoctorError("current task coding lifecycle bootstrap receipt is stale")
+                if coding.get("materialization_receipt_hash") != materialization_hash:
+                    raise DoctorError("current task coding lifecycle materialization receipt is stale")
+
+    tracks = task.get("tracks")
+    live = task.get("live_verification")
+    if isinstance(tracks, Mapping) and isinstance(live, Mapping):
+        item = tracks.get("item_workflow")
+        if isinstance(item, Mapping):
+            _require_projection_pair(
+                "item workflow live verification",
+                live,
+                "item_workflow_commit",
+                "item_workflow_tree",
+                (item.get("commit"), item.get("tree")),
+            )
+            if live.get("item_workflow_generation") != item.get("generation"):
+                raise DoctorError("current task item workflow generation is stale")
+
+    next_actions = task.get("next")
+    if isinstance(next_actions, list) and all(
+        isinstance(action, str) for action in next_actions
+    ):
+        if workflow is not None and not any(
+            source_commit in action for action in next_actions
+        ):
+            raise DoctorError("current task next actions omit the current coding runtime")
+        if isinstance(tracks, Mapping):
+            item = tracks.get("item_workflow")
+            generation = item.get("generation") if isinstance(item, Mapping) else None
+            if isinstance(generation, str) and not any(
+                generation in action for action in next_actions
+            ):
+                raise DoctorError("current task next actions omit the current item generation")
+
+    plan_identity = _plan_evidence_identity(paths, task)
+    if plan_identity is not None:
+        plan = task["plan"]
+        _require_projection_pair(
+            "Plan evidence",
+            plan,
+            "evidence_commit",
+            "evidence_tree",
+            plan_identity,
+        )
+        resolved = cursor.get("resolved")
+        if not isinstance(resolved, Mapping):
+            raise DoctorError("current task cursor resolution is malformed")
+        _require_projection_pair(
+            "cursor Plan evidence",
+            resolved,
+            "plan_evidence_commit",
+            "plan_evidence_tree",
+            plan_identity,
+        )
+        todo_1916 = plan.get("todo_1916")
+        if isinstance(todo_1916, Mapping):
+            _require_projection_pair(
+                "Todo 1916 current Plan evidence",
+                todo_1916,
+                "current_plan_evidence_commit",
+                "current_plan_evidence_tree",
+                plan_identity,
+            )
+
+
 def check_context_snapshot(paths: DoctorPaths) -> dict[str, Any]:
     repair = _privileged_repair_action(paths, "context")
     try:
@@ -594,6 +805,13 @@ def check_context_snapshot(paths: DoctorPaths) -> dict[str, Any]:
         head, tree, _status = _source_identity(paths)
         if snapshot.get("source_commit") != head or snapshot.get("source_tree") != tree:
             raise DoctorError("published context is stale relative to canonical source")
+        _validate_current_task_projections(
+            paths,
+            task,
+            cursor,
+            source_commit=head,
+            source_tree=tree,
+        )
         return _check(
             "context.snapshot",
             "PASS",
@@ -800,6 +1018,185 @@ def _exact_bootstrap_workflow_projection(
     raise DoctorError(
         "Context runtime reconciliation found no exact root bootstrap receipt"
     )
+
+
+def _reconcile_current_task_projections(
+    paths: DoctorPaths,
+    task: dict[str, Any],
+    cursor: dict[str, Any],
+    *,
+    workflow: Mapping[str, Any],
+    source_commit: str,
+    source_tree: str,
+) -> list[str]:
+    """Converge deterministic current mirrors without rewriting history.
+
+    This is deliberately limited to identities Doctor can prove locally.  It
+    does not infer Plan intent, provider state, review disposition, or operator
+    acceptance.  Historical/reviewed bindings remain byte-for-byte intact.
+    """
+
+    changed: list[str] = []
+    replacements: dict[str, str] = {}
+
+    def set_value(projection: dict[str, Any], key: str, value: Any, label: str) -> None:
+        if projection.get(key) != value:
+            projection[key] = value
+            changed.append(label)
+
+    implementation = task.get("implementation")
+    if not isinstance(implementation, dict):
+        raise DoctorError("current task implementation projection is malformed")
+    source = task.get("source")
+    if isinstance(source, dict):
+        set_value(source, "repository", str(paths.repository), "source.repository")
+        set_value(source, "commit", source_commit, "source.commit")
+        set_value(source, "tree", source_tree, "source.tree")
+        set_value(
+            source,
+            "canonical_working_tree_clean",
+            True,
+            "source.canonical_working_tree_clean",
+        )
+
+    deployment = task.get("deployment")
+    if isinstance(deployment, dict) and deployment.get("scope") == "tgw-lib-coding-runtime":
+        set_value(
+            deployment,
+            "bootstrap_receipt",
+            workflow.get("bootstrap_receipt"),
+            "deployment.bootstrap_receipt",
+        )
+
+    live = task.get("live_verification")
+    if isinstance(live, dict):
+        for old in (
+            live.get("canonical_commit"),
+            live.get("runtime_commit"),
+        ):
+            if isinstance(old, str) and old != source_commit:
+                replacements[old] = source_commit
+                if len(old) >= 12:
+                    replacements[old[:12]] = source_commit[:12]
+        for key, value in (
+            ("canonical_commit", source_commit),
+            ("canonical_tree", source_tree),
+            ("runtime_commit", source_commit),
+            ("runtime_tree", source_tree),
+        ):
+            if key in live:
+                set_value(live, key, value, f"live_verification.{key}")
+
+    tracks = task.get("tracks")
+    if isinstance(tracks, dict):
+        coding = tracks.get("coding_lifecycle")
+        if isinstance(coding, dict):
+            for key, value in (
+                ("integrated_commit", source_commit),
+                ("integrated_tree", source_tree),
+                ("bootstrap_receipt", workflow.get("bootstrap_receipt")),
+                (
+                    "materialization_receipt_hash",
+                    workflow.get("materialization_receipt_hash"),
+                ),
+            ):
+                set_value(coding, key, value, f"tracks.coding_lifecycle.{key}")
+        item = tracks.get("item_workflow")
+        if isinstance(item, Mapping) and isinstance(live, dict):
+            old_item_generation = live.get("item_workflow_generation")
+            current_item_generation = item.get("generation")
+            if (
+                isinstance(old_item_generation, str)
+                and isinstance(current_item_generation, str)
+                and old_item_generation != current_item_generation
+            ):
+                replacements[old_item_generation] = current_item_generation
+            for key, value in (
+                ("item_workflow_commit", item.get("commit")),
+                ("item_workflow_tree", item.get("tree")),
+                ("item_workflow_generation", item.get("generation")),
+            ):
+                if key in live:
+                    set_value(live, key, value, f"live_verification.{key}")
+
+    plan = task.get("plan")
+    if not isinstance(plan, dict):
+        raise DoctorError("current task Plan projection is malformed")
+    plan_identity = _plan_evidence_identity(paths, task)
+    if plan_identity is not None:
+        evidence_commit, evidence_tree = plan_identity
+        set_value(plan, "evidence_commit", evidence_commit, "plan.evidence_commit")
+        set_value(plan, "evidence_tree", evidence_tree, "plan.evidence_tree")
+        set_value(
+            plan,
+            "evidence_descends_from_approved",
+            True,
+            "plan.evidence_descends_from_approved",
+        )
+        todo_1916 = plan.get("todo_1916")
+        if isinstance(todo_1916, dict):
+            set_value(
+                todo_1916,
+                "current_plan_evidence_commit",
+                evidence_commit,
+                "plan.todo_1916.current_plan_evidence_commit",
+            )
+            set_value(
+                todo_1916,
+                "current_plan_evidence_tree",
+                evidence_tree,
+                "plan.todo_1916.current_plan_evidence_tree",
+            )
+        resolved = cursor.get("resolved")
+        if not isinstance(resolved, dict):
+            raise DoctorError("current task cursor resolution is malformed")
+        set_value(
+            resolved,
+            "plan_evidence_commit",
+            evidence_commit,
+            "cursor.resolved.plan_evidence_commit",
+        )
+        set_value(
+            resolved,
+            "plan_evidence_tree",
+            evidence_tree,
+            "cursor.resolved.plan_evidence_tree",
+        )
+
+    next_actions = task.get("next")
+    if isinstance(next_actions, list) and all(
+        isinstance(action, str) for action in next_actions
+    ):
+        updated_actions: list[str] = []
+        for action in next_actions:
+            updated = action
+            for old, new in sorted(
+                replacements.items(), key=lambda item: len(item[0]), reverse=True
+            ):
+                updated = updated.replace(old, new)
+            updated_actions.append(updated)
+        if updated_actions != next_actions:
+            task["next"] = updated_actions
+            changed.append("next")
+
+    if changed:
+        now = datetime.now().astimezone().isoformat()
+        record = {
+            "schema": "tgw-context-current-projection-reconciliation/v1",
+            "recorded_at": now,
+            "fields": sorted(set(changed)),
+            "source_commit": source_commit,
+            "source_tree": source_tree,
+            "authority": False,
+        }
+        record["reconciliation_hash"] = _hash(record)
+        history = task.setdefault("current_projection_reconciliation_history", [])
+        if not isinstance(history, list):
+            raise DoctorError("current task projection reconciliation history is malformed")
+        history.append(record)
+        task["updated_at"] = now
+        cursor["updated_at"] = now
+    return sorted(set(changed))
 
 
 def _validated_bootstrap_materialization(
@@ -1823,10 +2220,69 @@ def _is_context_process(argv: Sequence[str]) -> bool:
     return any(argv[index : index + 2] == ["-m", "tgw.context_mcp_server"] for index in range(max(0, len(argv) - 1)))
 
 
+def _context_process_entrypoint(
+    paths: DoctorPaths, argv: Sequence[str], selected_entrypoint: Path
+) -> dict[str, Any]:
+    """Classify the actual server entrypoint without treating module mode as installed."""
+
+    expected_paths = {
+        paths.context_launcher.absolute(),
+        (paths.context_generation_pointer / "tgw-context-mcp").absolute(),
+        selected_entrypoint.absolute(),
+    }
+    observed: Path | None = None
+    for argument in argv:
+        candidate = Path(argument)
+        if not candidate.is_absolute() or candidate.name != "tgw-context-mcp":
+            continue
+        observed = candidate
+        break
+    if observed is None:
+        return {
+            "kind": "legacy-module" if any(
+                argv[index : index + 2] == ["-m", "tgw.context_mcp_server"]
+                for index in range(max(0, len(argv) - 1))
+            ) else "unknown",
+            "path": None,
+            "installed": False,
+        }
+    try:
+        resolved = observed.resolve(strict=True)
+    except OSError:
+        resolved = observed.resolve(strict=False)
+    expected_resolved = {path.resolve(strict=True) for path in expected_paths}
+    return {
+        "kind": "installed-launcher" if resolved in expected_resolved else "other-launcher",
+        "path": str(observed),
+        "resolved": str(resolved),
+        "installed": resolved in expected_resolved,
+    }
+
+
+def _context_process_requires_restart(process: Mapping[str, Any]) -> bool:
+    return (
+        process.get("installed_entrypoint") is not True
+        or process.get("predates_launcher") is True
+        or process.get("predates_generation") is True
+        or process.get("predates_snapshot") is True
+    )
+
+
 def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
     boot = _boot_time()
     ticks = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
     launcher_mtime = paths.context_launcher.stat().st_mtime
+    snapshot_mtime = paths.context_snapshot.stat(follow_symlinks=False).st_mtime
+    pair = _context_pair(paths)
+    selected_entrypoint = pair["generation"] / "tgw-context-mcp"
+    generation_mtime = max(
+        paths.context_generation_pointer.lstat().st_mtime,
+        selected_entrypoint.stat(follow_symlinks=False).st_mtime,
+    )
+    # /proc exposes the start time in clock ticks.  Permit one tick of
+    # quantization so a process started immediately after publication is not
+    # misclassified as older than it.
+    tick_tolerance = 1.0 / ticks
     processes: list[dict[str, Any]] = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -1840,12 +2296,19 @@ def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
             fields = raw[end + 2 :].split()
             started_at = boot + float(fields[19]) / ticks
             stat_result = entry.stat()
+            entrypoint = _context_process_entrypoint(
+                paths, argv, selected_entrypoint
+            )
             processes.append(
                 {
                     "pid": int(entry.name),
                     "user": pwd.getpwuid(stat_result.st_uid).pw_name,
                     "started_at": datetime.fromtimestamp(started_at, UTC).isoformat(),
-                    "predates_launcher": started_at < launcher_mtime,
+                    "installed_entrypoint": entrypoint["installed"],
+                    "entrypoint": entrypoint,
+                    "predates_launcher": started_at + tick_tolerance < launcher_mtime,
+                    "predates_generation": started_at + tick_tolerance < generation_mtime,
+                    "predates_snapshot": started_at + tick_tolerance < snapshot_mtime,
                     "command": " ".join(argv),
                 }
             )
@@ -1857,12 +2320,12 @@ def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
 def check_context_processes(paths: DoctorPaths) -> dict[str, Any]:
     try:
         processes = _context_processes(paths)
-        stale = [item for item in processes if item["predates_launcher"]]
+        stale = [item for item in processes if _context_process_requires_restart(item)]
         if stale:
             return _check(
                 "context.clients",
                 "RESTART_REQUIRED",
-                f"{len(stale)} Context MCP process(es) predate the installed launcher",
+                f"{len(stale)} Context MCP process(es) are not bound to the current snapshot and installed entrypoint",
                 evidence={"processes": processes, "stale_pids": [item["pid"] for item in stale]},
                 repair="restart only the affected parent harness session; do not restart other clients",
             )
@@ -4968,7 +5431,9 @@ def repair_context_launcher(
             except Exception as exc:
                 clients = []
                 process_error = str(exc)
-            affected = [item for item in clients if item["predates_launcher"]]
+            affected = [
+                item for item in clients if _context_process_requires_restart(item)
+            ]
             return {
                 "ok": True,
                 "operation": "context-launcher",
@@ -5120,7 +5585,7 @@ def repair_context_launcher(
     except Exception as exc:
         clients = []
         process_error = str(exc)
-    affected = [item for item in clients if item["predates_launcher"]]
+    affected = [item for item in clients if _context_process_requires_restart(item)]
     return {
         "ok": True,
         "operation": "context-launcher",
@@ -5288,6 +5753,17 @@ def repair_context(
                 latest["semantic_reconciliation"] = "CODING_RUNTIME_EXACT"
                 latest.pop("reconciliation_hash", None)
                 latest["reconciliation_hash"] = _hash(latest)
+    workflow_projection = task.get("implementation", {}).get("coding_workflow")
+    if not isinstance(workflow_projection, Mapping):
+        raise DoctorError("current task coding workflow projection is malformed")
+    projection_changes = _reconcile_current_task_projections(
+        paths,
+        task,
+        cursor,
+        workflow=workflow_projection,
+        source_commit=head,
+        source_tree=tree,
+    )
     if cursor.get("plan_commit") != task.get("plan", {}).get("approved_commit"):
         raise DoctorError("task and cursor Plan commits disagree; source-only repair is unsafe")
     capability = task.get("implementation", {}).get("development_source", {}).get("next_leaf")
@@ -5532,12 +6008,24 @@ def repair_context(
         staged_task.unlink(missing_ok=True)
         staged_cursor.unlink(missing_ok=True)
         staged_snapshot.unlink(missing_ok=True)
+    try:
+        clients = _context_processes(paths)
+        process_error = None
+    except Exception as exc:
+        clients = []
+        process_error = str(exc)
+    affected = [item for item in clients if _context_process_requires_restart(item)]
     return {
         "ok": True,
         "operation": "context",
         "changed": changed,
         "receipt": receipt,
         "staged_cold_stdio_probe": staged_probe,
+        "projection_changes": projection_changes,
+        "client_processes_mutated": False,
+        "restart_required": [item["pid"] for item in affected],
+        "restart_scope": "affected parent harness sessions only",
+        "restart_detection_error": process_error,
     }
 
 
