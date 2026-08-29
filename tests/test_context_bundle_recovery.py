@@ -1360,6 +1360,11 @@ def test_doctor_context_launcher_check_and_receipted_atomic_repair(
         lambda _paths: [
             {
                 "pid": 41,
+                "process_identity": "boot:41:100",
+                "parent_pid": 4,
+                "session_id": 1,
+                "user": "codex",
+                "entrypoint": {"kind": "installed-launcher"},
                 "installed_entrypoint": True,
                 "predates_launcher": True,
                 "predates_generation": False,
@@ -1367,6 +1372,11 @@ def test_doctor_context_launcher_check_and_receipted_atomic_repair(
             },
             {
                 "pid": 42,
+                "process_identity": "boot:42:101",
+                "parent_pid": 4,
+                "session_id": 1,
+                "user": "codex",
+                "entrypoint": {"kind": "installed-launcher"},
                 "installed_entrypoint": True,
                 "predates_launcher": False,
                 "predates_generation": False,
@@ -1380,7 +1390,15 @@ def test_doctor_context_launcher_check_and_receipted_atomic_repair(
 
     installed = doctor_cli._context_pair(paths)["launcher"]
     assert result["changed"] is True
-    assert result["restart_required"] == [41]
+    assert result["restart_required"] == [
+        {
+            "process_identity": "boot:41:100",
+            "parent_pid": 4,
+            "session_id": 1,
+            "user": "codex",
+            "entrypoint": {"kind": "installed-launcher"},
+        }
+    ]
     assert result["client_processes_mutated"] is False
     assert Path(result["receipt"]).is_file()
     assert installed["raw"] == selected["launcher"].read_bytes()

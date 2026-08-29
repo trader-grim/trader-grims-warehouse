@@ -227,18 +227,154 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
             },
         },
     )
-    plan_commit = "a" * 40
+    plan_repository = tmp_path / "plan"
+    plan_repository.mkdir()
+    _git(plan_repository, "init", "-b", "main")
+    _git(plan_repository, "config", "user.name", "test")
+    _git(plan_repository, "config", "user.email", "test@example.invalid")
+    (plan_repository / "PLAN.md").write_text("approved plan\n", encoding="utf-8")
+    _git(plan_repository, "add", ".")
+    _git(plan_repository, "commit", "-m", "approved plan")
+    plan_commit = _git(plan_repository, "rev-parse", "HEAD^{commit}")
+    plan_tree = _git(plan_repository, "rev-parse", "HEAD^{tree}")
+    bootstrap_receipt = str(root / "doctor-receipts/bootstrap.json")
+    materialization_hash = "sha256:" + "1" * 64
+    review_path = str(tmp_path / "review.md")
+    review_hash = "sha256:" + "2" * 64
+    item_commit = "3" * 40
+    item_tree = "4" * 40
+    item_generation = "item-workflow-current"
+    item_review_path = str(tmp_path / "item-review.md")
+    item_review_hash = "sha256:" + "5" * 64
+    plan_candidate = "6" * 40
+    plan_candidate_tree = "7" * 40
+    plan_review_path = str(tmp_path / "plan-review.md")
+    plan_review_hash = "sha256:" + "8" * 64
     task = {
         "schema": "tgw-current-task/v1",
         "id": "recovery",
         "updated_at": "2026-08-24T00:00:00+00:00",
-        "plan": {"approved_commit": plan_commit},
+        "plan": {
+            "approved_commit": plan_commit,
+            "approved_tree": plan_tree,
+            "approved_solution_hash": "sha256:" + "9" * 64,
+            "evidence_commit": plan_commit,
+            "evidence_tree": plan_tree,
+            "evidence_descends_from_approved": True,
+            "todo_1916": {
+                "candidate_commit": plan_candidate,
+                "candidate_tree": plan_candidate_tree,
+                "current_plan_evidence_commit": plan_commit,
+                "current_plan_evidence_tree": plan_tree,
+                "review_path": plan_review_path,
+                "review_sha256": plan_review_hash,
+                "review_disposition": "NON_ADMITTING_DIAGNOSTIC_NO_FINDINGS",
+            },
+        },
+        "source": {
+            "repository": str(repository),
+            "commit": head,
+            "tree": tree,
+            "canonical_working_tree_clean": True,
+        },
         "implementation": {
             "development_source": {
                 "commit": head,
+                "tree": tree,
                 "next_leaf": "tgw.context-recovery@1",
+                "reviewed_candidate_commit": head,
+                "reviewed_candidate_tree": tree,
+                "review": review_path,
+                "review_sha256": review_hash,
             },
-            "coding_workflow": {"commit": head, "tree": tree},
+            "coding_workflow": {
+                "commit": head,
+                "tree": tree,
+                "bootstrap_receipt": bootstrap_receipt,
+                "materialization_receipt_hash": materialization_hash,
+            },
+        },
+        "deployment": {
+            "scope": "tgw-lib-coding-runtime",
+            "bootstrap_receipt": bootstrap_receipt,
+            "state": "TGW_LIB_LOCAL_RUNTIME_INSTALLED",
+        },
+        "live_verification": {
+            "canonical_commit": head,
+            "canonical_tree": tree,
+            "runtime_commit": head,
+            "runtime_tree": tree,
+            "item_workflow_commit": item_commit,
+            "item_workflow_tree": item_tree,
+            "item_workflow_generation": item_generation,
+        },
+        "tracks": {
+            "coding_lifecycle": {
+                "todo": 1921,
+                "integrated_commit": head,
+                "integrated_tree": tree,
+                "candidate_commit": head,
+                "candidate_tree": tree,
+                "candidate_installed": True,
+                "bootstrap_receipt": bootstrap_receipt,
+                "materialization_receipt_hash": materialization_hash,
+                "review_path": review_path,
+                "review_sha256": review_hash,
+                "review_state": "NON_ADMITTING_DIAGNOSTIC_NO_FINDINGS",
+                "operator_acceptance": "PENDING",
+            },
+            "item_workflow": {
+                "todo": 1920,
+                "commit": item_commit,
+                "tree": item_tree,
+                "generation": item_generation,
+                "review_path": item_review_path,
+                "review_sha256": item_review_hash,
+                "operator_acceptance": "PENDING",
+            },
+        },
+        "review_admission": {
+            "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
+            "current": {
+                "todo": 1921,
+                "candidate_commit": head,
+                "candidate_tree": tree,
+                "review_path": review_path,
+                "review_sha256": review_hash,
+                "review_state": "NON_ADMITTING_DIAGNOSTIC_NO_FINDINGS",
+                "authority": False,
+                "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
+            },
+            "item": {
+                "todo": 1920,
+                "candidate_commit": item_commit,
+                "candidate_tree": item_tree,
+                "review_path": item_review_path,
+                "review_sha256": item_review_hash,
+                "authority": False,
+                "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
+            },
+            "plan_reconciliation": {
+                "todo": 1916,
+                "candidate_commit": plan_candidate,
+                "candidate_tree": plan_candidate_tree,
+                "review_path": plan_review_path,
+                "review_sha256": plan_review_hash,
+                "review_state": "NON_ADMITTING_DIAGNOSTIC_NO_FINDINGS",
+                "authority": False,
+                "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
+            },
+        },
+        "next_binding_policy": "STRUCTURED_ONLY_NO_INLINE_GENERATION_IDENTITIES",
+        "next": ["Verify the local coding runtime through next_bindings."],
+        "next_bindings": {
+            "coding_runtime_commit": head,
+            "coding_runtime_tree": tree,
+            "item_workflow_commit": item_commit,
+            "item_workflow_tree": item_tree,
+            "item_workflow_generation": item_generation,
+            "plan_evidence_commit": plan_commit,
+            "plan_evidence_tree": plan_tree,
         },
     }
     cursor = {
@@ -247,7 +383,11 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         "plan_commit": plan_commit,
         "source_commit": head,
         "source_tree": tree,
-        "resolved": {"next_treatment": "tgw.context-recovery@1"},
+        "resolved": {
+            "next_treatment": "tgw.context-recovery@1",
+            "plan_evidence_commit": plan_commit,
+            "plan_evidence_tree": plan_tree,
+        },
     }
     task_path = root / "context-input/current-task.json"
     cursor_path = root / "context-input/plan-cycle-cursor.json"
@@ -274,6 +414,7 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     _write_json(catalog_path, {"schema": "fixture", "actors": {"codex": {}}})
     paths = doctor_cli.DoctorPaths(
         repository=repository,
+        plan_repository=plan_repository,
         worktrees=worktrees,
         coding_config=config,
         runtime_root=runtime_root,
@@ -1125,6 +1266,31 @@ def test_context_snapshot_binds_task_cursor_and_canonical_source(tmp_path: Path)
     assert result["evidence"]["source_tree"] == tree
 
 
+def test_context_snapshot_never_reports_from_a_second_unfenced_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _head, _tree = _fixture(tmp_path)
+    real_surface = doctor_cli._surface_snapshot
+    snapshot_reads = 0
+
+    def raced_surface(path: Path) -> dict[str, object]:
+        nonlocal snapshot_reads
+        result = real_surface(path)
+        if path == paths.context_snapshot:
+            snapshot_reads += 1
+            if snapshot_reads == 2:
+                result = dict(result)
+                result["mtime_ns"] = int(result["mtime_ns"]) + 1
+        return result
+
+    monkeypatch.setattr(doctor_cli, "_surface_snapshot", raced_surface)
+
+    result = doctor_cli.check_context_snapshot(paths)
+
+    assert result["state"] == "FAIL"
+    assert "surfaces changed" in result["detail"]
+
+
 def test_context_snapshot_detects_cursor_drift_with_exact_repair(tmp_path: Path) -> None:
     paths, head, _tree = _fixture(tmp_path)
     cursor = json.loads(paths.context_cursor.read_text())
@@ -1348,6 +1514,11 @@ def test_context_process_entrypoint_rejects_legacy_module_mode(tmp_path: Path) -
     [
         {
             "pid": 41,
+            "process_identity": "boot:41:100",
+            "parent_pid": 4,
+            "session_id": 1,
+            "user": "codex",
+            "entrypoint": {"kind": "installed-launcher"},
             "installed_entrypoint": True,
             "predates_launcher": False,
             "predates_generation": False,
@@ -1355,6 +1526,11 @@ def test_context_process_entrypoint_rejects_legacy_module_mode(tmp_path: Path) -
         },
         {
             "pid": 42,
+            "process_identity": "boot:42:101",
+            "parent_pid": 4,
+            "session_id": 1,
+            "user": "codex",
+            "entrypoint": {"kind": "legacy-module"},
             "installed_entrypoint": False,
             "predates_launcher": False,
             "predates_generation": False,
@@ -1370,8 +1546,40 @@ def test_context_clients_require_current_snapshot_and_installed_entrypoint(
     result = doctor_cli.check_context_processes(doctor_cli.DoctorPaths())
 
     assert result["state"] == "RESTART_REQUIRED"
-    assert result["evidence"]["stale_pids"] == [process["pid"]]
+    assert result["evidence"]["observed_stale_pids_non_actionable"] == [
+        process["pid"]
+    ]
     assert "affected parent harness" in result["operator_action"]
+
+
+def test_context_process_same_tick_is_not_proven_current() -> None:
+    boot, ticks, start_ticks = 1_000, 100, 250
+    same_tick = doctor_cli._process_start_ns_lower_bound(boot, start_ticks, ticks)
+
+    assert doctor_cli._process_not_proven_after(
+        boot, start_ticks, ticks, same_tick
+    ) is True
+    assert doctor_cli._process_not_proven_after(
+        boot, start_ticks + 1, ticks, same_tick
+    ) is False
+
+
+def test_context_restart_report_never_turns_inventory_error_into_empty_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "_context_processes",
+        lambda _paths: (_ for _ in ()).throw(
+            doctor_cli.DoctorError("permission denied")
+        ),
+    )
+
+    result = doctor_cli._context_restart_report(doctor_cli.DoctorPaths())
+
+    assert result["client_restart_evidence_ok"] is False
+    assert result["restart_required"] is None
+    assert "permission denied" in result["restart_detection_error"]
 
 
 def _full_current_task_projection(commit: str, tree: str) -> tuple[dict, dict]:
@@ -1382,19 +1590,42 @@ def _full_current_task_projection(commit: str, tree: str) -> tuple[dict, dict]:
     item_commit = "a" * 40
     item_tree = "b" * 40
     item_generation = "item-generation"
+    review_path = "/review/current.md"
+    review_sha256 = "sha256:" + "2" * 64
+    plan_candidate = "3" * 40
+    plan_candidate_tree = "4" * 40
+    plan_review_path = "/review/plan.md"
+    plan_review_sha256 = "sha256:" + "5" * 64
+    item_review_path = "/review/item.md"
+    item_review_sha256 = "sha256:" + "6" * 64
     task = {
         "plan": {
             "approved_commit": "c" * 40,
+            "approved_tree": "d" * 40,
+            "approved_solution_hash": "sha256:" + "0" * 64,
             "evidence_commit": evidence_commit,
             "evidence_tree": evidence_tree,
+            "evidence_descends_from_approved": True,
             "todo_1916": {
+                "candidate_commit": plan_candidate,
+                "candidate_tree": plan_candidate_tree,
                 "current_plan_evidence_commit": evidence_commit,
                 "current_plan_evidence_tree": evidence_tree,
+                "review_path": plan_review_path,
+                "review_sha256": plan_review_sha256,
+                "review_disposition": "NON_ADMITTING_DIAGNOSTIC_NO_FINDINGS",
             },
         },
         "source": {"commit": commit, "tree": tree},
         "implementation": {
-            "development_source": {"commit": commit, "tree": tree},
+            "development_source": {
+                "commit": commit,
+                "tree": tree,
+                "reviewed_candidate_commit": commit,
+                "reviewed_candidate_tree": tree,
+                "review": review_path,
+                "review_sha256": review_sha256,
+            },
             "coding_workflow": {
                 "commit": commit,
                 "tree": tree,
@@ -1417,23 +1648,72 @@ def _full_current_task_projection(commit: str, tree: str) -> tuple[dict, dict]:
         },
         "tracks": {
             "coding_lifecycle": {
+                "todo": 1921,
                 "integrated_commit": commit,
                 "integrated_tree": tree,
                 "candidate_installed": True,
+                "candidate_commit": commit,
                 "candidate_tree": tree,
                 "bootstrap_receipt": receipt,
                 "materialization_receipt_hash": materialization,
+                "review_path": review_path,
+                "review_sha256": review_sha256,
+                "review_state": "NON_ADMITTING_DIAGNOSTIC_NO_FINDINGS",
+                "operator_acceptance": "PENDING",
             },
             "item_workflow": {
+                "todo": 1920,
                 "commit": item_commit,
                 "tree": item_tree,
                 "generation": item_generation,
+                "review_path": item_review_path,
+                "review_sha256": item_review_sha256,
+                "operator_acceptance": "PENDING",
             },
         },
-        "next": [
-            f"Use coding runtime {commit}",
-            f"Check item generation {item_generation}",
-        ],
+        "review_admission": {
+            "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
+            "current": {
+                "todo": 1921,
+                "candidate_commit": commit,
+                "candidate_tree": tree,
+                "review_path": review_path,
+                "review_sha256": review_sha256,
+                "review_state": "NON_ADMITTING_DIAGNOSTIC_NO_FINDINGS",
+                "authority": False,
+                "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
+            },
+            "item": {
+                "todo": 1920,
+                "candidate_commit": item_commit,
+                "candidate_tree": item_tree,
+                "review_path": item_review_path,
+                "review_sha256": item_review_sha256,
+                "authority": False,
+                "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
+            },
+            "plan_reconciliation": {
+                "todo": 1916,
+                "candidate_commit": plan_candidate,
+                "candidate_tree": plan_candidate_tree,
+                "review_path": plan_review_path,
+                "review_sha256": plan_review_sha256,
+                "review_state": "NON_ADMITTING_DIAGNOSTIC_NO_FINDINGS",
+                "authority": False,
+                "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
+            },
+        },
+        "next_binding_policy": "STRUCTURED_ONLY_NO_INLINE_GENERATION_IDENTITIES",
+        "next": ["Use the exact coding and item bindings in next_bindings."],
+        "next_bindings": {
+            "coding_runtime_commit": commit,
+            "coding_runtime_tree": tree,
+            "item_workflow_commit": item_commit,
+            "item_workflow_tree": item_tree,
+            "item_workflow_generation": item_generation,
+            "plan_evidence_commit": evidence_commit,
+            "plan_evidence_tree": evidence_tree,
+        },
     }
     cursor = {
         "resolved": {
@@ -1490,9 +1770,13 @@ def test_current_task_reconciliation_updates_only_deterministic_current_mirrors(
     task["implementation"]["coding_workflow"] = workflow.copy()
     monkeypatch.setattr(
         doctor_cli,
-        "_plan_evidence_identity",
-        lambda _paths, _task: ("8" * 40, "9" * 40),
+        "_plan_repository_evidence_identity",
+        lambda _paths, _plan: ("8" * 40, "9" * 40),
     )
+    protected_live = json.loads(json.dumps(task["live_verification"]))
+    protected_tracks = json.loads(json.dumps(task["tracks"]))
+    protected_review = json.loads(json.dumps(task["review_admission"]))
+    protected_next = list(task["next"])
 
     changed = doctor_cli._reconcile_current_task_projections(
         doctor_cli.DoctorPaths(),
@@ -1506,12 +1790,109 @@ def test_current_task_reconciliation_updates_only_deterministic_current_mirrors(
     assert changed
     assert task["source"]["commit"] == commit
     assert task["deployment"]["bootstrap_receipt"] == "/receipts/new.json"
-    assert task["tracks"]["coding_lifecycle"]["integrated_tree"] == tree
+    assert task["live_verification"] == protected_live
+    assert task["tracks"]["item_workflow"] == protected_tracks["item_workflow"]
+    for key, value in protected_tracks["coding_lifecycle"].items():
+        if key not in {"bootstrap_receipt", "materialization_receipt_hash"}:
+            assert task["tracks"]["coding_lifecycle"][key] == value
+    assert task["tracks"]["coding_lifecycle"]["bootstrap_receipt"] == (
+        workflow["bootstrap_receipt"]
+    )
+    assert task["review_admission"] == protected_review
+    assert task["next"] == protected_next
     assert task["plan"]["evidence_commit"] == "8" * 40
     assert cursor["resolved"]["plan_evidence_tree"] == "9" * 40
-    assert commit in task["next"][0]
     assert task["reviewed_history"] == reviewed
     assert task["current_projection_reconciliation_history"][-1]["authority"] is False
+
+
+@pytest.mark.parametrize(
+    ("container", "key"),
+    [
+        ("task", "source"),
+        ("implementation", "coding_workflow"),
+        ("task", "deployment"),
+        ("task", "live_verification"),
+        ("task", "tracks"),
+        ("task", "review_admission"),
+        ("task", "next_bindings"),
+    ],
+)
+def test_current_task_validation_requires_all_current_mirrors(
+    monkeypatch: pytest.MonkeyPatch, container: str, key: str
+) -> None:
+    commit, tree = "1" * 40, "2" * 40
+    task, cursor = _full_current_task_projection(commit, tree)
+    target = task if container == "task" else task[container]
+    target[key] = None
+    monkeypatch.setattr(
+        doctor_cli,
+        "_plan_evidence_identity",
+        lambda _paths, _task: ("e" * 40, "f" * 40),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="missing|malformed"):
+        doctor_cli._validate_current_task_projections(
+            doctor_cli.DoctorPaths(),
+            task,
+            cursor,
+            source_commit=commit,
+            source_tree=tree,
+        )
+
+
+def test_current_task_validation_rejects_stale_review_and_item_mirrors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commit, tree = "1" * 40, "2" * 40
+    task, cursor = _full_current_task_projection(commit, tree)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_plan_evidence_identity",
+        lambda _paths, _task: ("e" * 40, "f" * 40),
+    )
+    task["review_admission"]["current"]["candidate_commit"] = "9" * 40
+    with pytest.raises(doctor_cli.DoctorError, match="review/admission"):
+        doctor_cli._validate_current_task_projections(
+            doctor_cli.DoctorPaths(),
+            task,
+            cursor,
+            source_commit=commit,
+            source_tree=tree,
+        )
+
+    task, cursor = _full_current_task_projection(commit, tree)
+    task["live_verification"]["item_workflow_generation"] = "stale-generation"
+    with pytest.raises(doctor_cli.DoctorError, match="item workflow generation"):
+        doctor_cli._validate_current_task_projections(
+            doctor_cli.DoctorPaths(),
+            task,
+            cursor,
+            source_commit=commit,
+            source_tree=tree,
+        )
+
+
+def test_current_task_validation_rejects_inline_generation_in_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commit, tree = "1" * 40, "2" * 40
+    task, cursor = _full_current_task_projection(commit, tree)
+    task["next"].append(f"Do not use stale runtime {'9' * 12}.")
+    monkeypatch.setattr(
+        doctor_cli,
+        "_plan_evidence_identity",
+        lambda _paths, _task: ("e" * 40, "f" * 40),
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="inline generation identities"):
+        doctor_cli._validate_current_task_projections(
+            doctor_cli.DoctorPaths(),
+            task,
+            cursor,
+            source_commit=commit,
+            source_tree=tree,
+        )
 
 
 def test_context_cold_probe_keeps_stdin_open_until_eof_sensitive_fourth_response(
@@ -4666,6 +5047,93 @@ def test_context_repair_updates_only_stale_source_binding_and_writes_receipt(tmp
     assert "staged_snapshot_descriptor" in probes[0][3]
 
 
+@pytest.mark.parametrize("binding", ["source", "plan"])
+def test_context_repair_rolls_back_if_external_binding_changes_across_snapshot_cutover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binding: str
+) -> None:
+    paths, head, tree = _fixture(tmp_path)
+    cursor = json.loads(paths.context_cursor.read_text())
+    cursor["source_commit"] = "b" * 40
+    cursor["source_tree"] = "c" * 40
+    _write_json(paths.context_cursor, cursor)
+    before = {
+        path: doctor_cli._surface_snapshot(path)
+        for path in (
+            paths.context_task,
+            paths.context_cursor,
+            paths.context_snapshot,
+        )
+    }
+    selected = doctor_cli._selected_context_artifacts(paths)
+    original_run = doctor_cli._run
+    original_cas = doctor_cli._cas_regular_file
+    original_plan_identity = doctor_cli._plan_evidence_identity
+    snapshot_cutover = False
+
+    def run(command, **kwargs):
+        if Path(command[0]).name == "tgw_context_publish.py":
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            output_path.write_bytes(
+                publish_bytes(
+                    json.loads(task_path.read_text()),
+                    json.loads(cursor_path.read_text()),
+                )
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    def cas(path: Path, *args, **kwargs):
+        nonlocal snapshot_cutover
+        result = original_cas(path, *args, **kwargs)
+        if path == paths.context_snapshot:
+            snapshot_cutover = True
+        return result
+
+    def source_identity(_paths):
+        if binding == "source" and snapshot_cutover:
+            return "d" * 40, "e" * 40, ""
+        return head, tree, ""
+
+    def plan_identity(observed_paths, task):
+        current = original_plan_identity(observed_paths, task)
+        if binding == "plan" and snapshot_cutover:
+            return "d" * 40, "e" * 40
+        return current
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(doctor_cli, "_source_identity", source_identity)
+    monkeypatch.setattr(doctor_cli, "_plan_evidence_identity", plan_identity)
+    monkeypatch.setattr(
+        doctor_cli, "_repair_context_artifacts", lambda *_args, **_kwargs: selected
+    )
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_cas_regular_file", cas)
+    monkeypatch.setattr(doctor_cli, "_require_trusted_root_program", lambda *_args: None)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
+
+    with pytest.raises(
+        doctor_cli.DoctorError,
+        match=(
+            "source changed across atomic Context publication"
+            if binding == "source"
+            else "Plan evidence changed across atomic Context publication"
+        ),
+    ):
+        doctor_cli.repair_context(paths)
+
+    for path, expected in before.items():
+        assert doctor_cli._surface_semantics(
+            doctor_cli._surface_snapshot(path)
+        ) == doctor_cli._surface_semantics(expected)
+    assert not list(paths.receipts.glob("*-context.json"))
+
+
 def test_explicit_exact_context_repair_reconciles_stale_task_source_without_authority_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4775,7 +5243,12 @@ def test_explicit_exact_context_repair_reconciles_stale_task_source_without_auth
         "review_authority": False,
     }
     workflow_history = repaired_task["coding_workflow_reconciliation_history"]
-    assert workflow_history[-1]["previous"] == {"commit": head, "tree": tree}
+    assert workflow_history[-1]["previous"] == {
+        "commit": head,
+        "tree": tree,
+        "bootstrap_receipt": str(paths.receipts / "bootstrap.json"),
+        "materialization_receipt_hash": "sha256:" + "1" * 64,
+    }
     assert workflow_history[-1]["successor"] == workflow
     assert workflow_history[-1]["authority"] is False
     assert history[-1]["previous"]["commit"] == stale_commit
