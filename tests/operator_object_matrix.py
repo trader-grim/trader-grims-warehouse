@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from tgw.item_mutation import item_generation
 from tgw.operator_objects import build_item_operator_object
 
 
@@ -31,7 +32,7 @@ def _item(state: str) -> dict:
     return item
 
 
-def _workflow(state: str) -> dict:
+def _workflow(state: str, item: dict) -> dict:
     enabled = {
         "ready": {"save-draft", "list-item"},
         "staged": {"save-draft", "list-item", "update-item"},
@@ -48,7 +49,7 @@ def _workflow(state: str) -> dict:
     }.get(state)
     return {
         "entity_id": f"sku-{state}",
-        "object_generation": f"generation-{state}",
+        "object_generation": item_generation(item),
         "graph_id": f"graph-{state}",
         "fingerprints": [],
         "attempts": [],
@@ -94,9 +95,10 @@ def generated_matrix() -> list[dict]:
     }
     rows = []
     for requested_state, enabled in expectations.items():
+        item = _item(requested_state)
         published = build_item_operator_object(
-            item=_item(requested_state),
-            workflow_card=_workflow(requested_state),
+            item=item,
+            workflow_card=_workflow(requested_state, item),
             category_context=context,
         )
         assert published["workflow"]["state"] == requested_state

@@ -45,7 +45,7 @@ from .ebay.description import build_listing_description
 from .ebay.draft_specifics import get_ebay_aspects, set_ebay_aspects
 from .ebay.draft_specifics import is_envelope as _is_ebay_draft_envelope
 from .ebay.inventory_diff import apply_inventory_diff, diff_ebay_draft_to_inventory
-from .item_mutation import item_generation, item_mutation_lock
+from .item_mutation import item_generation, item_mutation_lock, operation_identity
 from .items import _archive_before_overwrite, atomic_write_json, create_item, sync_location_tree
 from .operator_console_host import configured_authority_principal, configured_console_mount
 from .operator_console_plugin import mount_operator_console
@@ -1134,15 +1134,21 @@ def _current_item_operator_object(sku: str) -> Dict[str, Any]:
     if not json_path.exists():
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
     try:
-        item = load_item_doc(json_path)
-        attempts = _workflow_attempt_rows(sku)
-        reconciled_effect_ids = _workflow_reconciled_provider_effect_ids(attempts)
-        workflow_card = build_item_action_card(
-            json_path,
-            attempts,
-            provider_identity=_workflow_provider_identity(),
-            reconciled_provider_effect_ids=reconciled_effect_ids,
-        )
+        with item_mutation_lock(
+            journal_root=_item_mutation_journal_root(json_path),
+            sku=sku,
+        ):
+            item = load_item_doc(json_path)
+            attempts = _workflow_attempt_rows(sku)
+            reconciled_effect_ids = _workflow_reconciled_provider_effect_ids(
+                attempts
+            )
+            workflow_card = build_item_action_card(
+                json_path,
+                attempts,
+                provider_identity=_workflow_provider_identity(),
+                reconciled_provider_effect_ids=reconciled_effect_ids,
+            )
         draft = item.get("draft_listing") if isinstance(item.get("draft_listing"), dict) else {}
         category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "")
         current_condition = str(draft.get("condition_enum") or draft.get("condition") or "")
@@ -1735,37 +1741,73 @@ def patch_item(
                                 exc,
                             )
 
-            # Location-tree maintenance remains inside the same critical
-            # section, while _apply_patch performs the sole item-data write.
+            # Publish the canonical document before touching its derived
+            # location links.  Both effects remain serialized by the same
+            # item lock, but a failed canonical write leaves the old and new
+            # projection paths completely untouched.
             location_value = fields.get("location")
-            if location_value is not None:
-                location_result = sync_location_tree(
-                    _cfg,
-                    sku,
-                    str(doc_before.get("location", "")).strip(),
-                    location_value,
-                )
-                if not location_result.get("ok"):
-                    log.warning(
-                        "location tree update failed for %s: %s",
-                        sku,
-                        location_result,
-                    )
-                    fields["pipeline_error"] = {
-                        "code": "location_update_failed",
-                        "detail": (
-                            f"sync_location_tree() failed: {location_result}"
-                        ),
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "source": "patch_item:location",
-                    }
-
             updated_keys, resulting_generation = _apply_patch(
                 json_path,
                 fields,
                 expected_generation=body.expected_generation,
                 _item_lock_held=True,
             )
+            location_failure = None
+            if location_value is not None:
+                old_location = str(doc_before.get("location", "")).strip()
+                new_location = str(location_value).strip()
+                try:
+                    location_result = sync_location_tree(
+                        _cfg,
+                        sku,
+                        old_location,
+                        new_location,
+                    )
+                except Exception as exc:
+                    location_result = {
+                        "ok": False,
+                        "sku": sku,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                if not location_result.get("ok"):
+                    canonical_generation = resulting_generation
+                    projection_payload = {
+                        "old_location": old_location,
+                        "new_location": new_location,
+                    }
+                    projection_operation_id = operation_identity(
+                        sku=sku,
+                        kind="location-tree-projection",
+                        expected_generation=canonical_generation,
+                        payload=projection_payload,
+                    )
+                    log.warning(
+                        "location tree update failed for %s at %s: %s",
+                        sku,
+                        canonical_generation,
+                        location_result,
+                    )
+                    finding_generation = _persist_finding(
+                        json_path,
+                        sku,
+                        "location_update_failed",
+                        f"sync_location_tree() failed: {location_result}",
+                        "patch_item:location",
+                        item_lock_held=True,
+                        binding={
+                            "operation_id": projection_operation_id,
+                            "sku": sku,
+                            "object_generation": canonical_generation,
+                        },
+                    )
+                    if finding_generation is not None:
+                        resulting_generation = finding_generation
+                    location_failure = {
+                        "canonical_generation": canonical_generation,
+                        "finding_persisted": finding_generation is not None,
+                        "location_operation_id": projection_operation_id,
+                        "projection_result": location_result,
+                    }
     except _ItemGenerationConflict as exc:
         raise HTTPException(
             status_code=409,
@@ -1778,6 +1820,25 @@ def patch_item(
         ) from exc
 
     _enqueue_catalog_rebuild(f"http_patch:{sku}")
+
+    if location_failure is not None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "ok": False,
+                "code": "location_projection_repair_required",
+                "detail": (
+                    "canonical item change committed but the location "
+                    "projection did not; repair is required"
+                ),
+                "sku": sku,
+                "updated": updated_keys,
+                "canonical_committed": True,
+                "projection_updated": False,
+                "resulting_generation": resulting_generation,
+                **location_failure,
+            },
+        )
 
     return {
         "ok": True,
@@ -2016,6 +2077,7 @@ def _persist_finding(
     source: str,
     *,
     item_lock_held: bool = False,
+    binding: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Write a C11 guard finding to pipeline_error — a persisted, queryable
     reason the pipeline skipped/failed something, never just a log line.
@@ -2031,16 +2093,17 @@ def _persist_finding(
     compared to an infinite recursion if the upsert is persistently broken.
     """
     try:
+        finding = {
+            "code": code,
+            "detail": detail,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+        }
+        if binding:
+            finding.update(binding)
         _updated, resulting_generation = _apply_patch(
             json_path,
-            {
-                "pipeline_error": {
-                    "code": code,
-                    "detail": detail,
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "source": source,
-                }
-            },
+            {"pipeline_error": finding},
             _skip_catalog_upsert=True,
             _item_lock_held=item_lock_held,
         )

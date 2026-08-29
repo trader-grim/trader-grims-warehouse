@@ -343,7 +343,7 @@
       },
       "item": {
         "entity_id": "sku-ready",
-        "object_generation": "generation-ready",
+        "object_generation": "d4aee5127345810e32a1504f146b5e522c0a99aecfe52926801f954f839f87e8",
         "record": {
           "draft_listing": {
             "category_id": "123",
@@ -360,11 +360,11 @@
       "listing": {
         "entity_id": "sku-ready",
         "listing": {},
-        "object_generation": "generation-ready",
+        "object_generation": "d4aee5127345810e32a1504f146b5e522c0a99aecfe52926801f954f839f87e8",
         "offer": {},
         "provider_state": "not-staged"
       },
-      "object_generation": "generation-ready",
+      "object_generation": "d4aee5127345810e32a1504f146b5e522c0a99aecfe52926801f954f839f87e8",
       "schema": "tgw-operator-object/v1",
       "workflow": {
         "details": {
@@ -382,7 +382,7 @@
               "treatment_version": "1"
             }
           ],
-          "object_generation": "generation-ready",
+          "object_generation": "d4aee5127345810e32a1504f146b5e522c0a99aecfe52926801f954f839f87e8",
           "operator_gates": [],
           "operator_projection": {
             "commands": {
@@ -757,7 +757,7 @@
       },
       "item": {
         "entity_id": "sku-staged",
-        "object_generation": "generation-staged",
+        "object_generation": "45345c66d41bec01d87bb57ab25b05936c166b5511e1143f1c6bb8ba72cb22ea",
         "record": {
           "draft_listing": {
             "category_id": "123",
@@ -778,14 +778,14 @@
       "listing": {
         "entity_id": "sku-staged",
         "listing": {},
-        "object_generation": "generation-staged",
+        "object_generation": "45345c66d41bec01d87bb57ab25b05936c166b5511e1143f1c6bb8ba72cb22ea",
         "offer": {
           "offer_id": "offer-staged",
           "status": "UNPUBLISHED"
         },
         "provider_state": "UNPUBLISHED"
       },
-      "object_generation": "generation-staged",
+      "object_generation": "45345c66d41bec01d87bb57ab25b05936c166b5511e1143f1c6bb8ba72cb22ea",
       "schema": "tgw-operator-object/v1",
       "workflow": {
         "details": {
@@ -803,7 +803,7 @@
               "treatment_version": "1"
             }
           ],
-          "object_generation": "generation-staged",
+          "object_generation": "45345c66d41bec01d87bb57ab25b05936c166b5511e1143f1c6bb8ba72cb22ea",
           "operator_gates": [],
           "operator_projection": {
             "commands": {
@@ -1177,7 +1177,7 @@
       },
       "item": {
         "entity_id": "sku-published",
-        "object_generation": "generation-published",
+        "object_generation": "70f829029a3675aae48c0d23b2ec8b28542ca853df6b6c8116fec57c2abd7e59",
         "record": {
           "draft_listing": {
             "category_id": "123",
@@ -1205,14 +1205,14 @@
           "listing_id": "listing-published",
           "status": "Active"
         },
-        "object_generation": "generation-published",
+        "object_generation": "70f829029a3675aae48c0d23b2ec8b28542ca853df6b6c8116fec57c2abd7e59",
         "offer": {
           "offer_id": "offer-published",
           "status": "PUBLISHED"
         },
         "provider_state": "Active"
       },
-      "object_generation": "generation-published",
+      "object_generation": "70f829029a3675aae48c0d23b2ec8b28542ca853df6b6c8116fec57c2abd7e59",
       "schema": "tgw-operator-object/v1",
       "workflow": {
         "details": {
@@ -1222,7 +1222,7 @@
           "fingerprints": [],
           "graph_id": "graph-published",
           "legal_actions": [],
-          "object_generation": "generation-published",
+          "object_generation": "70f829029a3675aae48c0d23b2ec8b28542ca853df6b6c8116fec57c2abd7e59",
           "operator_gates": [],
           "operator_projection": {
             "commands": {
@@ -1599,7 +1599,7 @@
       },
       "item": {
         "entity_id": "sku-held",
-        "object_generation": "generation-held",
+        "object_generation": "6e3481d1a412b438155c42895f91701a583d258db905029249b64177e313cf9c",
         "record": {
           "draft_listing": {
             "category_id": "99",
@@ -1612,11 +1612,11 @@
       "listing": {
         "entity_id": "sku-held",
         "listing": {},
-        "object_generation": "generation-held",
+        "object_generation": "6e3481d1a412b438155c42895f91701a583d258db905029249b64177e313cf9c",
         "offer": {},
         "provider_state": "not-staged"
       },
-      "object_generation": "generation-held",
+      "object_generation": "6e3481d1a412b438155c42895f91701a583d258db905029249b64177e313cf9c",
       "schema": "tgw-operator-object/v1",
       "workflow": {
         "details": {
@@ -1626,7 +1626,7 @@
           "fingerprints": [],
           "graph_id": "graph-held",
           "legal_actions": [],
-          "object_generation": "generation-held",
+          "object_generation": "6e3481d1a412b438155c42895f91701a583d258db905029249b64177e313cf9c",
           "operator_gates": [],
           "operator_projection": {
             "commands": {
@@ -1996,7 +1996,7 @@
       },
       "item": {
         "entity_id": "sku-in_progress",
-        "object_generation": "generation-in_progress",
+        "object_generation": "e2b67d4e4a3e3cb9fd92db41437e02ac807feedf0db770cb0a82d527210ec7b7",
         "record": {
           "draft_listing": {
             "category_id": "123",
@@ -2013,11 +2013,11 @@
       "listing": {
         "entity_id": "sku-in_progress",
         "listing": {},
-        "object_generation": "generation-in_progress",
+        "object_generation": "e2b67d4e4a3e3cb9fd92db41437e02ac807feedf0db770cb0a82d527210ec7b7",
         "offer": {},
         "provider_state": "not-staged"
       },
-      "object_generation": "generation-in_progress",
+      "object_generation": "e2b67d4e4a3e3cb9fd92db41437e02ac807feedf0db770cb0a82d527210ec7b7",
       "schema": "tgw-operator-object/v1",
       "workflow": {
         "details": {
@@ -2029,7 +2029,7 @@
           "fingerprints": [],
           "graph_id": "graph-in_progress",
           "legal_actions": [],
-          "object_generation": "generation-in_progress",
+          "object_generation": "e2b67d4e4a3e3cb9fd92db41437e02ac807feedf0db770cb0a82d527210ec7b7",
           "operator_gates": [],
           "operator_projection": {
             "commands": {
@@ -2404,7 +2404,7 @@
       },
       "item": {
         "entity_id": "sku-reconciliation_required",
-        "object_generation": "generation-reconciliation_required",
+        "object_generation": "98ace19f019d5924f04634487e13f8baa297215170a0455735918ad76ab4be88",
         "record": {
           "draft_listing": {
             "category_id": "123",
@@ -2421,11 +2421,11 @@
       "listing": {
         "entity_id": "sku-reconciliation_required",
         "listing": {},
-        "object_generation": "generation-reconciliation_required",
+        "object_generation": "98ace19f019d5924f04634487e13f8baa297215170a0455735918ad76ab4be88",
         "offer": {},
         "provider_state": "not-staged"
       },
-      "object_generation": "generation-reconciliation_required",
+      "object_generation": "98ace19f019d5924f04634487e13f8baa297215170a0455735918ad76ab4be88",
       "schema": "tgw-operator-object/v1",
       "workflow": {
         "details": {
@@ -2435,7 +2435,7 @@
           "fingerprints": [],
           "graph_id": "graph-reconciliation_required",
           "legal_actions": [],
-          "object_generation": "generation-reconciliation_required",
+          "object_generation": "98ace19f019d5924f04634487e13f8baa297215170a0455735918ad76ab4be88",
           "operator_gates": [],
           "operator_projection": {
             "commands": {

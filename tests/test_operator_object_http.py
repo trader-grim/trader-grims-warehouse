@@ -18,10 +18,10 @@ from tgw.workflow import listing_migration
 AUTH = {"Authorization": "Bearer operator-object-test"}
 
 
-def _card():
+def _card(item):
     return {
         "entity_id": "sku-1",
-        "object_generation": "gen-1",
+        "object_generation": item_generation(item),
         "graph_id": "graph-1",
         "fingerprints": [],
         "attempts": [],
@@ -51,18 +51,19 @@ def _card():
 
 
 def _published():
-    return build_item_operator_object(
-        item={
-            "sku": "sku-1",
-            "draft_listing": {
-                "category_id": "123",
-                "condition_enum": "USED_GOOD",
-                "condition_label": "Used - Good",
-                "item_specifics": {},
-            },
-            "ebay_offer": {"offer_id": "offer-1", "status": "UNPUBLISHED"},
+    item = {
+        "sku": "sku-1",
+        "draft_listing": {
+            "category_id": "123",
+            "condition_enum": "USED_GOOD",
+            "condition_label": "Used - Good",
+            "item_specifics": {},
         },
-        workflow_card=_card(),
+        "ebay_offer": {"offer_id": "offer-1", "status": "UNPUBLISHED"},
+    }
+    return build_item_operator_object(
+        item=item,
+        workflow_card=_card(item),
         category_context={
             "conditions": [{"enum": "USED_GOOD", "label": "Used - Good"}],
             "aspects": [],
@@ -72,8 +73,7 @@ def _published():
 
 def _published_from_item_path(item_path, category_context=None):
     item = json.loads(item_path.read_text(encoding="utf-8"))
-    card = _card()
-    card["object_generation"] = item_generation(item)
+    card = _card(item)
     return build_item_operator_object(
         item=item,
         workflow_card=card,
@@ -202,6 +202,65 @@ def test_get_operator_object_mounts_real_http_contract(tmp_path, monkeypatch):
         "ai_hint": "printed paper",
         "ebay_categories": ["123"],
     }
+
+
+def test_exact_route_fails_closed_on_a_record_with_b_action_card_generation(
+    tmp_path,
+    monkeypatch,
+):
+    from tgw.workflow import action_cards
+
+    itemdata_root = tmp_path / "ItemData"
+    item_dir = itemdata_root / "sku-1"
+    item_dir.mkdir(parents=True)
+    item_path = item_dir / "sku-1.json"
+    item_a = {"sku": "sku-1", "title": "A"}
+    item_b = {"sku": "sku-1", "title": "B"}
+    item_path.write_text(json.dumps(item_a), encoding="utf-8")
+    monkeypatch.setattr(
+        http_server,
+        "_cfg",
+        {
+            "itemdata_root": itemdata_root,
+            "item_mutation_journal_root": tmp_path / "item-mutations",
+        },
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_api_key",
+        AUTH["Authorization"].removeprefix("Bearer "),
+    )
+    monkeypatch.setattr(http_server, "_workflow_attempt_rows", lambda sku: [])
+    monkeypatch.setattr(
+        http_server,
+        "_workflow_reconciled_provider_effect_ids",
+        lambda rows: frozenset(),
+    )
+    monkeypatch.setattr(http_server, "_workflow_provider_identity", lambda: "")
+    real_build_action_card = action_cards.build_item_action_card
+
+    def build_b_action_card(*args, **kwargs):
+        # Exact reviewed interleaving: the route already holds record A in
+        # memory, then an uncooperative writer publishes B before the action
+        # card reopens the pathname and derives B's generation.
+        item_path.write_text(json.dumps(item_b), encoding="utf-8")
+        return real_build_action_card(*args, **kwargs)
+
+    monkeypatch.setattr(
+        action_cards,
+        "build_item_action_card",
+        build_b_action_card,
+    )
+
+    response = TestClient(http_server.app).get(
+        "/api/operator/items/sku-1",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 503, response.text
+    assert "object" not in response.json()
+    assert "item generation" in response.json()["detail"]
+    assert json.loads(item_path.read_text(encoding="utf-8")) == item_b
 
 
 def test_live_shaped_lowercase_config_preserves_display_and_cached_policy(
@@ -555,6 +614,7 @@ def test_command_rejects_stale_generation_before_dispatch(monkeypatch):
 def test_operator_save_http_rejects_nonfinite_and_type_confused_numeric_payloads(
     monkeypatch, draft_fragment
 ):
+    published = _published()
     monkeypatch.setattr(
         http_server,
         "_api_key",
@@ -563,7 +623,7 @@ def test_operator_save_http_rejects_nonfinite_and_type_confused_numeric_payloads
     monkeypatch.setattr(
         http_server,
         "_current_item_operator_object",
-        lambda sku: _published(),
+        lambda sku: published,
     )
     monkeypatch.setattr(
         http_server,
@@ -574,7 +634,8 @@ def test_operator_save_http_rejects_nonfinite_and_type_confused_numeric_payloads
     )
     payload = (
         '{"command_id":"save-listing-draft",'
-        '"object_generation":"gen-1","values":{"draft_listing":{'
+        f'"object_generation":"{published["object_generation"]}",'
+        '"values":{"draft_listing":{'
         f"{draft_fragment}"
         "}}}"
     )
@@ -673,6 +734,63 @@ def test_operator_save_and_actual_ebay_write_share_the_real_item_lock(
     final_document = json.loads(item_path.read_text(encoding="utf-8"))
     assert final_document["notes"] == "operator edit"
     assert final_document["ebay_offer"]["offer_id"] == "offer-1"
+
+
+def test_operator_location_save_propagates_post_commit_repair_required(
+    tmp_path,
+    monkeypatch,
+):
+    item_path = _configure_real_item_command_storage(
+        tmp_path,
+        monkeypatch,
+        {
+            "sku": "sku-1",
+            "title": "Thing",
+            "location": "old-bin",
+            "draft_listing": {
+                "category_id": "123",
+                "condition_enum": "USED_GOOD",
+                "item_specifics": {},
+            },
+        },
+    )
+    http_server._cfg["location_tree_root"] = tmp_path / "by-location"
+    monkeypatch.setattr(
+        http_server,
+        "_current_item_operator_object",
+        lambda _sku: _published_from_item_path(item_path),
+    )
+    monkeypatch.setattr(
+        http_server,
+        "sync_location_tree",
+        lambda *args, **kwargs: {
+            "ok": False,
+            "sku": "sku-1",
+            "error": "injected location projection failure",
+        },
+    )
+    generation = item_generation(
+        json.loads(item_path.read_text(encoding="utf-8"))
+    )
+
+    response = TestClient(http_server.app).post(
+        "/api/operator/items/sku-1/commands",
+        headers=AUTH,
+        json={
+            "command_id": "save-inventory",
+            "object_generation": generation,
+            "values": {"item_fields": {"location": "new-bin"}},
+        },
+    )
+
+    assert response.status_code == 503, response.text
+    detail = response.json()["detail"]
+    stored = json.loads(item_path.read_text(encoding="utf-8"))
+    assert detail["ok"] is False
+    assert detail["code"] == "location_projection_repair_required"
+    assert detail["resulting_generation"] == item_generation(stored)
+    assert stored["location"] == "new-bin"
+    assert stored["pipeline_error"]["code"] == "location_update_failed"
 
 
 @pytest.mark.parametrize(
@@ -896,14 +1014,22 @@ def test_legacy_publication_and_bulk_list_paths_are_not_registered(monkeypatch):
 def test_update_command_uses_nonpublication_dispatcher(monkeypatch, tmp_path):
     monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
     monkeypatch.setattr(http_server, "_cfg", {"itemdata_root": tmp_path})
-    monkeypatch.setattr(http_server, "_current_item_operator_object", lambda sku: _published())
+    published = _published()
+    monkeypatch.setattr(
+        http_server,
+        "_current_item_operator_object",
+        lambda sku: published,
+    )
     monkeypatch.setattr(http_server, "_workflow_provider_identity", lambda: "ebay:test")
     seen = {}
 
     def update_dispatch(path, **kwargs):
         seen.update(kwargs)
         result = SimpleNamespace(
-            graph=SimpleNamespace(graph_id="graph-2", object_generation="gen-1"),
+            graph=SimpleNamespace(
+                graph_id="graph-2",
+                object_generation=published["object_generation"],
+            ),
             held_external=(),
             operator_gates=(),
         )
@@ -920,7 +1046,11 @@ def test_update_command_uses_nonpublication_dispatcher(monkeypatch, tmp_path):
     response = TestClient(http_server.app).post(
         "/api/operator/items/sku-1/commands",
         headers=AUTH,
-        json={"command_id": "update-item", "object_generation": "gen-1", "values": {}},
+        json={
+            "command_id": "update-item",
+            "object_generation": published["object_generation"],
+            "values": {},
+        },
     )
 
     assert response.status_code == 200
@@ -989,7 +1119,7 @@ def test_sparse_inventory_and_listing_draft_http_round_trips_are_distinct(
         headers=AUTH,
         json={
             "command_id": command_id,
-            "object_generation": "gen-1",
+            "object_generation": published["object_generation"],
             "values": values,
         },
     )
@@ -1046,7 +1176,7 @@ def test_group_selection_is_one_atomic_http_patch_and_preserves_later_category(
     }
     published = build_item_operator_object(
         item=item,
-        workflow_card=_card(),
+        workflow_card=_card(item),
         category_context={
             "conditions": [{"enum": "USED_GOOD", "label": "Used - Good"}],
             "aspects": [],
@@ -1080,7 +1210,7 @@ def test_group_selection_is_one_atomic_http_patch_and_preserves_later_category(
         headers=AUTH,
         json={
             "command_id": "save-inventory",
-            "object_generation": "gen-1",
+            "object_generation": published["object_generation"],
             "values": {"item_fields": {"category_group": "books"}},
         },
     )
@@ -1106,7 +1236,7 @@ def test_unrelated_inventory_save_does_not_reapply_unchanged_group_defaults(
     }
     published = build_item_operator_object(
         item=item,
-        workflow_card=_card(),
+        workflow_card=_card(item),
         category_context={
             "conditions": [{"enum": "USED_GOOD", "label": "Used - Good"}],
             "aspects": [],
@@ -1146,7 +1276,7 @@ def test_unrelated_inventory_save_does_not_reapply_unchanged_group_defaults(
         headers=AUTH,
         json={
             "command_id": "save-inventory",
-            "object_generation": "gen-1",
+            "object_generation": published["object_generation"],
             # Defensive HTTP reproduction: even a stale client that resends
             # the unchanged group must not overwrite custom server fields.
             "values": {
@@ -1188,7 +1318,7 @@ def test_illegal_condition_listing_draft_http_remediation_paths(
     }
     published = build_item_operator_object(
         item=item,
-        workflow_card=_card(),
+        workflow_card=_card(item),
         category_context={
             "category_recognized": True,
             "item_condition_required": True,
@@ -1224,7 +1354,7 @@ def test_illegal_condition_listing_draft_http_remediation_paths(
         headers=AUTH,
         json={
             "command_id": "save-listing-draft",
-            "object_generation": "gen-1",
+            "object_generation": published["object_generation"],
             "values": {"draft_listing": draft_values},
         },
     )
@@ -1243,9 +1373,14 @@ def test_illegal_condition_listing_draft_http_remediation_paths(
 def test_second_sparse_save_is_an_idempotent_http_noop(
     monkeypatch, tmp_path, command_id, values
 ):
+    published = _published()
     monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
     monkeypatch.setattr(http_server, "_cfg", {"itemdata_root": tmp_path})
-    monkeypatch.setattr(http_server, "_current_item_operator_object", lambda sku: _published())
+    monkeypatch.setattr(
+        http_server,
+        "_current_item_operator_object",
+        lambda sku: published,
+    )
     monkeypatch.setattr(
         http_server,
         "patch_item",
@@ -1264,11 +1399,11 @@ def test_second_sparse_save_is_an_idempotent_http_noop(
         headers=AUTH,
         json={
             "command_id": command_id,
-            "object_generation": "gen-1",
+            "object_generation": published["object_generation"],
             "values": values,
         },
     )
 
     assert response.status_code == 200, response.text
     assert response.json()["command_id"] == command_id
-    assert response.json()["object_generation"] == "gen-1"
+    assert response.json()["object_generation"] == published["object_generation"]

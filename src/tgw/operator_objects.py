@@ -14,6 +14,7 @@ from typing import Any, Mapping, Sequence
 
 from tgw import inventory_record
 from tgw.ebay.draft_specifics import get_ebay_aspects
+from tgw.item_mutation import item_generation
 
 OPERATOR_OBJECT_SCHEMA = "tgw-operator-object/v1"
 ADAPTER_VIEW_SCHEMA = "tgw-operator-adapter-view/v1"
@@ -276,6 +277,10 @@ def build_item_operator_object(
         raise OperatorObjectBindingError("workflow_card.object_generation is required")
     if item.get("sku") != entity_id:
         raise OperatorObjectBindingError("item and workflow identities must match")
+    if item_generation(item) != generation:
+        raise OperatorObjectBindingError(
+            "item generation and workflow_card.object_generation must match"
+        )
 
     offer = item.get("ebay_offer") if isinstance(item.get("ebay_offer"), Mapping) else {}
     provider_listing = item.get("ebay_listing") if isinstance(item.get("ebay_listing"), Mapping) else {}

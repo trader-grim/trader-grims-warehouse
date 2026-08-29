@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tgw.item_mutation import item_generation
 from tgw.operator_objects import (
     OperatorObjectBindingError,
     build_item_operator_object,
@@ -87,7 +88,7 @@ def test_adapter_view_is_detached_from_caller_mutation():
     assert rendered == before
 
 
-def _workflow_card(*, reconciliation=(), active=(), state="staged"):
+def _workflow_card(*, item=None, reconciliation=(), active=(), state="staged"):
     blocked = bool(reconciliation)
     running = bool(active)
     projected_state = (
@@ -102,7 +103,9 @@ def _workflow_card(*, reconciliation=(), active=(), state="staged"):
     )
     return {
         "entity_id": "sku-1",
-        "object_generation": "gen-1",
+        "object_generation": item_generation(
+            item if item is not None else _item(published=state == "published")
+        ),
         "graph_id": "graph-1",
         "fingerprints": [
             {"condition_id": "valid_category", "result": "true", "reasons": [], "evidence": []},
@@ -192,6 +195,22 @@ def test_server_builder_publishes_complete_thin_client_contract():
     }
 
 
+def test_server_builder_rejects_mixed_item_and_action_card_generations():
+    item = _item()
+    workflow_card = _workflow_card(item=item)
+    workflow_card["object_generation"] = "0" * 64
+
+    with pytest.raises(
+        OperatorObjectBindingError,
+        match="item generation and workflow_card.object_generation must match",
+    ):
+        build_item_operator_object(
+            item=item,
+            workflow_card=workflow_card,
+            category_context=_category_context(),
+        )
+
+
 def test_published_provider_state_disables_list_but_keeps_update_nonpublishing():
     published = build_item_operator_object(
         item=_item(published=True),
@@ -271,7 +290,7 @@ def test_optional_108857_keeps_independent_record_condition_and_global_vocabular
 
     published = build_item_operator_object(
         item=item,
-        workflow_card=_workflow_card(),
+        workflow_card=_workflow_card(item=item),
         category_context=_policy_context(
             item_condition_required=False,
             conditions=[],
@@ -332,7 +351,7 @@ def test_empty_record_condition_vocabulary_is_displayable_but_fail_closed():
     item["condition"] = "Existing Grade"
     published = build_item_operator_object(
         item=item,
-        workflow_card=_workflow_card(),
+        workflow_card=_workflow_card(item=item),
         category_context=_policy_context(
             category_groups=[{"value": "paper", "label": "Paper"}],
             record_condition_vocabulary=[],
@@ -379,7 +398,7 @@ def test_casefold_colliding_record_conditions_are_deterministic_and_unwritable(
     item["condition"] = "Good"
     published = build_item_operator_object(
         item=item,
-        workflow_card=_workflow_card(),
+        workflow_card=_workflow_card(item=item),
         category_context=_policy_context(
             category_groups=[{"value": "paper", "label": "Paper"}],
             record_condition_vocabulary=vocabulary,
@@ -478,7 +497,7 @@ def test_condition_policy_holds_only_provider_commands(
     item["draft_listing"]["condition_enum"] = condition_enum
     published = build_item_operator_object(
         item=item,
-        workflow_card=_workflow_card(),
+        workflow_card=_workflow_card(item=item),
         category_context=context,
     )
     commands = {command["id"]: command for command in published["commands"]}
@@ -502,7 +521,7 @@ def test_illegal_condition_is_display_only_until_explicit_remap_or_clear():
     item["draft_listing"]["condition_enum"] = "USED_GOOD"
     published = build_item_operator_object(
         item=item,
-        workflow_card=_workflow_card(),
+        workflow_card=_workflow_card(item=item),
         category_context=_policy_context(
             conditions=[{"enum": "NEW", "label": "New"}],
             condition_remap={"enum": "NEW", "label": "New"},
