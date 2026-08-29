@@ -1,5 +1,10 @@
 #!/bin/sh
 set -eu
+case "$0" in
+  /*) runner_dir=${0%/*} ;;
+  *) echo "review runner requires an absolute pinned path" >&2; exit 1 ;;
+esac
+release_dir=$(CDPATH= cd -P "$runner_dir/.." && pwd)
 export PYTHONDONTWRITEBYTECODE=1
-export PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src
+export PYTHONPATH="$release_dir/src"
 exec /opt/TGW/.venvs/controller/bin/python3 -m tgw.development.coding_review "$@"

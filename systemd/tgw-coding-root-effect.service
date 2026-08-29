@@ -15,7 +15,7 @@ WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current
 Environment=HOME=/home/db
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=GIT_OPTIONAL_LOCKS=0
-Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src
+Environment=PYTHONPATH=src
 ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.development.coding_root_effect --config /opt/TGW/tgw-lib/config/tgw-coding-local.json
 Restart=always
 RestartSec=5s

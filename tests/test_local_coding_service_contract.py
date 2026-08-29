@@ -23,7 +23,11 @@ def test_local_coding_units_use_unix_accounts_and_shared_group() -> None:
         assert "SupplementaryGroups=tgw-coders" in unit
         assert "UMask=0002" in unit
         assert "tgw.development.local_workflow" in unit
-        assert "/opt/TGW/tgw-lib/coding-runtime/current/src" in unit
+        if name == "tgw-coding-local-foreman.service":
+            assert "/opt/TGW/tgw-lib/coding-runtime/current/src" in unit
+        else:
+            assert "WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current" in unit
+            assert "Environment=PYTHONPATH=src" in unit
         assert "ProtectSystem=strict" not in unit
         assert "ReadWritePaths=" not in unit
         lowered = unit.lower()

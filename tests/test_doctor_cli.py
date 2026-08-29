@@ -5500,20 +5500,141 @@ def test_service_process_runtime_identity_uses_resolved_working_directory(
     process = tmp_path / "proc/123"
     process.mkdir(parents=True)
     (process / "cwd").symlink_to(stale)
+    state = {
+        "Unit": "tgw-codex-implement-worker.service",
+        "MainPID": "123",
+        "InvocationID": "1" * 32,
+        "ExecMainStartTimestampMonotonic": "100",
+    }
 
     stale_result = doctor_cli._service_process_runtime_identity(
-        {"MainPID": "123"}, release, proc_root=tmp_path / "proc"
+        state,
+        release,
+        proc_root=tmp_path / "proc",
+        state_reader=lambda _unit: state,
     )
     (process / "cwd").unlink()
     (process / "cwd").symlink_to(release)
     exact_result = doctor_cli._service_process_runtime_identity(
-        {"MainPID": "123"}, release, proc_root=tmp_path / "proc"
+        state,
+        release,
+        proc_root=tmp_path / "proc",
+        state_reader=lambda _unit: state,
     )
 
+    assert stale_result["status"] == "STALE"
+    assert stale_result["restart_safe"] is True
     assert stale_result["exact"] is False
     assert stale_result["loaded_release"] == str(stale.resolve())
+    assert exact_result["status"] == "EXACT"
     assert exact_result["exact"] is True
     assert exact_result["loaded_release"] == str(release.resolve())
+
+
+def test_service_process_runtime_identity_retries_changed_systemd_invocation(
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "runtime/releases" / ("a" * 40)
+    stale = tmp_path / "runtime/releases" / ("b" * 40)
+    release.mkdir(parents=True)
+    stale.mkdir(parents=True)
+    proc = tmp_path / "proc"
+    for pid, cwd in (("101", stale), ("202", release)):
+        process = proc / pid
+        process.mkdir(parents=True)
+        (process / "cwd").symlink_to(cwd)
+    unit = "tgw-codex-implement-worker.service"
+    first = {
+        "Unit": unit,
+        "MainPID": "101",
+        "InvocationID": "1" * 32,
+        "ExecMainStartTimestampMonotonic": "100",
+    }
+    replacement = {
+        "Unit": unit,
+        "MainPID": "202",
+        "InvocationID": "2" * 32,
+        "ExecMainStartTimestampMonotonic": "200",
+    }
+    observations = iter((replacement, replacement))
+
+    result = doctor_cli._service_process_runtime_identity(
+        first,
+        release,
+        proc_root=proc,
+        state_reader=lambda _unit: next(observations),
+    )
+
+    assert result["status"] == "EXACT"
+    assert result["pid"] == 202
+    assert result["invocation_id"] == "2" * 32
+    assert len(result["attempts"]) == 2
+    assert result["attempts"][0]["before"] != result["attempts"][0]["after"]
+
+
+def test_service_process_runtime_identity_reports_exhausted_replacement_race(
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "runtime/releases" / ("a" * 40)
+    release.mkdir(parents=True)
+    proc = tmp_path / "proc"
+    for pid in ("101", "202"):
+        process = proc / pid
+        process.mkdir(parents=True)
+        (process / "cwd").symlink_to(release)
+    unit = "tgw-codex-implement-worker.service"
+
+    def state(pid: str, generation: str, started: str) -> dict[str, str]:
+        return {
+            "Unit": unit,
+            "MainPID": pid,
+            "InvocationID": generation * 32,
+            "ExecMainStartTimestampMonotonic": started,
+        }
+
+    first = state("101", "1", "100")
+    observations = iter((state("202", "2", "200"), state("303", "3", "300")))
+
+    result = doctor_cli._service_process_runtime_identity(
+        first,
+        release,
+        proc_root=proc,
+        state_reader=lambda _unit: next(observations),
+    )
+
+    assert result["status"] == "RACED"
+    assert result["restart_safe"] is False
+    assert result["pid"] == 303
+    assert len(result["attempts"]) == 2
+
+
+def test_service_process_runtime_identity_classifies_stable_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = tmp_path / "runtime/releases" / ("a" * 40)
+    release.mkdir(parents=True)
+    state = {
+        "Unit": "tgw-codex-implement-worker.service",
+        "MainPID": "123",
+        "InvocationID": "1" * 32,
+        "ExecMainStartTimestampMonotonic": "100",
+    }
+    monkeypatch.setattr(
+        doctor_cli,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1, "", "denied"),
+    )
+
+    result = doctor_cli._service_process_runtime_identity(
+        state,
+        release,
+        proc_root=tmp_path / "proc",
+        state_reader=lambda _unit: state,
+    )
+
+    assert result["status"] == "UNREADABLE"
+    assert result["restart_safe"] is False
+    assert result["exact"] is False
 
 
 def test_check_units_rejects_active_service_from_stale_release(
@@ -5565,6 +5686,8 @@ def _stub_worker_repair(
     monkeypatch: pytest.MonkeyPatch,
     *,
     restart_fails: bool = False,
+    initial_status: str = "STALE",
+    post_check_passes: bool = True,
 ) -> tuple[doctor_cli.DoctorPaths, str, str, list[list[str]]]:
     commit = "a" * 40
     tree = "b" * 40
@@ -5578,7 +5701,10 @@ def _stub_worker_repair(
     paths.repository.mkdir()
     paths.systemd_install_root.mkdir()
     stale_unit = "tgw-codex-implement-worker.service"
-    runtime_exact = {unit: unit != stale_unit for unit in doctor_cli._ACTIVE_CODING_UNITS}
+    runtime_status = {
+        unit: initial_status if unit == stale_unit else "EXACT"
+        for unit in doctor_cli._ACTIVE_CODING_UNITS
+    }
     commands: list[list[str]] = []
 
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
@@ -5612,10 +5738,18 @@ def _stub_worker_repair(
     monkeypatch.setattr(
         doctor_cli,
         "_service_process_runtime_identity",
-        lambda state, _release: {"exact": runtime_exact[state["Unit"]]},
+        lambda state, _release: {
+            "status": runtime_status[state["Unit"]],
+            "exact": runtime_status[state["Unit"]] == "EXACT",
+            "restart_safe": runtime_status[state["Unit"]] == "STALE",
+        },
     )
     monkeypatch.setattr(
-        doctor_cli, "check_units", lambda *_args, **_kwargs: {"state": "PASS"}
+        doctor_cli,
+        "check_units",
+        lambda *_args, **_kwargs: {
+            "state": "PASS" if post_check_passes else "FAIL"
+        },
     )
     monkeypatch.setattr(doctor_cli, "_receipt", lambda *_args: "receipt")
 
@@ -5624,7 +5758,7 @@ def _stub_worker_repair(
         if command == ["systemctl", "restart", stale_unit]:
             if restart_fails:
                 return subprocess.CompletedProcess(command, 1, "", "restart failed")
-            runtime_exact[stale_unit] = True
+            runtime_status[stale_unit] = "EXACT"
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(doctor_cli, "_run", run)
@@ -5656,15 +5790,116 @@ def test_repair_workers_fails_closed_when_stale_generation_cannot_restart(
         doctor_cli.repair_workers(paths, desired_commit=commit)
 
 
+def test_repair_workers_requires_exact_post_restart_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commit, stale_unit, commands = _stub_worker_repair(
+        tmp_path, monkeypatch, post_check_passes=False
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="remain unhealthy"):
+        doctor_cli.repair_workers(paths, desired_commit=commit)
+
+    assert ["systemctl", "restart", stale_unit] in commands
+
+
+@pytest.mark.parametrize("status", ("RACED", "UNREADABLE"))
+def test_repair_workers_never_restarts_unproven_process_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    paths, commit, stale_unit, commands = _stub_worker_repair(
+        tmp_path, monkeypatch, initial_status=status
+    )
+
+    with pytest.raises(
+        doctor_cli.DoctorError,
+        match=rf"refusing to restart {stale_unit}: process runtime is {status.lower()}",
+    ):
+        doctor_cli.repair_workers(paths, desired_commit=commit)
+
+    assert ["systemctl", "restart", stale_unit] not in commands
+
+
+def test_repair_workers_exact_generation_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commit, _unit, commands = _stub_worker_repair(
+        tmp_path, monkeypatch, initial_status="EXACT"
+    )
+
+    first = doctor_cli.repair_workers(paths, desired_commit=commit)
+    second = doctor_cli.repair_workers(paths, desired_commit=commit)
+
+    assert first["service_actions"] == []
+    assert second["service_actions"] == []
+    assert commands == []
+
+
 def test_active_coding_service_units_bind_selected_immutable_runtime() -> None:
     for unit in doctor_cli._ACTIVE_CODING_UNITS:
         if not unit.endswith(".service"):
             continue
-        source = ROOT / "systemd" / unit
+        text = (ROOT / "systemd" / unit).read_text(encoding="utf-8")
+        assert "WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current" in text
+        assert "Environment=PYTHONPATH=src" in text
         assert (
-            "WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current"
-            in source.read_text(encoding="utf-8")
+            "Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src"
+            not in text
         )
+
+
+def test_relative_service_pythonpath_survives_selector_move_for_lazy_import(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    first = runtime / "releases" / ("a" * 40)
+    second = runtime / "releases" / ("b" * 40)
+    for release, value in ((first, "A"), (second, "B")):
+        source = release / "src"
+        source.mkdir(parents=True)
+        (source / "lazy_generation.py").write_text(
+            f"VALUE = {value!r}\n", encoding="utf-8"
+        )
+    current = runtime / "current"
+    current.symlink_to(Path("releases") / first.name, target_is_directory=True)
+    code = (
+        "import json, os, sys\n"
+        "print(json.dumps({'cwd': os.getcwd(), 'pythonpath': sys.path[1]}), flush=True)\n"
+        "input()\n"
+        "import lazy_generation\n"
+        "print(lazy_generation.VALUE, flush=True)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", code],
+        cwd=current,
+        env={
+            **os.environ,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": "src",
+        },
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    started = json.loads(process.stdout.readline())
+    replacement = runtime / "next"
+    replacement.symlink_to(Path("releases") / second.name, target_is_directory=True)
+    os.replace(replacement, current)
+    try:
+        stdout, stderr = process.communicate("\n", timeout=10)
+    except BaseException:
+        process.kill()
+        process.wait(timeout=10)
+        raise
+
+    assert process.returncode == 0, stderr
+    assert started == {
+        "cwd": str(first.resolve()),
+        "pythonpath": str((first / "src").resolve()),
+    }
+    assert stdout.strip() == "A"
 
 
 def test_inventory_marks_unique_work_for_preservation(tmp_path: Path) -> None:

@@ -59,6 +59,7 @@ def _postgres_driver() -> tuple[Any, Any]:
 
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_INVOCATION_ID = re.compile(r"[0-9a-f]{32}\Z")
 _LOOSE_OBJECT_DIRECTORY = re.compile(r"[0-9a-f]{2}\Z")
 _LOOSE_OBJECT_NAME = re.compile(r"[0-9a-f]{38}\Z")
 _STATES = {"PASS", "WARN", "FAIL", "UNKNOWN", "RESTART_REQUIRED"}
@@ -66,6 +67,7 @@ _CONTEXT_COLD_PROBE_BUDGET_SECONDS = 30.0
 _CONTEXT_COLD_PROBE_STREAM_LIMIT = 1_048_576
 _CONTEXT_COLD_PROBE_TERMINATE_GRACE_SECONDS = 0.25
 _CONTEXT_COLD_PROBE_LOCK = threading.RLock()
+_SERVICE_RUNTIME_PROBE_ATTEMPTS = 2
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 _CODING_RUNTIME_GROUP = "tgw-coders"
@@ -3003,13 +3005,13 @@ def _unit_state(unit: str) -> dict[str, Any]:
             "systemctl",
             "show",
             unit,
-            "--property=LoadState,ActiveState,SubState,FragmentPath,DropInPaths,ExecStart,MainPID,NeedDaemonReload",
+            "--property=LoadState,ActiveState,SubState,FragmentPath,DropInPaths,ExecStart,MainPID,InvocationID,ExecMainStartTimestampMonotonic,NeedDaemonReload",
             "--no-pager",
         ]
     )
     if result.returncode:
         raise DoctorError(result.stderr.strip() or f"cannot inspect {unit}")
-    values: dict[str, str] = {}
+    values: dict[str, str] = {"Unit": unit}
     for line in result.stdout.splitlines():
         key, separator, value = line.partition("=")
         if separator:
@@ -3114,54 +3116,189 @@ def _unit_definition(
 
 
 def _service_process_runtime_identity(
-    state: Mapping[str, str], release: Path, *, proc_root: Path = Path("/proc")
+    state: Mapping[str, str],
+    release: Path,
+    *,
+    proc_root: Path = Path("/proc"),
+    state_reader: Callable[[str], Mapping[str, str]] | None = None,
+    attempts: int = _SERVICE_RUNTIME_PROBE_ATTEMPTS,
 ) -> dict[str, Any]:
-    """Compare a loaded service's immutable cwd with the selected release."""
-    try:
-        pid = int(state.get("MainPID", "0"))
-    except ValueError:
-        pid = 0
+    """Prove one stable systemd invocation has the selected immutable cwd."""
+    if attempts < 1:
+        raise ValueError("service runtime probe attempts must be positive")
+    selected = release.resolve(strict=True)
+    unit = str(state.get("Unit", ""))
+    read_state = state_reader or _unit_state
     evidence: dict[str, Any] = {
-        "pid": pid,
-        "selected_release": str(release.resolve(strict=True)),
+        "unit": unit or None,
+        "pid": 0,
+        "invocation_id": None,
+        "start_timestamp_monotonic": None,
+        "selected_release": str(selected),
         "loaded_release": None,
+        "status": "UNREADABLE",
         "exact": False,
+        "restart_safe": False,
+        "attempts": [],
     }
-    if pid <= 0:
-        evidence["reason"] = "active service has no MainPID"
+    if not unit:
+        evidence["reason"] = "service runtime identity has no unit name"
         return evidence
-    try:
-        loaded = (proc_root / str(pid) / "cwd").resolve(strict=True)
-    except OSError as exc:
-        # Hardened procfs prevents an ordinary operator from dereferencing the
-        # db worker's cwd.  Use the host's existing non-interactive local sudo
-        # only for exact read-only kernel cwd resolution; never substitute a
-        # mutable selector timestamp or the unit's configured pathname.
-        cwd = proc_root / str(pid) / "cwd"
-        result = _run(
-            ["sudo", "-n", "/usr/bin/readlink", "-e", str(cwd)], timeout=5
+
+    def systemd_identity(value: Mapping[str, str]) -> dict[str, str]:
+        return {
+            "MainPID": str(value.get("MainPID", "")),
+            "InvocationID": str(value.get("InvocationID", "")),
+            "ExecMainStartTimestampMonotonic": str(
+                value.get("ExecMainStartTimestampMonotonic", "")
+            ),
+        }
+
+    snapshot: Mapping[str, str] = state
+    for attempt_number in range(1, attempts + 1):
+        before = systemd_identity(snapshot)
+        try:
+            pid = int(before["MainPID"])
+        except ValueError:
+            pid = 0
+        invocation_id = before["InvocationID"]
+        start_timestamp = before["ExecMainStartTimestampMonotonic"]
+        evidence.update(
+            {
+                "pid": pid,
+                "invocation_id": invocation_id or None,
+                "start_timestamp_monotonic": start_timestamp or None,
+            }
         )
-        raw = result.stdout.strip()
-        if result.returncode or not raw or "\n" in raw or not Path(raw).is_absolute():
+        identity_complete = (
+            pid > 0
+            and _INVOCATION_ID.fullmatch(invocation_id) is not None
+            and start_timestamp.isdigit()
+            and int(start_timestamp) > 0
+        )
+        loaded: Path | None = None
+        verification: str | None = None
+        probe_error: str | None = None
+        if identity_complete:
+            cwd = proc_root / str(pid) / "cwd"
+            try:
+                loaded = cwd.resolve(strict=True)
+            except OSError as exc:
+                # Hardened procfs prevents an ordinary operator from
+                # dereferencing the db worker's cwd. Use the existing bounded
+                # non-interactive read-only probe, then still re-read systemd's
+                # complete process identity before trusting the result.
+                result = _run(
+                    ["sudo", "-n", "/usr/bin/readlink", "-e", str(cwd)],
+                    timeout=5,
+                )
+                raw = result.stdout.strip()
+                if (
+                    result.returncode
+                    or not raw
+                    or "\n" in raw
+                    or not Path(raw).is_absolute()
+                ):
+                    probe_error = (
+                        f"loaded process runtime is unreadable: {exc}; exact "
+                        "read-only privileged cwd probe is unavailable"
+                    )
+                else:
+                    try:
+                        loaded = Path(raw).resolve(strict=True)
+                    except OSError as privileged_exc:
+                        probe_error = (
+                            "loaded process runtime is unreadable after the "
+                            f"privileged cwd probe: {privileged_exc}"
+                        )
+                    else:
+                        verification = "privileged-read-only-proc-cwd"
+        else:
+            probe_error = "active service has incomplete systemd process identity"
+
+        try:
+            after_state = dict(read_state(unit))
+        except Exception as exc:
+            after: dict[str, str] | None = None
+            reread_error = str(exc)
+        else:
+            after_state.setdefault("Unit", unit)
+            after = systemd_identity(after_state)
+            reread_error = None
+        attempt_evidence: dict[str, Any] = {
+            "attempt": attempt_number,
+            "before": before,
+            "after": after,
+            "loaded_release": str(loaded) if loaded is not None else None,
+        }
+        if probe_error:
+            attempt_evidence["probe_error"] = probe_error
+        if reread_error:
+            attempt_evidence["reread_error"] = reread_error
+        evidence["attempts"].append(attempt_evidence)
+        if after is None:
             evidence["reason"] = (
-                f"loaded process runtime is unreadable: {exc}; exact read-only "
-                "privileged cwd probe is unavailable"
+                "service runtime identity is unreadable after the cwd probe: "
+                f"{reread_error}"
             )
             return evidence
-        loaded = Path(raw).resolve(strict=True)
-        evidence["verification"] = "privileged-read-only-proc-cwd"
-    evidence["loaded_release"] = str(loaded)
-    evidence["exact"] = loaded == release.resolve(strict=True)
-    if not evidence["exact"]:
-        evidence["reason"] = "loaded process predates selected immutable runtime"
-    return evidence
+        if before != after:
+            if attempt_number < attempts:
+                snapshot = after_state
+                continue
+            evidence["status"] = "RACED"
+            evidence["reason"] = (
+                "service process identity changed during the runtime probe"
+            )
+            evidence.update(
+                {
+                    "pid": int(after["MainPID"])
+                    if after["MainPID"].isdigit()
+                    else 0,
+                    "invocation_id": after["InvocationID"] or None,
+                    "start_timestamp_monotonic": after[
+                        "ExecMainStartTimestampMonotonic"
+                    ]
+                    or None,
+                }
+            )
+            return evidence
+        if probe_error or loaded is None:
+            evidence["reason"] = probe_error or "loaded process runtime is unreadable"
+            return evidence
+        evidence["loaded_release"] = str(loaded)
+        if verification:
+            evidence["verification"] = verification
+        if loaded == selected:
+            evidence.update({"status": "EXACT", "exact": True})
+        else:
+            evidence.update(
+                {
+                    "status": "STALE",
+                    "restart_safe": True,
+                    "reason": "loaded process predates selected immutable runtime",
+                }
+            )
+        return evidence
+    raise AssertionError("service runtime probe exhausted without evidence")
 
 
 def _plan_render_process_runtime_identity(
-    state: Mapping[str, str], release: Path, *, proc_root: Path = Path("/proc")
+    state: Mapping[str, str],
+    release: Path,
+    *,
+    proc_root: Path = Path("/proc"),
+    state_reader: Callable[[str], Mapping[str, str]] | None = None,
+    attempts: int = _SERVICE_RUNTIME_PROBE_ATTEMPTS,
 ) -> dict[str, Any]:
     """Backward-compatible name for the shared service runtime check."""
-    return _service_process_runtime_identity(state, release, proc_root=proc_root)
+    return _service_process_runtime_identity(
+        state,
+        release,
+        proc_root=proc_root,
+        state_reader=state_reader,
+        attempts=attempts,
+    )
 
 
 def check_units(
@@ -7457,14 +7594,24 @@ def repair_workers(
         )
         if not definition["exact"]:
             raise DoctorError(f"installed coding unit is not exact: {unit}")
-        stale_runtime = False
-        if unit.endswith(".service") and state.get("ActiveState") == "active":
-            stale_runtime = not _service_process_runtime_identity(
-                state, release
-            )["exact"]
-        operation = "restart" if unit in installed or stale_runtime else "start"
-        if operation == "start" and state.get("ActiveState") == "active":
+        active = state.get("ActiveState") == "active"
+        if unit in installed:
+            operation = "restart" if active else "start"
+        elif unit.endswith(".service") and active:
+            process_runtime = _service_process_runtime_identity(state, release)
+            status = process_runtime["status"]
+            if status == "EXACT":
+                continue
+            if status == "STALE" and process_runtime["restart_safe"] is True:
+                operation = "restart"
+            else:
+                raise DoctorError(
+                    f"refusing to restart {unit}: process runtime is {status.lower()}"
+                )
+        elif active:
             continue
+        else:
+            operation = "start"
         result = _run(["systemctl", "enable", unit], timeout=30)
         if result.returncode:
             raise DoctorError(result.stderr.strip() or f"failed to enable {unit}")

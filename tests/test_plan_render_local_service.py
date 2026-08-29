@@ -35,7 +35,7 @@ def test_local_plan_render_unit_reuses_existing_worker_as_db_user() -> None:
     assert "User=db\n" in unit
     assert "SupplementaryGroups=tgw-coders" in unit
     assert "WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current" in unit
-    assert "PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src" in unit
+    assert "Environment=PYTHONPATH=src" in unit
     assert "-m tgw.workers.plan_render --config " in unit
     assert "/opt/TGW/tgw-lib/config/tgw-plan-render-local.json" in unit
     assert "ReadOnlyPaths=/opt/TGW/library/approved/058e2f" in unit
@@ -98,12 +98,21 @@ def test_plan_render_process_runtime_detects_stale_and_current_worker(tmp_path: 
     proc = tmp_path / "proc"
     (proc / "2374584").mkdir(parents=True)
     (proc / "2374584" / "cwd").symlink_to(previous)
-    state = {"MainPID": "2374584"}
+    state = {
+        "Unit": doctor_cli._PLAN_RENDER_UNIT,
+        "MainPID": "2374584",
+        "InvocationID": "1" * 32,
+        "ExecMainStartTimestampMonotonic": "100",
+    }
 
-    stale = doctor_cli._plan_render_process_runtime_identity(state, selected, proc_root=proc)
+    stale = doctor_cli._plan_render_process_runtime_identity(
+        state, selected, proc_root=proc, state_reader=lambda _unit: state
+    )
     (proc / "2374584" / "cwd").unlink()
     (proc / "2374584" / "cwd").symlink_to(selected)
-    current = doctor_cli._plan_render_process_runtime_identity(state, selected, proc_root=proc)
+    current = doctor_cli._plan_render_process_runtime_identity(
+        state, selected, proc_root=proc, state_reader=lambda _unit: state
+    )
 
     assert stale["exact"] is False
     assert stale["reason"] == "loaded process predates selected immutable runtime"
@@ -137,8 +146,17 @@ def test_plan_render_process_runtime_uses_exact_readlink_when_proc_cwd_is_denied
 
     monkeypatch.setattr(doctor_cli, "_run", run)
 
+    state = {
+        "Unit": doctor_cli._PLAN_RENDER_UNIT,
+        "MainPID": "2374584",
+        "InvocationID": "1" * 32,
+        "ExecMainStartTimestampMonotonic": "100",
+    }
     current = doctor_cli._plan_render_process_runtime_identity(
-        {"MainPID": "2374584"}, selected, proc_root=proc
+        state,
+        selected,
+        proc_root=proc,
+        state_reader=lambda _unit: state,
     )
     monkeypatch.setattr(
         doctor_cli,
@@ -148,7 +166,10 @@ def test_plan_render_process_runtime_uses_exact_readlink_when_proc_cwd_is_denied
         ),
     )
     stale = doctor_cli._plan_render_process_runtime_identity(
-        {"MainPID": "2374584"}, selected, proc_root=proc
+        state,
+        selected,
+        proc_root=proc,
+        state_reader=lambda _unit: state,
     )
 
     assert current["exact"] is True

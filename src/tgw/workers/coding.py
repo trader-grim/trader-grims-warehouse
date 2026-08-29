@@ -12,6 +12,7 @@ import grp
 import json
 import os
 import pwd
+import re
 import signal
 import stat
 import subprocess
@@ -49,7 +50,9 @@ CODING_TREATMENTS = frozenset({"codex-implement", "claude-review", "controller-v
 
 DEFAULT_WORKTREE_ROOT = Path("/opt/TGW/var/worktrees")
 DEFAULT_REPOSITORY_ROOT = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
+DEFAULT_RUNTIME_ROOT = Path("/opt/TGW/tgw-lib/coding-runtime")
 RUNNER_CONTROL_GROUP = "tgw-coders"
+_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 
 _RECEIPT_FILES = {
     "codex-implement": "implementation-receipt.json",
@@ -402,7 +405,59 @@ class CodingWorker(QueueWorker):
         allowed = self._coding_config().get("allowed_runners")
         if allowed is not None and (not isinstance(allowed, list) or not all(isinstance(item, str) and item for item in allowed) or command[0] not in allowed):
             raise HardFailure("coding command is not an allowed local runner")
-        return command
+        return self._pin_runtime_resident_runner(command)
+
+    def _pin_runtime_resident_runner(self, command: list[str]) -> list[str]:
+        """Bind a ``runtime_root/current`` runner to this worker's release."""
+        coding = self._coding_config()
+        raw_runtime_root = coding.get("runtime_root")
+        runner = Path(command[0])
+        if not isinstance(raw_runtime_root, str) or not raw_runtime_root:
+            try:
+                runner.relative_to(DEFAULT_RUNTIME_ROOT / "current")
+            except ValueError:
+                return command
+            raise HardFailure("runtime-resident coding runner has no runtime_root")
+        runtime_root = Path(raw_runtime_root)
+        if not runtime_root.is_absolute() or ".." in runtime_root.parts:
+            try:
+                runner.relative_to(DEFAULT_RUNTIME_ROOT / "current")
+            except ValueError:
+                return command
+            raise HardFailure("coding runtime_root is not an exact absolute path")
+        selector = runtime_root / "current"
+        try:
+            relative_runner = runner.relative_to(selector)
+        except ValueError:
+            return command
+        if not relative_runner.parts or ".." in relative_runner.parts:
+            raise HardFailure("runtime-resident coding runner path is invalid")
+        try:
+            concrete_runtime_root = runtime_root.resolve(strict=True)
+            process_release = Path.cwd().resolve(strict=True)
+            releases_root = (concrete_runtime_root / "releases").resolve(strict=True)
+        except OSError as exc:
+            raise HardFailure("coding runtime/process release is unavailable") from exc
+        if (
+            concrete_runtime_root != runtime_root
+            or process_release.parent != releases_root
+            or _COMMIT.fullmatch(process_release.name) is None
+        ):
+            raise HardFailure(
+                "runtime-resident coding runner is not bound to the worker release"
+            )
+        pinned = process_release / relative_runner
+        try:
+            resolved = pinned.resolve(strict=True)
+        except OSError as exc:
+            raise HardFailure("runtime-resident coding runner is unavailable") from exc
+        if (
+            resolved != pinned
+            or not pinned.is_file()
+            or not os.access(pinned, os.X_OK)
+        ):
+            raise HardFailure("runtime-resident coding runner is not an exact executable")
+        return [str(pinned), *command[1:]]
 
     def _validated_worktree(self, payload: dict[str, Any]) -> Path:
         return validated_coding_worktree(
