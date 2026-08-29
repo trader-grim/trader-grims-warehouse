@@ -14,8 +14,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from tgw.development.partial_resume import (
     HISTORY,
@@ -57,6 +58,120 @@ _CONTEXT_TOOLS = (
     "tgw_context_onboarding",
     "tgw_context_runbooks",
 )
+
+_MANUAL_REL = PurePosixPath(".tgw-coding-history/implementation/manual")
+_MANUAL_TASK_NAME = "task.json"
+_MANUAL_DONE_NAME = "done.json"
+_MANUAL_EXECUTORS = frozenset({"codex", "manual"})
+
+
+def _executor() -> str:
+    value = os.environ.get("TGW_IMPLEMENT_EXECUTOR", "codex")
+    if value not in _MANUAL_EXECUTORS:
+        raise HardFailure(f"unsupported implementation executor: {value!r}")
+    return value
+
+
+def _summary_kind() -> str:
+    return "manual_summary" if _executor() == "manual" else "codex_summary"
+
+
+def _failure_kind() -> str:
+    return "manual_failure" if _executor() == "manual" else "codex_failure"
+
+
+def _manual_poll_seconds() -> float:
+    try:
+        return float(os.environ.get("TGW_IMPLEMENT_MANUAL_POLL", "5"))
+    except ValueError as exc:
+        raise HardFailure("manual implementation poll interval is invalid") from exc
+
+
+def _manual_timeout_seconds() -> float:
+    try:
+        return float(os.environ.get("TGW_IMPLEMENT_MANUAL_TIMEOUT", "1500"))
+    except ValueError as exc:
+        raise HardFailure("manual implementation timeout is invalid") from exc
+
+
+def _manual_task_payload(job: dict[str, Any], task: dict[str, Any], cwd: Path) -> dict[str, Any]:
+    binding = job.get("plan_binding")
+    return {
+        "schema": "tgw-manual-implementation-task/v1",
+        "todo_id": task["todo_id"],
+        "body": task["body"],
+        "worktree": str(cwd.resolve()),
+        "plan_commit": binding.get("plan_commit") if isinstance(binding, Mapping) else None,
+        "solution_hash": binding.get("solution_hash") if isinstance(binding, Mapping) else None,
+        "source_commit": binding.get("source_commit") if isinstance(binding, Mapping) else None,
+        "done_marker": str((cwd / _MANUAL_REL / _MANUAL_DONE_NAME).resolve()),
+        "report_schema": _FINAL_SCHEMA,
+        "boundaries": (
+            "Work only in this request-bound worktree. Do not commit, deploy, change "
+            "configuration or secrets, contact production, or create workflow receipt files. "
+            "Implement the bounded task and run proportionate offline tests. When finished, "
+            "write the done marker with the exact report shape; the wrapper validates source "
+            "change, closes the exact candidate, and never accepts the marker as completion evidence."
+        ),
+    }
+
+
+def _execute_manual(
+    job: dict[str, Any], task: dict[str, Any], cwd: Path, before_head: str
+) -> tuple[dict[str, Any] | None, Any]:
+    """Supervised implementation handshake: card out, completion marker in.
+
+    The operator/agent implements only inside the request-bound worktree and
+    writes ``done.json`` with the ``_FINAL_SCHEMA`` report.  The wrapper still
+    decides whether source changed, closes the exact successor commit, and
+    never treats the marker as completion evidence.
+    """
+    root = cwd / _MANUAL_REL
+    root.mkdir(parents=True, exist_ok=True)
+    task_path = root / _MANUAL_TASK_NAME
+    done_path = root / _MANUAL_DONE_NAME
+    task_path.write_text(
+        json.dumps(_manual_task_payload(job, task, cwd), sort_keys=True),
+        encoding="utf-8",
+    )
+    task_path.chmod(0o600)
+    deadline = time.monotonic() + _manual_timeout_seconds()
+    while time.monotonic() < deadline:
+        if done_path.is_file():
+            try:
+                report = json.loads(done_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                return (
+                    {
+                        "outcome": "failed",
+                        "established_conditions": [],
+                        "artifacts": [
+                            {"kind": "manual_failure", "detail": f"invalid manual completion report: {exc}"}
+                        ],
+                    },
+                    None,
+                )
+            return None, report
+        time.sleep(_manual_poll_seconds())
+    artifacts: list[dict[str, Any]] = [
+        {
+            "kind": "manual_timeout",
+            "detail": "manual implementation timed out; task card retained",
+        }
+    ]
+    if _source_status(cwd):
+        recovery = _preserve_late_source(cwd, todo_id=task["todo_id"], candidate=before_head)
+        artifacts.append(
+            {
+                "kind": "late_source_recovery",
+                "stash": recovery,
+                "detail": "manual late source preserved outside the active worktree for resume",
+            }
+        )
+    return (
+        {"outcome": "failed", "established_conditions": [], "artifacts": artifacts},
+        None,
+    )
 
 
 def _write_isolated_config(codex_home: Path) -> None:
@@ -453,66 +568,72 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
     early_result: dict[str, Any] | None = None
     report: Any = None
     try:
-        with tempfile.TemporaryDirectory(prefix=".tgw-codex-implement-", dir=cwd) as temporary:
-            temp = Path(temporary)
-            schema_path, output_path = temp / "schema.json", temp / "result.json"
-            codex_home = temp / "codex-home"
-            codex_home.mkdir(mode=0o700)
-            source_auth = _codex_auth_path()
-            if not source_auth.is_file():
-                raise HardFailure("dedicated Codex authentication is unavailable")
-            destination_auth = codex_home / "auth.json"
-            shutil.copyfile(source_auth, destination_auth)
-            destination_auth.chmod(0o600)
-            _write_isolated_config(codex_home)
-            schema_path.write_text(json.dumps(_FINAL_SCHEMA, sort_keys=True), encoding="utf-8")
-            command = [
-                _codex_binary(),
-                "--ask-for-approval",
-                "never",
-                "--sandbox",
-                "danger-full-access",
-                "exec",
-                "--ephemeral",
-                "-C",
-                str(cwd),
-                "--output-schema",
-                str(schema_path),
-                "-o",
-                str(output_path),
-                "-",
-            ]
-            completed = invoke(
-                command,
-                cwd=cwd,
-                input=_prompt(task, continuation),
-                text=True,
-                capture_output=True,
-                check=False,
-                env={**os.environ, "CODEX_HOME": str(codex_home)},
-            )
-            if completed.returncode:
-                early_result = {
-                    "outcome": "failed",
-                    "established_conditions": [],
-                    "artifacts": [{"kind": "codex_failure", "detail": completed.stderr[-1000:]}],
-                }
-            else:
-                try:
-                    report = json.loads(output_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as exc:
+        if _executor() == "manual":
+            early_result, report = _execute_manual(job, task, cwd, before_head)
+        else:
+            with tempfile.TemporaryDirectory(prefix=".tgw-codex-implement-", dir=cwd) as temporary:
+                temp = Path(temporary)
+                schema_path, output_path = temp / "schema.json", temp / "result.json"
+                codex_home = temp / "codex-home"
+                codex_home.mkdir(mode=0o700)
+                source_auth = _codex_auth_path()
+                if not source_auth.is_file():
+                    raise HardFailure("dedicated Codex authentication is unavailable")
+                destination_auth = codex_home / "auth.json"
+                shutil.copyfile(source_auth, destination_auth)
+                destination_auth.chmod(0o600)
+                _write_isolated_config(codex_home)
+                schema_path.write_text(json.dumps(_FINAL_SCHEMA, sort_keys=True), encoding="utf-8")
+                command = [
+                    _codex_binary(),
+                    "--ask-for-approval",
+                    "never",
+                    "--sandbox",
+                    "danger-full-access",
+                    "exec",
+                    "--ephemeral",
+                    "-C",
+                    str(cwd),
+                    "--output-schema",
+                    str(schema_path),
+                    "-o",
+                    str(output_path),
+                    "-",
+                ]
+                completed = invoke(
+                    command,
+                    cwd=cwd,
+                    input=_prompt(task, continuation),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env={**os.environ, "CODEX_HOME": str(codex_home)},
+                )
+                if completed.returncode:
                     early_result = {
                         "outcome": "failed",
                         "established_conditions": [],
-                        "artifacts": [
-                            {
-                                "kind": "codex_failure",
-                                "detail": f"invalid final report: {exc}",
-                            }
-                        ],
+                        "artifacts": [{"kind": "codex_failure", "detail": completed.stderr[-1000:]}],
                     }
+                else:
+                    try:
+                        report = json.loads(output_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError) as exc:
+                        early_result = {
+                            "outcome": "failed",
+                            "established_conditions": [],
+                            "artifacts": [
+                                {
+                                    "kind": "codex_failure",
+                                    "detail": f"invalid final report: {exc}",
+                                }
+                            ],
+                        }
     finally:
         cleaned_caches.update(_purge_transient_caches(cwd))
+        manual_root = cwd / _MANUAL_REL
+        if manual_root.is_dir():
+            shutil.rmtree(manual_root, ignore_errors=True)
 
     cleanup_artifact = (
         {
@@ -547,10 +668,10 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
         return {
             "outcome": "failed",
             "established_conditions": [],
-            "artifacts": [{"kind": "codex_failure", "detail": "final report violates runner contract"}],
+            "artifacts": [{"kind": _failure_kind(), "detail": "final report violates runner contract"}],
         }
     artifacts = [
-        {"kind": "codex_summary", "detail": report["summary"]},
+        {"kind": _summary_kind(), "detail": report["summary"]},
         {"kind": "tests_reported", "tests": report["tests"]},
     ]
     if cleanup_artifact is not None:

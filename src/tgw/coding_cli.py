@@ -1950,6 +1950,64 @@ def _target(args: argparse.Namespace) -> str | None:
     return getattr(args, "coding_target", None) or getattr(args, "request_id", None)
 
 
+def rebind(
+    todo_id: int | str,
+    *,
+    config_path: Path | str = DEFAULT_CONFIG,
+) -> dict[str, Any]:
+    """Reset a FAILED/REMEDIATION_REQUIRED lifecycle for a fresh operator bind.
+
+    Preserves the failed journal (renamed, never deleted) and clears the Todo
+    status-note binding; a subsequent ``tgw coding start`` creates a brand-new
+    binding and worktree under the caller's Unix identity. Refuses a dirty
+    worktree so no implementation bytes are stranded.
+    """
+    config = _initialize(config_path)
+    actor = require_coder_account()
+    identifier = _todo_id(todo_id)
+    item = todo.todo_get(identifier)
+    if item is None or item.get("done_at") is not None:
+        raise CodingCLIError(f"Todo {identifier} is not an open Todo")
+    store = LifecycleStore(config["coding"]["lifecycle_root"])
+    prior = store.find(identifier)
+    if prior is None:
+        raise CodingCLIError(f"Todo {identifier} has no coding lifecycle to rebind")
+    if prior.get("state") not in {"FAILED", "REMEDIATION_REQUIRED"}:
+        raise CodingCLIError(
+            f"Todo {identifier} lifecycle state {prior.get('state')!r} is not rebindable "
+            "(only FAILED or REMEDIATION_REQUIRED)"
+        )
+    worktree = prior.get("binding", {}).get("worktree")
+    if isinstance(worktree, str) and worktree:
+        status = subprocess.run(
+            ["git", "-c", f"safe.directory={worktree}", "status", "--porcelain"],
+            cwd=worktree,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if status.returncode or status.stdout.strip():
+            raise CodingCLIError(
+                f"Todo {identifier} worktree is not clean; rebind refuses a dirty worktree"
+            )
+    identity = prior.get("root_id") or f"coding:{identifier}"
+    journal = store.path(identity)
+    stamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
+    archived = journal.with_name(journal.name + f".rebind-{stamp}")
+    journal.rename(archived)
+    todo.todo_set_status_note(identifier, "", suppress_plan_render=True)
+    return {
+        "schema": "tgw-local-coding-rebind/v1",
+        "ok": True,
+        "todo_id": identifier,
+        "actor": actor,
+        "archived_lifecycle": archived.name,
+        "worktree": worktree,
+        "note": "Run 'tgw coding start <id>' to create a fresh binding and worktree.",
+    }
+
+
+
 def run(args: argparse.Namespace) -> int:
     try:
         config_path = Path(getattr(args, "config", None) or DEFAULT_CONFIG)
@@ -1985,6 +2043,8 @@ def run(args: argparse.Namespace) -> int:
             if not target:
                 raise CodingCLIError("stop requires a coding job ID")
             result = stop(target, config_path=config_path)
+        elif args.coding_op == "rebind":
+            result = rebind(_todo_id(target), config_path=config_path)
         elif args.coding_op == "readback":
             if not target or not target.startswith("coding:"):
                 raise CodingCLIError(
@@ -2035,6 +2095,10 @@ def parser() -> argparse.ArgumentParser:
     log_parser.add_argument("coding_target", metavar="JOB_ID")
     stop_parser = commands.add_parser("stop", help="cancel one active coding job")
     stop_parser.add_argument("coding_target", metavar="JOB_ID")
+    rebind_parser = commands.add_parser(
+        "rebind", help="reset a FAILED/REMEDIATION_REQUIRED lifecycle for a fresh bind"
+    )
+    rebind_parser.add_argument("coding_target", metavar="TODO_ID")
     for operation in ("readback",):
         action = commands.add_parser(
             operation,

@@ -593,3 +593,124 @@ def test_prompt_forbids_deploy_commit_config_secrets_and_satellites():
     for word in ("commit", "deploy", "configuration", "secrets", "satellite"):
         assert word in prompt
     assert "CLAUDE.md does not govern Codex" in prompt
+
+
+def test_manual_executor_waits_writes_card_and_closes_candidate(tmp_path, monkeypatch):
+    import threading
+    import time as _time
+    repo = _repo(tmp_path)
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "manual")
+    monkeypatch.setattr(codex_implement, "_manual_poll_seconds", lambda: 0.01)
+    monkeypatch.setattr(codex_implement, "_manual_timeout_seconds", lambda: 10)
+    holder: dict[str, object] = {}
+
+    def worker() -> None:
+        holder["result"] = codex_implement.run(_job(), repo)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    card = repo / ".tgw-coding-history/implementation/manual/task.json"
+    deadline = _time.monotonic() + 5
+    while not card.is_file() and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert card.is_file()
+    payload = json.loads(card.read_text(encoding="utf-8"))
+    assert payload["schema"] == "tgw-manual-implementation-task/v1"
+    assert payload["todo_id"] == 1745
+    assert payload["body"] == "implement the bounded feature"
+    (repo / "feature.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (card.parent / "done.json").write_text(
+        json.dumps({"status": "implemented", "summary": "manual done", "tests": ["focused"]}),
+        encoding="utf-8",
+    )
+    thread.join(10)
+    assert not thread.is_alive()
+    result = holder["result"]
+    assert result["outcome"] == "satisfied"
+    assert result["established_conditions"] == ["implemented"]
+    assert any(item["kind"] == "manual_summary" for item in result["artifacts"])
+    assert any(item["kind"] == "tests_reported" for item in result["artifacts"])
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    assert candidate != baseline
+    assert subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, check=True,
+        text=True, capture_output=True,
+    ).stdout == ""
+    closed = next(item for item in result["artifacts"] if item["kind"] == "closed_candidate")
+    assert closed["commit"] == candidate
+    assert closed["base_commit"] == baseline
+    assert closed["changed_paths"] == ["feature.py"]
+
+
+def test_manual_executor_invalid_done_marker_fails(tmp_path, monkeypatch):
+    import threading
+    import time as _time
+    repo = _repo(tmp_path)
+    monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "manual")
+    monkeypatch.setattr(codex_implement, "_manual_poll_seconds", lambda: 0.01)
+    monkeypatch.setattr(codex_implement, "_manual_timeout_seconds", lambda: 5)
+    holder: dict[str, object] = {}
+
+    def worker() -> None:
+        holder["result"] = codex_implement.run(_job(), repo)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    card = repo / ".tgw-coding-history/implementation/manual/task.json"
+    deadline = _time.monotonic() + 5
+    while not card.is_file() and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert card.is_file()
+    (card.parent / "done.json").write_text("not json", encoding="utf-8")
+    thread.join(10)
+    assert not thread.is_alive()
+    result = holder["result"]
+    assert result["outcome"] == "failed"
+    assert any(item["kind"] == "manual_failure" for item in result["artifacts"])
+
+
+def test_manual_executor_timeout_stashes_late_source(tmp_path, monkeypatch):
+    import threading
+    import time as _time
+    repo = _repo(tmp_path)
+    monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "manual")
+    monkeypatch.setattr(codex_implement, "_manual_poll_seconds", lambda: 0.01)
+    monkeypatch.setattr(codex_implement, "_manual_timeout_seconds", lambda: 0.5)
+    holder: dict[str, object] = {}
+
+    def worker() -> None:
+        holder["result"] = codex_implement.run(_job(), repo)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    card = repo / ".tgw-coding-history/implementation/manual/task.json"
+    deadline = _time.monotonic() + 5
+    while not card.is_file() and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert card.is_file()
+    (repo / "wip.py").write_text("WIP = 1\n", encoding="utf-8")
+    thread.join(10)
+    assert not thread.is_alive()
+    result = holder["result"]
+    assert result["outcome"] == "failed"
+    kinds = [item["kind"] for item in result["artifacts"]]
+    assert "manual_timeout" in kinds
+    assert "late_source_recovery" in kinds
+    assert subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, check=True,
+        text=True, capture_output=True,
+    ).stdout == ""
+
+
+def test_unknown_executor_fails_closed(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "bogus")
+    with pytest.raises(codex_implement.HardFailure, match="unsupported implementation executor"):
+        codex_implement.run(_job(), repo)
