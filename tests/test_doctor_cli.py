@@ -736,6 +736,28 @@ def test_active_worktree_rows_reject_conflicting_references(tmp_path: Path) -> N
         )
 
 
+@pytest.mark.parametrize("entity_id", [None, "", ".", "todo-1921-plan-abc123"])
+def test_active_worktree_rows_reject_malformed_entity_reference(
+    tmp_path: Path, entity_id: str | None
+) -> None:
+    root = tmp_path / "worktrees"
+    worktree = root / "todo-1921-plan-abc123"
+    worktree.mkdir(parents=True)
+    paths = doctor_cli.DoctorPaths(worktrees=root)
+
+    with pytest.raises(doctor_cli.DoctorError, match="entity_id"):
+        doctor_cli._validate_active_coding_worktree_rows(
+            paths,
+            [
+                {
+                    "job_id": "job-1",
+                    "payload": {"worktree": str(worktree)},
+                    "entity_id": entity_id,
+                }
+            ],
+        )
+
+
 def test_active_worktree_rows_reject_nested_matching_directory(tmp_path: Path) -> None:
     root = tmp_path / "worktrees"
     nested = root / "container" / "todo-1921-plan-abc123"

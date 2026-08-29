@@ -1966,14 +1966,7 @@ SELECT COALESCE(
 )::text
 FROM public.queue_jobs
 WHERE state IN ('queued','leased','running')
-  AND (
-      payload_json ? 'worktree'
-      OR (
-          jsonb_typeof(payload_json->'task_spec') = 'object'
-          AND (payload_json->'task_spec') ? 'worktree'
-      )
-      OR entity_id LIKE '/%'
-  )
+  AND entity_type = 'coding_task'
 """
 
 
@@ -2000,8 +1993,7 @@ def _validate_active_coding_worktree_rows(
         task_spec = payload.get("task_spec")
         if isinstance(task_spec, dict) and "worktree" in task_spec:
             references.append(("payload.task_spec.worktree", task_spec["worktree"]))
-        if isinstance(entity_id, str) and entity_id.startswith("/"):
-            references.append(("entity_id", entity_id))
+        references.append(("entity_id", entity_id))
         if not references:
             raise DoctorError(f"active coding job {job_id} has no worktree reference")
 
