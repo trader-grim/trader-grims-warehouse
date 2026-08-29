@@ -46,8 +46,11 @@ def test_doctor_exposes_separately_named_plan_render_repair() -> None:
     assert doctor_cli._PLAN_RENDER_UNIT == "tgw-plan-render-local.service"
     assert doctor_cli._REPAIRS["plan-render-worker"] is (doctor_cli.repair_plan_render_worker)
     parser = doctor_cli._parser()
-    args = parser.parse_args(["repair", "plan-render-worker"])
+    args = parser.parse_args(
+        ["repair", "plan-render-worker", "--commit", "a" * 40]
+    )
     assert args.target == "plan-render-worker"
+    assert args.commit == "a" * 40
 
 
 def test_operator_launcher_routes_plan_to_local_tgw_lib() -> None:
@@ -105,6 +108,48 @@ def test_plan_render_process_runtime_detects_stale_and_current_worker(tmp_path: 
     assert stale["exact"] is False
     assert stale["reason"] == "loaded process predates selected immutable runtime"
     assert current["exact"] is True
+
+
+def test_plan_render_process_runtime_uses_systemd_start_when_proc_cwd_is_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / "runtime"
+    selected = runtime / "releases" / ("a" * 40)
+    selected.mkdir(parents=True)
+    selector = runtime / "current"
+    selector.symlink_to(Path("releases") / selected.name)
+    proc = tmp_path / "proc"
+    process = proc / "2374584"
+    process.mkdir(parents=True)
+    (process / "cwd").symlink_to(selected)
+    (proc / "uptime").write_text("200.0 400.0\n", encoding="utf-8")
+    selector_epoch = selector.lstat().st_mtime
+    monkeypatch.setattr(doctor_cli.time, "time", lambda: selector_epoch + 100.0)
+    original_resolve = Path.resolve
+
+    def deny_process_cwd(path: Path, *, strict: bool = False) -> Path:
+        if path == process / "cwd":
+            raise PermissionError("hardened procfs")
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", deny_process_cwd)
+    state = {
+        "MainPID": "2374584",
+        "WorkingDirectory": str(selector),
+        "ExecMainStartTimestampMonotonic": "150000000",
+    }
+
+    current = doctor_cli._plan_render_process_runtime_identity(
+        state, selected, proc_root=proc
+    )
+    state["ExecMainStartTimestampMonotonic"] = "50000000"
+    stale = doctor_cli._plan_render_process_runtime_identity(
+        state, selected, proc_root=proc
+    )
+
+    assert current["exact"] is True
+    assert current["verification"] == "systemd-working-directory-and-monotonic-start"
+    assert stale["exact"] is False
 
 
 def test_doctor_reports_stopped_plan_render_service(tmp_path: Path, monkeypatch) -> None:

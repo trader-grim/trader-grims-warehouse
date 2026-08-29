@@ -1959,7 +1959,10 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
         group = grp.getgrnam("tgw-coders")
         git_common = paths.repository / ".git"
         actors = {}
-        for name in sorted({actor, "codex", "db"}):
+        # Root performs the fixed bootstrap, but it is deliberately not a
+        # coding-group principal.  Verify the ordinary operator and worker
+        # accounts instead of treating root's non-membership as access drift.
+        for name in sorted({actor, "codex", "db"} - {"root"}):
             record = pwd.getpwnam(name)
             memberships = set(os.getgrouplist(name, record.pw_gid))
             member = group.gr_gid in memberships or name in group.gr_mem
@@ -1977,7 +1980,13 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
             "git_common": _shared_git_directory(git_common, group.gr_gid),
             "worktree_root": _shared_git_directory(paths.worktrees, group.gr_gid),
         }
-        shared_trees = _inspect_shared_git_trees(paths, group.gr_gid)
+        # Routine health proves the canonical worktree and common Git store.
+        # A recursive scan of every historical linked worktree belongs to the
+        # explicit inventory/repair path; doing it here made every check take
+        # minutes and let old closed worktrees report the live workflow down.
+        shared_trees = _inspect_shared_git_trees(
+            paths, group.gr_gid, include_linked=False
+        )
         protected_roots = _coding_support_roots(paths, group.gr_gid)
         exact = all(row["exact"] for row in actors.values()) and all(row["exact"] for row in directories.values()) and shared_trees["exact"] and all(row["exact"] for row in protected_roots.values())
         return _check(
@@ -2812,7 +2821,7 @@ def _unit_state(unit: str) -> dict[str, Any]:
             "systemctl",
             "show",
             unit,
-            "--property=LoadState,ActiveState,SubState,FragmentPath,DropInPaths,ExecStart,MainPID,NeedDaemonReload",
+            "--property=LoadState,ActiveState,SubState,FragmentPath,DropInPaths,ExecStart,MainPID,NeedDaemonReload,WorkingDirectory,ExecMainStartTimestampMonotonic",
             "--no-pager",
         ]
     )
@@ -2942,7 +2951,55 @@ def _plan_render_process_runtime_identity(
     try:
         loaded = (proc_root / str(pid) / "cwd").resolve(strict=True)
     except OSError as exc:
-        evidence["reason"] = f"loaded process runtime is unreadable: {exc}"
+        # A normal tgw-coders operator cannot dereference another Unix user's
+        # /proc/<pid>/cwd on hardened hosts.  systemd's loaded working
+        # directory plus its monotonic process start still proves whether the
+        # worker was started after the exact immutable selector was installed.
+        selector = release.parent.parent / "current"
+        try:
+            working_directory = state.get("WorkingDirectory")
+            started_us = int(state.get("ExecMainStartTimestampMonotonic", "0"))
+            uptime = float((proc_root / "uptime").read_text(encoding="utf-8").split()[0])
+            selector_age = time.time() - selector.lstat().st_mtime
+            process_age = uptime - (started_us / 1_000_000)
+            selector_exact = (
+                selector.is_symlink()
+                and selector.resolve(strict=True) == release.resolve(strict=True)
+            )
+            timing_exact = (
+                started_us > 0
+                and process_age >= 0
+                and selector_age >= 0
+                and process_age <= selector_age + 1.0
+            )
+            fallback_exact = (
+                working_directory == str(selector)
+                and selector_exact
+                and timing_exact
+            )
+        except (OSError, ValueError) as fallback_exc:
+            evidence["reason"] = (
+                f"loaded process runtime is unreadable: {exc}; "
+                f"systemd start binding is unreadable: {fallback_exc}"
+            )
+            return evidence
+        evidence.update(
+            {
+                "working_directory": working_directory,
+                "process_age_seconds": process_age,
+                "selector_age_seconds": selector_age,
+                "verification": "systemd-working-directory-and-monotonic-start",
+                "loaded_release": str(release.resolve(strict=True))
+                if fallback_exact
+                else None,
+                "exact": fallback_exact,
+            }
+        )
+        if not fallback_exact:
+            evidence["reason"] = (
+                "loaded process runtime is unreadable and the systemd start "
+                "binding does not prove the selected immutable runtime"
+            )
         return evidence
     evidence["loaded_release"] = str(loaded)
     evidence["exact"] = loaded == release.resolve(strict=True)
@@ -6166,7 +6223,9 @@ def _shared_tree_exact(counts: Mapping[str, int]) -> bool:
     )
 
 
-def _inspect_shared_git_trees(paths: DoctorPaths, group_gid: int) -> dict[str, Any]:
+def _inspect_shared_git_trees(
+    paths: DoctorPaths, group_gid: int, *, include_linked: bool = True
+) -> dict[str, Any]:
     local, outside = _configured_worktree_locations(paths)
     trees: dict[str, dict[str, int]] = {
         "canonical_worktree": _scan_shared_git_tree(
@@ -6177,7 +6236,7 @@ def _inspect_shared_git_trees(paths: DoctorPaths, group_gid: int) -> dict[str, A
         ),
         "git_common": _scan_shared_git_tree(paths.repository / ".git", group_gid, mutate=False),
     }
-    for location, relative in local:
+    for location, relative in local if include_linked else ():
         descriptor = _open_direct_directory(location)
         try:
             authenticated = _authenticate_pre_ledger_preservation(location, descriptor, group_gid)
@@ -6200,6 +6259,8 @@ def _inspect_shared_git_trees(paths: DoctorPaths, group_gid: int) -> dict[str, A
         "exact": all(_shared_tree_exact(counts) for counts in trees.values()),
         "trees": trees,
         "outside_configured_root_untouched": outside,
+        "linked_worktrees_inspected": include_linked,
+        "linked_worktree_count": len(local),
     }
 
 
@@ -8810,7 +8871,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 source_root=Path(__file__).resolve().parents[2],
             )
             print(json.dumps(result, indent=2, sort_keys=True))
-            return int(result["diagnosis"]["exit_code"])
+            # A completed bounded repair is successful when the resulting
+            # diagnosis has no failure.  Historical cleanup warnings and
+            # restart notices remain visible evidence, but must not make the
+            # exact bootstrap claim that the repair itself failed.
+            return 0 if result.get("ok") and result["diagnosis"].get("ok") else 2
         if args.operation == "inventory":
             result = inventory()
             if not args.full:

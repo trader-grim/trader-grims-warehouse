@@ -568,6 +568,26 @@ def test_source_bootstrap_routes_privileged_repair_through_exact_candidate(
     ]
 
 
+def test_repair_cli_succeeds_with_non_failing_diagnostic_attention(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "repair",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "diagnosis": {"ok": True, "state": "ATTENTION", "exit_code": 1},
+        },
+    )
+
+    result = doctor_cli.main(
+        ["repair", "context", "--commit", "a" * 40, "--json"]
+    )
+
+    assert result == 0
+    assert '"state": "ATTENTION"' in capsys.readouterr().out
+
+
 def test_bootstrap_release_ownership_promotion_rejects_symlink(
     tmp_path: Path,
 ) -> None:
