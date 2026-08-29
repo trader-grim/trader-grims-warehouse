@@ -7804,12 +7804,37 @@ def repair_plan_render_worker(
         )
         raise DoctorError(f"plan_render storage repair failed: {exc}; started receipt: {storage_started_receipt}; failure receipt: {storage_failure_receipt}") from exc
     action = None
-    if changed or state.get("ActiveState") != "active" or not process_runtime["exact"]:
-        for command in (["systemctl", "enable", _PLAN_RENDER_UNIT], ["systemctl", "restart" if state.get("ActiveState") == "active" else "start", _PLAN_RENDER_UNIT]):
+    action_reason = None
+    active = state.get("ActiveState") == "active"
+    runtime_status = str(process_runtime.get("status", "UNREADABLE"))
+    if changed:
+        action = "restart" if active else "start"
+        action_reason = "materialization-changed"
+    elif not active:
+        action = "start"
+        action_reason = "inactive"
+    elif runtime_status == "EXACT" and process_runtime.get("exact") is True:
+        pass
+    elif (
+        runtime_status == "STALE"
+        and process_runtime.get("exact") is False
+        and process_runtime.get("restart_safe") is True
+    ):
+        action = "restart"
+        action_reason = "stale-runtime"
+    else:
+        raise DoctorError(
+            "refusing to restart plan_render service: process runtime is "
+            f"{runtime_status.lower()}"
+        )
+    if action is not None:
+        for command in (
+            ["systemctl", "enable", _PLAN_RENDER_UNIT],
+            ["systemctl", action, _PLAN_RENDER_UNIT],
+        ):
             result = _run(command, timeout=30)
             if result.returncode:
                 raise DoctorError(result.stderr.strip() or "plan_render service repair failed")
-        action = command[1]
     after = (
         check_plan_render_worker(paths, desired_commit=desired)
         if explicit_commit
@@ -7822,6 +7847,8 @@ def repair_plan_render_worker(
         "operation": "plan-render-worker",
         "changed": changed or action is not None,
         "service_action": action,
+        "service_action_reason": action_reason,
+        "process_runtime_status": runtime_status,
         "storage_started_receipt": storage_started_receipt,
         "storage_receipt": storage_receipt,
         "receipt": _receipt(paths, "plan-render-worker", before, after),
