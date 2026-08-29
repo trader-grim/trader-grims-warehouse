@@ -665,6 +665,96 @@ def test_unix_access_probes_support_roots_and_inflight_worktrees(
     ) in support_calls
 
 
+def test_active_worktree_rows_require_matching_managed_absolute_paths(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "worktrees"
+    worktree = root / "todo-1921-plan-abc123"
+    worktree.mkdir(parents=True)
+    paths = doctor_cli.DoctorPaths(worktrees=root)
+    value = str(worktree)
+
+    result = doctor_cli._validate_active_coding_worktree_rows(
+        paths,
+        [
+            {
+                "job_id": "job-1",
+                "payload": {
+                    "worktree": value,
+                    "task_spec": {"worktree": value},
+                },
+                "entity_id": value,
+            }
+        ],
+    )
+
+    assert result == [worktree]
+
+
+@pytest.mark.parametrize("value", ["", ".", "todo-1921-plan-abc123"])
+def test_active_worktree_rows_reject_empty_or_relative_paths(
+    tmp_path: Path, value: str
+) -> None:
+    root = tmp_path / "worktrees"
+    (root / "todo-1921-plan-abc123").mkdir(parents=True)
+    paths = doctor_cli.DoctorPaths(worktrees=root)
+
+    with pytest.raises(doctor_cli.DoctorError, match="malformed|managed absolute"):
+        doctor_cli._validate_active_coding_worktree_rows(
+            paths,
+            [
+                {
+                    "job_id": "job-1",
+                    "payload": {"worktree": value},
+                    "entity_id": None,
+                }
+            ],
+        )
+
+
+def test_active_worktree_rows_reject_conflicting_references(tmp_path: Path) -> None:
+    root = tmp_path / "worktrees"
+    first = root / "todo-1921-plan-abc123"
+    second = root / "todo-1922-plan-def456"
+    first.mkdir(parents=True)
+    second.mkdir()
+    paths = doctor_cli.DoctorPaths(worktrees=root)
+
+    with pytest.raises(doctor_cli.DoctorError, match="conflicting"):
+        doctor_cli._validate_active_coding_worktree_rows(
+            paths,
+            [
+                {
+                    "job_id": "job-1",
+                    "payload": {
+                        "worktree": str(first),
+                        "task_spec": {"worktree": str(second)},
+                    },
+                    "entity_id": str(first),
+                }
+            ],
+        )
+
+
+def test_active_worktree_rows_reject_nested_matching_directory(tmp_path: Path) -> None:
+    root = tmp_path / "worktrees"
+    nested = root / "container" / "todo-1921-plan-abc123"
+    nested.mkdir(parents=True)
+    paths = doctor_cli.DoctorPaths(worktrees=root)
+
+    with pytest.raises(doctor_cli.DoctorError, match="managed absolute"):
+        doctor_cli._validate_active_coding_worktree_rows(
+            paths,
+            [
+                {
+                    "job_id": "job-1",
+                    "payload": {"worktree": str(nested)},
+                    "entity_id": None,
+                }
+            ],
+        )
+
+
 def test_unix_access_fails_when_operator_cannot_reach_support_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

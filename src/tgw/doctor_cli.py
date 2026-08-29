@@ -1953,18 +1953,93 @@ def _actor_path_access_flags(
 
 
 _ACTIVE_CODING_WORKTREES_SQL = """
-SELECT COALESCE(json_agg(worktree), '[]'::json)::text
-FROM (
-    SELECT DISTINCT COALESCE(
-        payload_json->>'worktree',
-        payload_json#>>'{task_spec,worktree}',
-        CASE WHEN entity_id LIKE '/%' THEN entity_id END
-    ) AS worktree
-    FROM public.queue_jobs
-    WHERE state IN ('queued','leased','running')
-) AS active
-WHERE worktree IS NOT NULL
+SELECT COALESCE(
+    json_agg(
+        json_build_object(
+            'job_id', job_id::text,
+            'payload', payload_json,
+            'entity_id', entity_id
+        )
+        ORDER BY job_id
+    ),
+    '[]'::json
+)::text
+FROM public.queue_jobs
+WHERE state IN ('queued','leased','running')
+  AND (
+      payload_json ? 'worktree'
+      OR (
+          jsonb_typeof(payload_json->'task_spec') = 'object'
+          AND (payload_json->'task_spec') ? 'worktree'
+      )
+      OR entity_id LIKE '/%'
+  )
 """
+
+
+def _validate_active_coding_worktree_rows(
+    paths: DoctorPaths, rows: Any
+) -> list[Path]:
+    """Validate every worktree reference carried by each in-flight job."""
+    if not isinstance(rows, list):
+        raise DoctorError("active coding worktree query returned malformed data")
+    root = paths.worktrees.resolve(strict=True)
+    worktrees: set[Path] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise DoctorError("active coding worktree query returned malformed data")
+        job_id = row.get("job_id")
+        payload = row.get("payload")
+        entity_id = row.get("entity_id")
+        if not isinstance(job_id, str) or not job_id or not isinstance(payload, dict):
+            raise DoctorError("active coding worktree query returned malformed data")
+
+        references: list[tuple[str, Any]] = []
+        if "worktree" in payload:
+            references.append(("payload.worktree", payload["worktree"]))
+        task_spec = payload.get("task_spec")
+        if isinstance(task_spec, dict) and "worktree" in task_spec:
+            references.append(("payload.task_spec.worktree", task_spec["worktree"]))
+        if isinstance(entity_id, str) and entity_id.startswith("/"):
+            references.append(("entity_id", entity_id))
+        if not references:
+            raise DoctorError(f"active coding job {job_id} has no worktree reference")
+
+        resolved: set[Path] = set()
+        for field, value in references:
+            if not isinstance(value, str) or not value:
+                raise DoctorError(
+                    f"active coding job {job_id} has malformed {field}"
+                )
+            candidate = Path(value)
+            if not candidate.is_absolute() or candidate.parent != root:
+                raise DoctorError(
+                    f"active coding job {job_id} {field} is not a managed absolute path"
+                )
+            try:
+                location = candidate.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise DoctorError(
+                    f"active coding job {job_id} {field} cannot be resolved: {value}"
+                ) from exc
+            if (
+                location != candidate
+                or location.parent != root
+                or re.fullmatch(
+                    r"todo-[0-9]+-plan-[0-9a-f]+", location.name
+                )
+                is None
+            ):
+                raise DoctorError(
+                    f"active coding job {job_id} {field} is not a managed worktree: {value}"
+                )
+            resolved.add(location)
+        if len(resolved) != 1:
+            raise DoctorError(
+                f"active coding job {job_id} has conflicting worktree references"
+            )
+        worktrees.update(resolved)
+    return sorted(worktrees)
 
 
 def _active_coding_worktrees(paths: DoctorPaths) -> list[Path]:
@@ -2001,20 +2076,8 @@ def _active_coding_worktrees(paths: DoctorPaths) -> list[Path]:
             with connection.cursor() as cursor:
                 cursor.execute(_ACTIVE_CODING_WORKTREES_SQL)
                 raw = cursor.fetchone()[0]
-    values = json.loads(raw) if isinstance(raw, str) else raw
-    if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
-        raise DoctorError("active coding worktree query returned malformed data")
-    root = paths.worktrees.resolve(strict=True)
-    worktrees: list[Path] = []
-    for value in values:
-        location = Path(value).resolve(strict=True)
-        if (
-            root not in location.parents
-            or re.fullmatch(r"todo-[0-9]+-plan-[0-9a-f]+", location.name) is None
-        ):
-            raise DoctorError(f"active coding worktree is outside the managed root: {value}")
-        worktrees.append(location)
-    return sorted(set(worktrees))
+    rows = json.loads(raw) if isinstance(raw, str) else raw
+    return _validate_active_coding_worktree_rows(paths, rows)
 
 
 def _shared_git_directory(path: Path, group_gid: int) -> dict[str, Any]:
