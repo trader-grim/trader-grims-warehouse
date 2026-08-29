@@ -73,6 +73,14 @@ def test_read_and_control_tools_share_cli_functions(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         coding_mcp_server.coding_cli,
+        "access_status",
+        lambda todo_id, *, config_path, full_jobs: calls.append(
+            ("access-status", todo_id, config_path, full_jobs)
+        )
+        or {"ok": True, "todo_id": todo_id, "jobs_included": full_jobs},
+    )
+    monkeypatch.setattr(
+        coding_mcp_server.coding_cli,
         "job_log",
         lambda job_id, *, config_path: calls.append(
             ("log", job_id, config_path)
@@ -96,7 +104,7 @@ def test_read_and_control_tools_share_cli_functions(monkeypatch, tmp_path):
     )
     assert calls == [
         ("status", 1732, config),
-        ("status", None, config),
+        ("access-status", None, config, False),
         ("log", "job-1", config),
         ("stop", "job-1", config),
     ]
