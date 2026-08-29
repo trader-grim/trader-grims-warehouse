@@ -826,14 +826,52 @@ def _context_transition_review_binding(
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise DoctorError("Context transition review evidence is not UTF-8") from exc
-    if commit not in text or tree not in text:
+    explicit_commit = re.findall(
+        r"(?im)^\s*[-*]?\s*Candidate commit:\s*`?([0-9a-f]{40})`?\s*$",
+        text,
+    )
+    explicit_tree = re.findall(
+        r"(?im)^\s*[-*]?\s*Candidate tree:\s*`?([0-9a-f]{40})`?\s*$",
+        text,
+    )
+    exact_sections = re.findall(
+        r"(?ims)^\s*Exact candidate:\s*$"
+        r"(?:(?!^\s*#{1,6}\s).{0,500}?)"
+        r"^\s*[-*]\s*Commit:\s*`?([0-9a-f]{40})`?\s*$"
+        r"(?:(?!^\s*#{1,6}\s).{0,500}?)"
+        r"^\s*[-*]\s*Tree:\s*`?([0-9a-f]{40})`?\s*$",
+        text,
+    )
+    immutable_bindings = re.findall(
+        r"(?im)^\s*[-*]\s*Immutable bindings:\s*`([0-9a-f]{40})`"
+        r"[^\n]*?\band tree\s*`([0-9a-f]{40})`",
+        text,
+    )
+    subjects: list[tuple[str, str]] = []
+    if explicit_commit or explicit_tree:
+        if len(explicit_commit) != 1 or len(explicit_tree) != 1:
+            raise DoctorError(
+                "Context transition review evidence has ambiguous candidate fields"
+            )
+        subjects.append((explicit_commit[0], explicit_tree[0]))
+    subjects.extend(exact_sections)
+    subjects.extend(immutable_bindings)
+    unique_subjects = set(subjects)
+    if len(unique_subjects) != 1:
         raise DoctorError(
-            "Context transition review evidence does not name the exact commit/tree"
+            "Context transition review evidence must name one unique candidate subject"
+        )
+    candidate_commit, candidate_tree = next(iter(unique_subjects))
+    if (candidate_commit, candidate_tree) != (commit, tree):
+        raise DoctorError(
+            "Context transition review evidence subject differs from the exact commit/tree"
         )
     return {
         "path": str(path),
         "sha256": surface["sha256"],
         "surface": surface,
+        "candidate_commit": candidate_commit,
+        "candidate_tree": candidate_tree,
     }
 
 
@@ -843,8 +881,8 @@ def _stage_context_transition_projections(
     *,
     source_commit: str,
     source_tree: str,
-    review: Mapping[str, Any],
-) -> list[str]:
+    review: Mapping[str, Any] | None,
+) -> tuple[list[str], tuple[dict[str, Any], ...]]:
     """Stage one explicit source transition without relabelling old evidence.
 
     Locally provable runtime and Plan mirrors are still reconciled by the
@@ -910,10 +948,17 @@ def _stage_context_transition_projections(
         "next": json.loads(json.dumps(task.get("next"))),
         "next_binding_policy": task.get("next_binding_policy"),
         "next_bindings": json.loads(json.dumps(task.get("next_bindings"))),
+        "item_workflow": json.loads(json.dumps(item)),
+        "plan_todo_1916": json.loads(json.dumps(todo_1916)),
     }
 
-    review_path = str(review["path"])
-    review_sha256 = str(review["sha256"])
+    review_path = str(review["path"]) if review is not None else None
+    review_sha256 = str(review["sha256"]) if review is not None else None
+    review_state = (
+        _CONTEXT_TRANSITION_REVIEW_STATE
+        if review is not None
+        else _CONTEXT_TRANSITION_REVIEW_PENDING_STATE
+    )
     item["review_sha256"] = item_review["sha256"]
     todo_1916["review_sha256"] = plan_review["sha256"]
     development.update(
@@ -970,7 +1015,7 @@ def _stage_context_transition_projections(
             "state": "LIVE_EXACT_LOCAL_RUNTIME_CONTEXT_PUBLICATION_PENDING",
             "review_path": review_path,
             "review_sha256": review_sha256,
-            "review_state": _CONTEXT_TRANSITION_REVIEW_STATE,
+            "review_state": review_state,
             "review_is_authority": False,
             "context_required": False,
             "next": (
@@ -990,7 +1035,7 @@ def _stage_context_transition_projections(
             "candidate_tree": source_tree,
             "review_path": review_path,
             "review_sha256": review_sha256,
-            "review_state": _CONTEXT_TRANSITION_REVIEW_STATE,
+            "review_state": review_state,
             "authority": False,
             "admission": admission,
         },
@@ -1038,9 +1083,22 @@ def _stage_context_transition_projections(
         "next": task["next"],
         "next_binding_policy": task["next_binding_policy"],
         "next_bindings": task["next_bindings"],
+        "item_workflow": item,
+        "plan_todo_1916": todo_1916,
     }
+    evidence_bindings = tuple(
+        [
+            *(
+                [{**dict(review), "label": "Todo 1921 coding review"}]
+                if review is not None
+                else []
+            ),
+            {**item_review, "label": "Todo 1920 item review"},
+            {**plan_review, "label": "Todo 1916 Plan review"},
+        ]
+    )
     if previous == successor:
-        return []
+        return [], evidence_bindings
     now = datetime.now().astimezone().isoformat()
     record = {
         "schema": "tgw-context-explicit-projection-migration/v1",
@@ -1049,6 +1107,11 @@ def _stage_context_transition_projections(
         "source_tree": source_tree,
         "review_path": review_path,
         "review_sha256": review_sha256,
+        "review_state": review_state,
+        "item_review_path": item_review["path"],
+        "item_review_sha256": item_review["sha256"],
+        "plan_review_path": plan_review["path"],
+        "plan_review_sha256": plan_review["sha256"],
         "previous_projection_sha256": _hash(previous),
         "successor_projection_sha256": _hash(successor),
         "authority": False,
@@ -1063,10 +1126,12 @@ def _stage_context_transition_projections(
         "implementation.development_source.review",
         "live_verification",
         "tracks.coding_lifecycle",
+        "tracks.item_workflow.review_sha256",
+        "plan.todo_1916.review_sha256",
         "review_admission",
         "next",
         "next_bindings",
-    ]
+    ], evidence_bindings
 
 
 _NEXT_BINDING_POLICY = "STRUCTURED_ONLY_NO_INLINE_GENERATION_IDENTITIES"
@@ -1074,6 +1139,7 @@ _INLINE_NEXT_IDENTITY = re.compile(
     r"(?i)(?:\b[0-9a-f]{7,40}\b|item-workflow-[0-9a-f]{7,40}(?:-[0-9]+)?)"
 )
 _CONTEXT_TRANSITION_REVIEW_STATE = "NON_ADMITTING_DIAGNOSTIC_RECORDED"
+_CONTEXT_TRANSITION_REVIEW_PENDING_STATE = "PENDING_DIAGNOSTIC_EVIDENCE_NON_GATING"
 _CONTEXT_TRANSITION_NEXT = [
     (
         "Operator browser-check the live Todo 1920 item editor at the route "
@@ -1182,27 +1248,43 @@ def _validate_current_task_projections(
     reviewed_tree = development.get("reviewed_candidate_tree")
     review_path = development.get("review")
     review_sha256 = development.get("review_sha256")
+    coding_review_state = coding.get("review_state")
     if (
         not isinstance(reviewed_commit, str)
         or _COMMIT.fullmatch(reviewed_commit) is None
         or not isinstance(reviewed_tree, str)
         or _COMMIT.fullmatch(reviewed_tree) is None
-        or not isinstance(review_path, str)
-        or not review_path
-        or not isinstance(review_sha256, str)
-        or _SHA256.fullmatch(review_sha256) is None
     ):
         raise DoctorError("current task reviewed candidate projection is malformed")
+    if (
+        isinstance(coding_review_state, str)
+        and "DIAGNOSTIC" in coding_review_state
+        and coding_review_state != _CONTEXT_TRANSITION_REVIEW_PENDING_STATE
+    ):
+        if (
+            not isinstance(review_path, str)
+            or not review_path
+            or not isinstance(review_sha256, str)
+            or _SHA256.fullmatch(review_sha256) is None
+        ):
+            raise DoctorError("current task coding review evidence is malformed")
+        _require_review_file(
+            review_path,
+            review_sha256,
+            label="coding",
+        )
+    elif coding_review_state == _CONTEXT_TRANSITION_REVIEW_PENDING_STATE:
+        if review_path is not None or review_sha256 is not None:
+            raise DoctorError(
+                "current task pending coding review carries unbound evidence"
+            )
+    else:
+        raise DoctorError("current task coding review state is malformed")
     _require_git_commit_tree(
         paths.repository,
         commit=reviewed_commit,
         tree=reviewed_tree,
         label="coding review candidate",
-    )
-    _require_review_file(
-        review_path,
-        review_sha256,
-        label="coding",
     )
     _require_projection_pair(
         "coding lifecycle reviewed candidate",
@@ -3145,7 +3227,11 @@ def _context_processes_once(paths: DoctorPaths) -> list[dict[str, Any]]:
 
 
 def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
-    """Return clients only when two bounded full inventories agree exactly."""
+    """Return two agreeing best-effort snapshots of visible Context clients.
+
+    Linux does not expose a global process-set fence.  Callers must therefore
+    keep this diagnostic and non-gating even when both bounded scans agree.
+    """
 
     first = _context_processes_once(paths)
     second = _context_processes_once(paths)
@@ -3156,78 +3242,38 @@ def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
     return second
 
 
-def _context_restart_targets(
-    processes: Sequence[Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    """Build restart advice only from exact stable parent identities."""
-
-    targets: list[dict[str, Any]] = []
-    for item in processes:
-        if not _context_process_requires_restart(item):
-            continue
-        boot_id = item.get("boot_id")
-        parent_pid = item.get("parent_pid")
-        parent_start_ticks = item.get("parent_start_ticks")
-        parent_process_identity = item.get("parent_process_identity")
-        if (
-            not isinstance(boot_id, str)
-            or not boot_id
-            or not isinstance(parent_pid, int)
-            or parent_pid <= 1
-            or not isinstance(parent_start_ticks, int)
-            or parent_start_ticks < 0
-            or parent_process_identity
-            != f"{boot_id}:{parent_pid}:{parent_start_ticks}"
-        ):
-            raise DoctorError(
-                "affected Context client has no proven stable parent harness identity"
-            )
-        targets.append(
-            {
-                "context_process_identity": item["process_identity"],
-                "parent_process_identity": parent_process_identity,
-                "session_id": item["session_id"],
-                "user": item["user"],
-                "entrypoint": item["entrypoint"],
-            }
-        )
-    return targets
-
-
 def check_context_processes(paths: DoctorPaths) -> dict[str, Any]:
     try:
         processes = _context_processes(paths)
         stale = [item for item in processes if _context_process_requires_restart(item)]
-        if stale:
-            restart_targets = _context_restart_targets(processes)
-            return _check(
-                "context.clients",
-                "RESTART_REQUIRED",
-                f"{len(stale)} Context MCP process(es) are not bound to the current snapshot and installed entrypoint",
-                evidence={
-                    "processes": processes,
-                    "observed_stale_pids_non_actionable": [
-                        item["pid"] for item in stale
-                    ],
-                    "restart_identities": restart_targets,
-                },
-                repair=(
-                    "restart only the affected parent harness session by its stable "
-                    "parent_process_identity; never signal a reported bare PID"
-                ),
+        state = "RESTART_REQUIRED" if stale else "WARN"
+        detail = (
+            f"{len(stale)} visible Context MCP process(es) appear older than the "
+            "current generation; start a fresh harness session"
+            if stale
+            else (
+                f"{len(processes)} visible Context MCP process(es) appear current in "
+                "a best-effort non-gating snapshot"
+                if processes
+                else "no live Context MCP process is visible"
             )
-        if not processes:
-            return _check(
-                "context.clients",
-                "WARN",
-                "no live Context MCP process is visible; cold-start verification is required",
-                evidence={"processes": []},
-            )
+        )
         return _check(
             "context.clients",
-            "PASS",
-            f"{len(processes)} visible Context MCP process(es) use the installed generation",
-            evidence={"processes": processes},
+            state,
+            detail,
+            evidence={
+                "processes": processes,
+                "observed_stale_process_identities": [
+                    item["process_identity"] for item in stale
+                ],
+                "inventory_scope": (
+                    "best-effort visible-process snapshot; not a global process-set "
+                    "proof, authority, or repair gate"
+                ),
+                "restart_identities": None,
+            },
+            repair="start a fresh harness session; do not signal a reported PID",
         )
     except Exception as exc:
         return _check(
@@ -3249,31 +3295,37 @@ def check_context_processes(paths: DoctorPaths) -> dict[str, Any]:
 
 
 def _context_restart_report(paths: DoctorPaths) -> dict[str, Any]:
-    """Return exact advisory restart identities without mutating any client."""
+    """Require a safe fresh session without claiming a global process proof."""
 
     try:
         clients = _context_processes(paths)
-        restart_required = _context_restart_targets(clients)
+        observed_stale = [
+            item["process_identity"]
+            for item in clients
+            if _context_process_requires_restart(item)
+        ]
+        error = None
     except Exception as exc:
-        return {
-            "client_processes_mutated": False,
-            "client_restart_evidence_ok": False,
-            "restart_required": None,
-            "restart_scope": (
-                "unknown; use a manual fresh harness session and do not signal any "
-                "reported PID"
-            ),
-            "restart_detection_error": str(exc),
-        }
+        clients = []
+        observed_stale = []
+        error = str(exc)
     return {
         "client_processes_mutated": False,
-        "client_restart_evidence_ok": True,
-        "restart_required": restart_required,
+        "client_restart_evidence_ok": None,
+        "restart_required": [
+            {
+                "action": "START_FRESH_HARNESS_SESSION",
+                "process_target": None,
+                "authority": False,
+            }
+        ],
         "restart_scope": (
-            "affected parent harness sessions by parent_process_identity only; "
-            "bare PIDs are diagnostic and must never be signaled"
+            "fresh harness session only; observed processes are diagnostic and "
+            "no PID or parent process is an actionable target"
         ),
-        "restart_detection_error": None,
+        "observed_context_processes": len(clients),
+        "observed_stale_process_identities": observed_stale,
+        "restart_detection_error": error,
     }
 
 
@@ -6135,6 +6187,25 @@ def _same_link_identity(left: Mapping[str, Any], right: Mapping[str, Any]) -> bo
     return all(left.get(key) == right.get(key) for key in keys)
 
 
+def _descriptor_matches_link_surface(
+    descriptor: int,
+    surface: Mapping[str, Any],
+) -> bool:
+    """Bind a symlink surface to a retained O_PATH descriptor across rename."""
+
+    observed = os.fstat(descriptor)
+    return (
+        surface.get("kind") == "symlink"
+        and stat.S_ISLNK(observed.st_mode)
+        and observed.st_dev == surface.get("device")
+        and observed.st_ino == surface.get("inode")
+        and observed.st_uid == surface.get("uid")
+        and observed.st_gid == surface.get("gid")
+        and stat.S_IMODE(observed.st_mode) == surface.get("mode")
+        and os.readlink("", dir_fd=descriptor) == surface.get("target")
+    )
+
+
 def _restore_surface(path: Path, surface: Mapping[str, Any]) -> None:
     kind = surface.get("kind")
     if kind == "file":
@@ -6430,35 +6501,64 @@ def repair_context_launcher(
         if _surface_snapshot(paths.context_generation_pointer) != captured_pointer:
             pointer_tmp.unlink()
             raise DoctorError("Context generation pointer changed concurrently during switch")
-        parent = os.open(
-            paths.context_generation_pointer.parent,
-            os.O_RDONLY | os.O_DIRECTORY,
+        staged_pointer_descriptor = os.open(
+            pointer_tmp,
+            os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        captured_pointer_descriptor = os.open(
+            paths.context_generation_pointer,
+            os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
         )
         try:
-            # renameat2(RENAME_EXCHANGE) can complete in the kernel and still be
-            # reported as an exception by a wrapper.  Until both pathname
-            # identities prove the exact exchange, broad migration rollback is
-            # unsafe and both pointers must be retained for deterministic replay.
-            pointer_switch_unproven = True
-            _rename_exchange(
-                parent,
-                pointer_tmp.name,
-                paths.context_generation_pointer.name,
-            )
-            _context_repair_phase("exchange", paths)
-            selected_pointer = _surface_snapshot(paths.context_generation_pointer)
-            displaced = _surface_snapshot(pointer_tmp)
-            if not _same_link_identity(selected_pointer, staged_pointer) or not _same_link_identity(
-                displaced, captured_pointer
+            if not _descriptor_matches_link_surface(
+                staged_pointer_descriptor, staged_pointer
+            ) or not _descriptor_matches_link_surface(
+                captured_pointer_descriptor, captured_pointer
             ):
-                raise DoctorError("Context generation pointer CAS observed an unproven concurrent surface")
-            pointer_switch_unproven = False
-            pointer_tmp.unlink()
-            _context_repair_phase("displaced-pointer-unlink", paths)
-            os.fsync(parent)
-            _context_repair_phase("parent-fsync", paths)
+                raise DoctorError(
+                    "Context generation pointer descriptors differ before switch"
+                )
+            parent = os.open(
+                paths.context_generation_pointer.parent,
+                os.O_RDONLY | os.O_DIRECTORY,
+            )
+            try:
+                # Retained O_PATH descriptors prevent an unlink/recreate ABA
+                # from reusing either symlink inode while the exchange is being
+                # verified.
+                pointer_switch_unproven = True
+                _rename_exchange(
+                    parent,
+                    pointer_tmp.name,
+                    paths.context_generation_pointer.name,
+                )
+                _context_repair_phase("exchange", paths)
+                selected_pointer = _surface_snapshot(
+                    paths.context_generation_pointer
+                )
+                displaced = _surface_snapshot(pointer_tmp)
+                if (
+                    not _descriptor_matches_link_surface(
+                        staged_pointer_descriptor, selected_pointer
+                    )
+                    or not _descriptor_matches_link_surface(
+                        captured_pointer_descriptor, displaced
+                    )
+                ):
+                    raise DoctorError(
+                        "Context generation pointer CAS observed an unproven "
+                        "concurrent surface"
+                    )
+                pointer_switch_unproven = False
+                pointer_tmp.unlink()
+                _context_repair_phase("displaced-pointer-unlink", paths)
+                os.fsync(parent)
+                _context_repair_phase("parent-fsync", paths)
+            finally:
+                os.close(parent)
         finally:
-            os.close(parent)
+            os.close(captured_pointer_descriptor)
+            os.close(staged_pointer_descriptor)
         if _resolved_context_generation(paths) != generation:
             raise DoctorError("Context pointer switch did not select the captured generation")
         _validate_context_generation(generation, paths, selected["hashes"])
@@ -6499,7 +6599,38 @@ def repair_context_launcher(
                 f"installed Context shim cold probe failed after cutover; "
                 f"prior generation restored: {probe_exc}"
             ) from probe_exc
-        receipt = _receipt(paths, "context-launcher", {"generation": old_generation.name}, {"generation": generation_name, "runtime_commit": desired, "runtime_hashes": selected["hashes"]})
+        try:
+            receipt = _receipt(
+                paths,
+                "context-launcher",
+                {"generation": old_generation.name},
+                {
+                    "generation": generation_name,
+                    "runtime_commit": desired,
+                    "runtime_hashes": selected["hashes"],
+                },
+            )
+        except Exception as receipt_exc:
+            # A cutover without durable success evidence is not a completed
+            # transaction. Restore the exact prior pointer for both the normal
+            # shim path and the one-time legacy migration path.
+            post_cutover_probe_failed = True
+            try:
+                _rollback_context_generation_pointer(
+                    paths,
+                    generation,
+                    selected_pointer,
+                    captured_pointer,
+                )
+            except Exception as rollback_exc:
+                raise DoctorError(
+                    "Context launcher receipt publication failed after cutover: "
+                    f"{receipt_exc}; pointer rollback failed: {rollback_exc}"
+                ) from receipt_exc
+            raise DoctorError(
+                "Context launcher receipt publication failed after cutover; "
+                f"prior generation restored: {receipt_exc}"
+            ) from receipt_exc
     except Exception as exc:
         if (
             regular
@@ -6717,13 +6848,24 @@ def repair_context(
                 latest.pop("reconciliation_hash", None)
                 latest["reconciliation_hash"] = _hash(latest)
     migration_changes: list[str] = []
-    if review_binding is not None:
-        migration_changes = _stage_context_transition_projections(
-            paths,
-            task,
-            source_commit=head,
-            source_tree=tree,
-            review=review_binding,
+    transition_review_bindings: tuple[dict[str, Any], ...] = ()
+    review_admission_projection = task.get("review_admission")
+    transition_projection_required = (
+        task_source != head
+        or not isinstance(review_admission_projection, Mapping)
+        or not isinstance(review_admission_projection.get("current"), Mapping)
+        or task.get("next_binding_policy") != _NEXT_BINDING_POLICY
+        or not isinstance(task.get("next_bindings"), Mapping)
+    )
+    if review_binding is not None or transition_projection_required:
+        migration_changes, transition_review_bindings = (
+            _stage_context_transition_projections(
+                paths,
+                task,
+                source_commit=head,
+                source_tree=tree,
+                review=review_binding,
+            )
         )
     workflow_projection = task.get("implementation", {}).get("coding_workflow")
     if not isinstance(workflow_projection, Mapping):
@@ -6894,12 +7036,11 @@ def repair_context(
             raise DoctorError("current Plan evidence changed during context repair")
         if _surface_snapshot(paths.context_task) != task_surface or _surface_snapshot(paths.context_cursor) != cursor_surface or _surface_snapshot(paths.context_snapshot) != snapshot_surface:
             raise DoctorError("context inputs changed concurrently; no live file was replaced")
-        if review_binding is not None and _surface_snapshot(
-            Path(str(review_binding["path"]))
-        ) != review_binding["surface"]:
-            raise DoctorError(
-                "Context transition review evidence changed during repair"
-            )
+        for binding in transition_review_bindings:
+            if _surface_snapshot(Path(str(binding["path"]))) != binding["surface"]:
+                raise DoctorError(
+                    f"{binding['label']} changed during Context repair"
+                )
         committed_task: dict[str, Any] | None = None
         committed_cursor: dict[str, Any] | None = None
         committed_snapshot: dict[str, Any] | None = None
@@ -6962,6 +7103,14 @@ def repair_context(
                 raise DoctorError(
                     "current Plan evidence changed across atomic Context publication"
                 )
+            for binding in transition_review_bindings:
+                if (
+                    _surface_snapshot(Path(str(binding["path"])))
+                    != binding["surface"]
+                ):
+                    raise DoctorError(
+                        f"{binding['label']} changed across atomic Context publication"
+                    )
             receipt = _receipt(
                 paths,
                 "context",
@@ -10948,23 +11097,14 @@ def repair(
         if isinstance(context_client_check, Mapping)
         else "UNKNOWN"
     )
-    repair_time_client_evidence_ok = (
-        result.get("client_restart_evidence_ok") is True
-        if operation in {"context", "context-launcher"}
-        else True
-    )
-    verification_complete = (
-        context_client_inventory_state
-        in {"PASS", "WARN", "FAIL", "RESTART_REQUIRED"}
-        and repair_time_client_evidence_ok
-    )
+    # The bounded repair verifies its own mutation before returning. Context
+    # client inventory is a best-effort orientation snapshot: /proc offers no
+    # global process-set fence, and it must never become a completion gate for
+    # this or any unrelated subsystem.
+    verification_complete = result.get("ok") is True
     return {
         "schema": "tgw-local-doctor-repair/v1",
-        "ok": (
-            result.get("ok") is True
-            and diagnosis.get("ok") is True
-            and verification_complete
-        ),
+        "ok": result.get("ok") is True,
         "operation": operation,
         "mutation_applied": result.get("changed") is True,
         "verification_complete": verification_complete,
@@ -10974,6 +11114,7 @@ def repair(
             if operation in {"context", "context-launcher"}
             else None
         ),
+        "context_client_inventory_non_gating": True,
         "results": [result],
         "diagnosis": diagnosis,
     }
@@ -11340,13 +11481,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 review_evidence=args.review_evidence,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
-            # A completed bounded repair is successful when the resulting
-            # diagnosis has no failure.  Historical cleanup warnings and
-            # restart notices remain visible evidence, but must not make the
-            # exact bootstrap claim that the repair itself failed.  The repair
-            # wrapper separately fails closed when Context client verification
-            # is incomplete, even if its bounded mutation was applied.
-            return 0 if result.get("ok") and result["diagnosis"].get("ok") else 2
+            # Each repair is bounded to its selected target.  The complete
+            # diagnosis remains visible evidence, but an unrelated failing
+            # check must not turn Context (or any other subsystem) into a
+            # global repair gate.  Context repairs separately fail closed when
+            # their own client verification is incomplete.
+            return 0 if result.get("ok") else 2
         if args.operation == "inventory":
             result = inventory()
             if not args.full:

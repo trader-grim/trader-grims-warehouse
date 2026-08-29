@@ -240,7 +240,10 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     bootstrap_receipt = str(root / "doctor-receipts/bootstrap.json")
     materialization_hash = "sha256:" + "1" * 64
     review_file = tmp_path / "review.md"
-    review_file.write_text(f"candidate {head}\ntree {tree}\n", encoding="utf-8")
+    review_file.write_text(
+        f"- Candidate commit: `{head}`\n- Candidate tree: `{tree}`\n",
+        encoding="utf-8",
+    )
     review_path = str(review_file)
     review_hash = "sha256:" + hashlib.sha256(review_file.read_bytes()).hexdigest()
     item_commit = head
@@ -248,7 +251,9 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     item_generation = "item-workflow-current"
     item_review_file = tmp_path / "item-review.md"
     item_review_file.write_text(
-        f"candidate {item_commit}\ntree {item_tree}\n", encoding="utf-8"
+        f"- Candidate commit: `{item_commit}`\n"
+        f"- Candidate tree: `{item_tree}`\n",
+        encoding="utf-8",
     )
     item_review_path = str(item_review_file)
     item_review_hash = (
@@ -258,7 +263,8 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     plan_candidate_tree = plan_tree
     plan_review_file = tmp_path / "plan-review.md"
     plan_review_file.write_text(
-        f"candidate {plan_candidate}\ntree {plan_candidate_tree}\n",
+        f"- Candidate commit: `{plan_candidate}`\n"
+        f"- Candidate tree: `{plan_candidate_tree}`\n",
         encoding="utf-8",
     )
     plan_review_path = str(plan_review_file)
@@ -506,14 +512,17 @@ def test_explicit_context_transition_migrates_legacy_projection_without_relabell
     task["tracks"]["item_workflow"]["review_sha256"] = "sha256:" + "0" * 64
     task["plan"]["todo_1916"]["review_sha256"] = "sha256:" + "0" * 64
     review = tmp_path / "successor-review.md"
-    review.write_text(f"candidate {head}\ntree {tree}\n", encoding="utf-8")
+    review.write_text(
+        f"- Candidate commit: `{head}`\n- Candidate tree: `{tree}`\n",
+        encoding="utf-8",
+    )
 
     binding = doctor_cli._context_transition_review_binding(
         review,
         commit=head,
         tree=tree,
     )
-    changed = doctor_cli._stage_context_transition_projections(
+    changed, evidence_bindings = doctor_cli._stage_context_transition_projections(
         paths,
         task,
         source_commit=head,
@@ -529,6 +538,11 @@ def test_explicit_context_transition_migrates_legacy_projection_without_relabell
     )
 
     assert changed
+    assert {binding["label"] for binding in evidence_bindings} == {
+        "Todo 1921 coding review",
+        "Todo 1920 item review",
+        "Todo 1916 Plan review",
+    }
     assert task["next_binding_policy"] == (
         "STRUCTURED_ONLY_NO_INLINE_GENERATION_IDENTITIES"
     )
@@ -558,6 +572,14 @@ def test_explicit_context_transition_migrates_legacy_projection_without_relabell
     )
     migration = task["explicit_projection_migration_history"][-1]
     assert migration["authority"] is False
+    assert migration["item_review_sha256"] == task["tracks"]["item_workflow"][
+        "review_sha256"
+    ]
+    assert migration["plan_review_sha256"] == task["plan"]["todo_1916"][
+        "review_sha256"
+    ]
+    assert "tracks.item_workflow.review_sha256" in changed
+    assert "plan.todo_1916.review_sha256" in changed
     claimed = migration.pop("migration_hash")
     assert claimed == doctor_cli._hash(migration)
 
@@ -566,16 +588,137 @@ def test_context_transition_review_binding_rejects_wrong_candidate(
     tmp_path: Path,
 ) -> None:
     report = tmp_path / "review.md"
-    report.write_text(f"candidate {'a' * 40}\ntree {'b' * 40}\n")
+    report.write_text(
+        f"- Candidate commit: `{'a' * 40}`\n"
+        f"- Candidate tree: `{'b' * 40}`\n"
+    )
 
     with pytest.raises(
         doctor_cli.DoctorError,
-        match="does not name the exact commit/tree",
+        match="subject differs from the exact commit/tree",
     ):
         doctor_cli._context_transition_review_binding(
             report,
             commit="c" * 40,
             tree="d" * 40,
+        )
+
+
+def test_explicit_context_transition_can_record_review_pending_without_gate(
+    tmp_path: Path,
+) -> None:
+    paths, head, tree = _fixture(tmp_path)
+    task = json.loads(paths.context_task.read_text())
+    cursor = json.loads(paths.context_cursor.read_text())
+    task["review_admission"] = {
+        "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
+        "todo_1921_review": "LEGACY_DIAGNOSTIC",
+    }
+    task.pop("next_binding_policy")
+    task.pop("next_bindings")
+
+    changed, bindings = doctor_cli._stage_context_transition_projections(
+        paths,
+        task,
+        source_commit=head,
+        source_tree=tree,
+        review=None,
+    )
+    doctor_cli._validate_current_task_projections(
+        paths,
+        task,
+        cursor,
+        source_commit=head,
+        source_tree=tree,
+    )
+
+    assert changed
+    assert task["tracks"]["coding_lifecycle"]["review_state"] == (
+        "PENDING_DIAGNOSTIC_EVIDENCE_NON_GATING"
+    )
+    assert task["tracks"]["coding_lifecycle"]["review_path"] is None
+    assert task["tracks"]["coding_lifecycle"]["review_sha256"] is None
+    assert task["review_admission"]["current"]["authority"] is False
+    assert {binding["label"] for binding in bindings} == {
+        "Todo 1920 item review",
+        "Todo 1916 Plan review",
+    }
+
+
+@pytest.mark.parametrize("reference_label", ["Base", "Parent"])
+def test_context_transition_review_binding_rejects_reference_only_identity(
+    tmp_path: Path,
+    reference_label: str,
+) -> None:
+    requested_commit = "5" * 40
+    requested_tree = "6" * 40
+    report = tmp_path / "review.md"
+    report.write_text(
+        "\n".join(
+            [
+                f"- Candidate commit: `{'a' * 40}`",
+                f"- Candidate tree: `{'b' * 40}`",
+                f"- {reference_label} commit: `{requested_commit}`",
+                f"- {reference_label} tree: `{requested_tree}`",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        doctor_cli.DoctorError,
+        match="subject differs from the exact commit/tree",
+    ):
+        doctor_cli._context_transition_review_binding(
+            report,
+            commit=requested_commit,
+            tree=requested_tree,
+        )
+
+
+def test_context_transition_review_binding_rejects_duplicate_subject_fields(
+    tmp_path: Path,
+) -> None:
+    commit = "a" * 40
+    tree = "b" * 40
+    report = tmp_path / "review.md"
+    report.write_text(
+        f"- Candidate commit: `{commit}`\n"
+        f"- Candidate tree: `{tree}`\n"
+        f"- Candidate commit: `{commit}`\n"
+        f"- Candidate tree: `{tree}`\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="ambiguous candidate fields"):
+        doctor_cli._context_transition_review_binding(
+            report,
+            commit=commit,
+            tree=tree,
+        )
+
+
+def test_context_transition_review_binding_rejects_conflicting_subjects(
+    tmp_path: Path,
+) -> None:
+    commit = "a" * 40
+    tree = "b" * 40
+    report = tmp_path / "review.md"
+    report.write_text(
+        f"- Candidate commit: `{commit}`\n"
+        f"- Candidate tree: `{tree}`\n\n"
+        "Exact candidate:\n\n"
+        f"- Commit: `{'c' * 40}`\n"
+        f"- Tree: `{'d' * 40}`\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="one unique candidate subject"):
+        doctor_cli._context_transition_review_binding(
+            report,
+            commit=commit,
+            tree=tree,
         )
 
 
@@ -948,7 +1091,7 @@ def test_source_bootstrap_routes_privileged_repair_through_exact_candidate(
     ]
 
 
-def test_repair_cli_succeeds_with_non_failing_diagnostic_attention(
+def test_repair_cli_keeps_unrelated_diagnosis_non_gating(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(
@@ -956,7 +1099,7 @@ def test_repair_cli_succeeds_with_non_failing_diagnostic_attention(
         "repair",
         lambda *_args, **_kwargs: {
             "ok": True,
-            "diagnosis": {"ok": True, "state": "ATTENTION", "exit_code": 1},
+            "diagnosis": {"ok": False, "state": "FAILED", "exit_code": 2},
         },
     )
 
@@ -965,7 +1108,7 @@ def test_repair_cli_succeeds_with_non_failing_diagnostic_attention(
     )
 
     assert result == 0
-    assert '"state": "ATTENTION"' in capsys.readouterr().out
+    assert '"state": "FAILED"' in capsys.readouterr().out
 
 
 def _stub_context_repair_wrapper(
@@ -973,6 +1116,8 @@ def _stub_context_repair_wrapper(
     *,
     inventory_state: str,
     restart_evidence_ok: bool,
+    operation: str = "context",
+    post_diagnosis_ok: bool = True,
 ) -> None:
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
     monkeypatch.setattr(doctor_cli, "_repair_lock", lambda _paths: nullcontext())
@@ -983,7 +1128,7 @@ def _stub_context_repair_wrapper(
     )
     monkeypatch.setitem(
         doctor_cli._REPAIRS,
-        "context",
+        operation,
         lambda _paths, **_kwargs: {
             "ok": True,
             "changed": True,
@@ -994,8 +1139,8 @@ def _stub_context_repair_wrapper(
         doctor_cli,
         "diagnose",
         lambda _paths: {
-            "ok": True,
-            "state": "ATTENTION",
+            "ok": post_diagnosis_ok,
+            "state": "ATTENTION" if post_diagnosis_ok else "FAILED",
             "checks": [
                 {"id": "context.clients", "state": inventory_state}
             ],
@@ -1003,7 +1148,7 @@ def _stub_context_repair_wrapper(
     )
 
 
-def test_repair_wrapper_distinguishes_applied_mutation_from_unknown_verification(
+def test_repair_wrapper_keeps_unknown_client_inventory_non_gating(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stub_context_repair_wrapper(
@@ -1014,11 +1159,12 @@ def test_repair_wrapper_distinguishes_applied_mutation_from_unknown_verification
 
     result = doctor_cli.repair("context", doctor_cli.DoctorPaths())
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     assert result["mutation_applied"] is True
-    assert result["verification_complete"] is False
+    assert result["verification_complete"] is True
     assert result["context_client_inventory_state"] == "UNKNOWN"
     assert result["client_restart_evidence_ok"] is False
+    assert result["context_client_inventory_non_gating"] is True
     assert result["results"][0]["ok"] is True
 
 
@@ -1036,6 +1182,39 @@ def test_repair_wrapper_keeps_proven_client_advisories_non_failing(
 
     assert result["ok"] is True
     assert result["verification_complete"] is True
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "runtime",
+        "database",
+        "workers",
+        "plan-render-worker",
+        "unix-git-access",
+        "obsolete-surfaces",
+    ],
+)
+def test_bounded_repair_ignores_unrelated_failed_diagnosis(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    _stub_context_repair_wrapper(
+        monkeypatch,
+        inventory_state="UNKNOWN",
+        restart_evidence_ok=False,
+        operation=operation,
+        post_diagnosis_ok=False,
+    )
+
+    result = doctor_cli.repair(operation, doctor_cli.DoctorPaths())
+
+    assert result["ok"] is True
+    assert result["mutation_applied"] is True
+    assert result["verification_complete"] is True
+    assert result["context_client_inventory_state"] == "UNKNOWN"
+    assert result["client_restart_evidence_ok"] is None
+    assert result["diagnosis"]["ok"] is False
 
 
 def test_repair_cli_exits_nonzero_when_context_verification_is_incomplete(
@@ -1930,20 +2109,13 @@ def test_context_clients_require_current_snapshot_and_installed_entrypoint(
     result = doctor_cli.check_context_processes(doctor_cli.DoctorPaths())
 
     assert result["state"] == "RESTART_REQUIRED"
-    assert result["evidence"]["observed_stale_pids_non_actionable"] == [
-        process["pid"]
+    assert result["evidence"]["observed_stale_process_identities"] == [
+        process["process_identity"]
     ]
-    assert result["evidence"]["restart_identities"] == [
-        {
-            "context_process_identity": process["process_identity"],
-            "parent_process_identity": "boot:4:50",
-            "session_id": 1,
-            "user": "codex",
-            "entrypoint": process["entrypoint"],
-        }
-    ]
-    assert "parent_pid" not in result["evidence"]["restart_identities"][0]
-    assert "affected parent harness" in result["operator_action"]
+    assert result["evidence"]["restart_identities"] is None
+    assert "not a global process-set proof" in result["evidence"]["inventory_scope"]
+    assert "fresh harness session" in result["operator_action"]
+    assert "PID" in result["operator_action"]
 
 
 def test_context_process_same_tick_is_not_proven_current() -> None:
@@ -1993,13 +2165,19 @@ def test_context_restart_report_never_turns_inventory_error_into_empty_success(
 
     result = doctor_cli._context_restart_report(doctor_cli.DoctorPaths())
 
-    assert result["client_restart_evidence_ok"] is False
-    assert result["restart_required"] is None
-    assert "manual fresh harness session" in result["restart_scope"]
+    assert result["client_restart_evidence_ok"] is None
+    assert result["restart_required"] == [
+        {
+            "action": "START_FRESH_HARNESS_SESSION",
+            "process_target": None,
+            "authority": False,
+        }
+    ]
+    assert "fresh harness session only" in result["restart_scope"]
     assert "permission denied" in result["restart_detection_error"]
 
 
-def test_context_restart_report_requires_proven_parent_identity(
+def test_context_restart_report_never_makes_parent_identity_actionable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -2023,10 +2201,11 @@ def test_context_restart_report_requires_proven_parent_identity(
 
     result = doctor_cli._context_restart_report(doctor_cli.DoctorPaths())
 
-    assert result["client_restart_evidence_ok"] is False
-    assert result["restart_required"] is None
-    assert "manual fresh harness session" in result["restart_scope"]
-    assert "parent harness identity" in result["restart_detection_error"]
+    assert result["client_restart_evidence_ok"] is None
+    assert result["restart_required"][0]["process_target"] is None
+    assert "no PID or parent process" in result["restart_scope"]
+    assert result["observed_stale_process_identities"] == ["boot:41:100"]
+    assert result["restart_detection_error"] is None
 
 
 def _full_current_task_projection(commit: str, tree: str) -> tuple[dict, dict]:
@@ -5598,6 +5777,123 @@ def test_context_repair_rolls_back_if_external_binding_changes_across_snapshot_c
     assert not list(paths.receipts.glob("*-context.json"))
 
 
+@pytest.mark.parametrize("review_kind", ["current", "item", "plan"])
+@pytest.mark.parametrize("phase", ["during-probe", "after-snapshot-cas"])
+def test_context_transition_fences_every_review_surface_across_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    review_kind: str,
+    phase: str,
+) -> None:
+    paths, head, tree = _fixture(tmp_path)
+    task = json.loads(paths.context_task.read_text())
+    cursor = json.loads(paths.context_cursor.read_text())
+    review_evidence: Path | None = None
+    desired_commit: str | None = None
+    source_root: Path | None = None
+    if review_kind == "current":
+        review_evidence = Path(
+            task["implementation"]["development_source"]["review"]
+        )
+        desired_commit = head
+        source_root = tmp_path / "exact-source"
+    else:
+        task["review_admission"] = {
+            "admission": "NOT_APPLICABLE_REVIEW_IS_DIAGNOSTIC_EVIDENCE",
+            "legacy": True,
+        }
+        task.pop("next_binding_policy")
+        task.pop("next_bindings")
+        _write_json(paths.context_task, task)
+        _write_json(paths.context_snapshot, _snapshot(task, cursor))
+
+    target = {
+        "current": Path(task["implementation"]["development_source"]["review"]),
+        "item": Path(task["tracks"]["item_workflow"]["review_path"]),
+        "plan": Path(task["plan"]["todo_1916"]["review_path"]),
+    }[review_kind]
+    live_before = {
+        path: doctor_cli._surface_snapshot(path)
+        for path in (
+            paths.context_task,
+            paths.context_cursor,
+            paths.context_snapshot,
+        )
+    }
+    selected = doctor_cli._selected_context_artifacts(paths)
+    original_run = doctor_cli._run
+    original_cas = doctor_cli._cas_regular_file
+    mutated = False
+
+    def mutate_review() -> None:
+        nonlocal mutated
+        if mutated:
+            return
+        target.write_text(
+            target.read_text(encoding="utf-8") + "post-binding change\n",
+            encoding="utf-8",
+        )
+        mutated = True
+
+    def run(command, **kwargs):
+        if Path(command[0]).name == "tgw_context_publish.py":
+            task_path = Path(command[command.index("--task") + 1])
+            cursor_path = Path(command[command.index("--cursor") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            output_path.write_bytes(
+                publish_bytes(
+                    json.loads(task_path.read_text()),
+                    json.loads(cursor_path.read_text()),
+                )
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return original_run(command, **kwargs)
+
+    def probe(*_args, **_kwargs):
+        if phase == "during-probe":
+            mutate_review()
+        return {"generation": "CURRENT"}
+
+    def cas(path: Path, *args, **kwargs):
+        result = original_cas(path, *args, **kwargs)
+        if phase == "after-snapshot-cas" and path == paths.context_snapshot:
+            mutate_review()
+        return result
+
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        doctor_cli,
+        "_repair_context_artifacts",
+        lambda *_args, **_kwargs: selected,
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_exact_bootstrap_workflow_projection",
+        lambda *_args, **_kwargs: task["implementation"]["coding_workflow"],
+    )
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    monkeypatch.setattr(doctor_cli, "_probe_context_stdio", probe)
+    monkeypatch.setattr(doctor_cli, "_cas_regular_file", cas)
+    monkeypatch.setattr(
+        doctor_cli, "_require_trusted_root_program", lambda *_args: None
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="review.*changed"):
+        doctor_cli.repair_context(
+            paths,
+            desired_commit=desired_commit,
+            source_root=source_root,
+            review_evidence=review_evidence,
+        )
+
+    assert mutated is True
+    for path, expected in live_before.items():
+        assert doctor_cli._surface_semantics(
+            doctor_cli._surface_snapshot(path)
+        ) == doctor_cli._surface_semantics(expected)
+    assert not list(paths.receipts.glob("*-context.json"))
+
+
 def test_explicit_exact_context_repair_reconciles_stale_task_source_without_authority_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5694,6 +5990,11 @@ def test_explicit_exact_context_repair_reconciles_stale_task_source_without_auth
     assert repaired_task["implementation"]["development_source"]["state"] == (
         "CANONICAL_SOURCE_CURRENT"
     )
+    assert repaired_task["tracks"]["coding_lifecycle"]["review_state"] == (
+        "PENDING_DIAGNOSTIC_EVIDENCE_NON_GATING"
+    )
+    assert repaired_task["review_admission"]["current"]["authority"] is False
+    assert repaired_task["review_admission"]["current"]["review_path"] is None
     workflow = repaired_task["implementation"]["coding_workflow"]
     assert workflow == {
         "state": "LIVE_EXACT_LOCAL_RUNTIME",

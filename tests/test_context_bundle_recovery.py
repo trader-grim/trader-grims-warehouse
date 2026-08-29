@@ -1398,13 +1398,12 @@ def test_doctor_context_launcher_check_and_receipted_atomic_repair(
     assert result["changed"] is True
     assert result["restart_required"] == [
         {
-            "context_process_identity": "boot:41:100",
-            "parent_process_identity": "boot:4:50",
-            "session_id": 1,
-            "user": "codex",
-            "entrypoint": {"kind": "installed-launcher"},
+            "action": "START_FRESH_HARNESS_SESSION",
+            "process_target": None,
+            "authority": False,
         }
     ]
+    assert result["observed_stale_process_identities"] == ["boot:41:100"]
     assert result["client_processes_mutated"] is False
     assert Path(result["receipt"]).is_file()
     assert installed["raw"] == selected["launcher"].read_bytes()
@@ -1423,6 +1422,73 @@ def test_doctor_context_launcher_check_and_receipted_atomic_repair(
         paths.context_launcher,
         paths.context_launcher,
     ]
+
+
+def test_context_launcher_shim_receipt_failure_restores_prior_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _selected(tmp_path / "first")
+    paths = _doctor_paths(tmp_path)
+    selected = {"value": first}
+    monkeypatch.setattr(
+        doctor_cli,
+        "_selected_context_artifacts",
+        lambda _paths: selected["value"],
+    )
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(doctor_cli, "_context_processes", lambda _paths: [])
+    monkeypatch.setattr(
+        doctor_cli,
+        "_probe_context_stdio",
+        lambda *_args, **_kwargs: {"generation": "CURRENT"},
+    )
+
+    doctor_cli.repair_context_launcher(paths)
+    prior_pointer = doctor_cli._surface_snapshot(
+        paths.context_generation_pointer
+    )
+    prior_generation = paths.context_generation_pointer.resolve(strict=True)
+    prior_receipts = set(paths.receipts.glob("*-context-launcher.json"))
+
+    second = _selected(tmp_path / "second")
+    second["commit"] = "c" * 40
+    second["launcher"].chmod(0o755)
+    second["launcher"].write_bytes(b"#!/bin/sh\n# second generation\nexit 0\n")
+    second["launcher"].chmod(0o555)
+    required = {
+        "launcher": second["launcher"],
+        "publisher": second["publisher"],
+        **second["modules"],
+    }
+    second["hashes"] = {
+        name: doctor_cli._file_hash(path) for name, path in required.items()
+    }
+    second["runtime_inventory"] = doctor_cli._context_runtime_inventory(
+        second["runtime_source"], uid=os.getuid(), gid=os.getgid()
+    )
+    selected["value"] = second
+    original_receipt = doctor_cli._receipt
+
+    def fail_success_receipt(_paths, operation, *args, **kwargs):
+        if operation == "context-launcher":
+            raise OSError("injected launcher receipt failure")
+        return original_receipt(_paths, operation, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_cli, "_receipt", fail_success_receipt)
+
+    with pytest.raises(
+        doctor_cli.DoctorError,
+        match="receipt publication failed.*prior generation restored",
+    ):
+        doctor_cli.repair_context_launcher(paths)
+
+    assert doctor_cli._same_link_identity(
+        doctor_cli._surface_snapshot(paths.context_generation_pointer),
+        prior_pointer,
+    )
+    assert paths.context_generation_pointer.resolve(strict=True) == prior_generation
+    assert set(paths.receipts.glob("*-context-launcher.json")) == prior_receipts
 
 
 def test_generation_pointer_is_the_only_pair_visibility_boundary(
