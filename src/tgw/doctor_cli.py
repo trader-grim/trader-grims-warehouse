@@ -3113,10 +3113,10 @@ def _unit_definition(
     }
 
 
-def _plan_render_process_runtime_identity(
+def _service_process_runtime_identity(
     state: Mapping[str, str], release: Path, *, proc_root: Path = Path("/proc")
 ) -> dict[str, Any]:
-    """Compare the loaded worker's immutable cwd with the selected release."""
+    """Compare a loaded service's immutable cwd with the selected release."""
     try:
         pid = int(state.get("MainPID", "0"))
     except ValueError:
@@ -3157,6 +3157,13 @@ def _plan_render_process_runtime_identity(
     return evidence
 
 
+def _plan_render_process_runtime_identity(
+    state: Mapping[str, str], release: Path, *, proc_root: Path = Path("/proc")
+) -> dict[str, Any]:
+    """Backward-compatible name for the shared service runtime check."""
+    return _service_process_runtime_identity(state, release, proc_root=proc_root)
+
+
 def check_units(
     paths: DoctorPaths, *, desired_commit: str | None = None
 ) -> dict[str, Any]:
@@ -3168,11 +3175,23 @@ def check_units(
             state["definition"] = _unit_definition(
                 paths, unit, state, desired_commit=desired_commit
             )
+            if unit in _ACTIVE_CODING_UNITS and unit.endswith(".service"):
+                desired = state["definition"]["desired_commit"]
+                release = paths.runtime_root / "releases" / desired
+                state["process_runtime"] = _service_process_runtime_identity(
+                    state, release
+                )
             observed[unit] = state
         unhealthy = [
             unit
             for unit, state in observed.items()
-            if state.get("LoadState") != "loaded" or not state["definition"]["exact"] or (unit in _ACTIVE_CODING_UNITS and state.get("ActiveState") != "active")
+            if state.get("LoadState") != "loaded"
+            or not state["definition"]["exact"]
+            or (
+                unit in _ACTIVE_CODING_UNITS
+                and state.get("ActiveState") != "active"
+            )
+            or not state.get("process_runtime", {"exact": True})["exact"]
         ]
         return _check(
             "services.local-coding",
@@ -7438,7 +7457,12 @@ def repair_workers(
         )
         if not definition["exact"]:
             raise DoctorError(f"installed coding unit is not exact: {unit}")
-        operation = "restart" if unit in installed else "start"
+        stale_runtime = False
+        if unit.endswith(".service") and state.get("ActiveState") == "active":
+            stale_runtime = not _service_process_runtime_identity(
+                state, release
+            )["exact"]
+        operation = "restart" if unit in installed or stale_runtime else "start"
         if operation == "start" and state.get("ActiveState") == "active":
             continue
         result = _run(["systemctl", "enable", unit], timeout=30)

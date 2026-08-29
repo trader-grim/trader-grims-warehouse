@@ -5490,6 +5490,183 @@ def test_unit_definition_rejects_active_process_with_different_argv(tmp_path: Pa
     assert "active process argv differs" in result["reasons"]
 
 
+def test_service_process_runtime_identity_uses_resolved_working_directory(
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "runtime/releases/current"
+    stale = tmp_path / "runtime/releases/stale"
+    release.mkdir(parents=True)
+    stale.mkdir(parents=True)
+    process = tmp_path / "proc/123"
+    process.mkdir(parents=True)
+    (process / "cwd").symlink_to(stale)
+
+    stale_result = doctor_cli._service_process_runtime_identity(
+        {"MainPID": "123"}, release, proc_root=tmp_path / "proc"
+    )
+    (process / "cwd").unlink()
+    (process / "cwd").symlink_to(release)
+    exact_result = doctor_cli._service_process_runtime_identity(
+        {"MainPID": "123"}, release, proc_root=tmp_path / "proc"
+    )
+
+    assert stale_result["exact"] is False
+    assert stale_result["loaded_release"] == str(stale.resolve())
+    assert exact_result["exact"] is True
+    assert exact_result["loaded_release"] == str(release.resolve())
+
+
+def test_check_units_rejects_active_service_from_stale_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commit = "a" * 40
+    paths = replace(
+        doctor_cli.DoctorPaths(), runtime_root=tmp_path / "runtime"
+    )
+    (paths.runtime_root / "releases" / commit).mkdir(parents=True)
+    stale_unit = "tgw-codex-implement-worker.service"
+
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda unit: {
+            "Unit": unit,
+            "LoadState": "loaded",
+            "ActiveState": "active" if unit in doctor_cli._ACTIVE_CODING_UNITS else "inactive",
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_definition",
+        lambda *_args, **_kwargs: {
+            "exact": True,
+            "desired_commit": commit,
+            "reasons": [],
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_service_process_runtime_identity",
+        lambda state, _release: {
+            "exact": state["Unit"] != stale_unit,
+            "reason": "loaded process predates selected immutable runtime",
+        },
+    )
+
+    result = doctor_cli.check_units(paths, desired_commit=commit)
+
+    assert result["state"] == "FAIL"
+    assert stale_unit in result["detail"]
+    assert result["evidence"]["units"][stale_unit]["process_runtime"]["exact"] is False
+
+
+def _stub_worker_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    restart_fails: bool = False,
+) -> tuple[doctor_cli.DoctorPaths, str, str, list[list[str]]]:
+    commit = "a" * 40
+    tree = "b" * 40
+    paths = replace(
+        doctor_cli.DoctorPaths(),
+        repository=tmp_path / "repository",
+        runtime_root=tmp_path / "runtime",
+        systemd_install_root=tmp_path / "systemd",
+    )
+    (paths.runtime_root / "releases" / commit).mkdir(parents=True)
+    paths.repository.mkdir()
+    paths.systemd_install_root.mkdir()
+    stale_unit = "tgw-codex-implement-worker.service"
+    runtime_exact = {unit: unit != stale_unit for unit in doctor_cli._ACTIVE_CODING_UNITS}
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(
+        doctor_cli, "_source_identity", lambda _paths: (commit, tree, "")
+    )
+    monkeypatch.setattr(doctor_cli, "_git", lambda *_args: tree)
+    monkeypatch.setattr(
+        doctor_cli, "_verify_release_tree", lambda *_args: {"tree": tree}
+    )
+    monkeypatch.setattr(
+        doctor_cli, "read_exact_tree_file", lambda *_args, **_kwargs: (0o644, b"unit\n")
+    )
+    monkeypatch.setattr(
+        doctor_cli, "_unit_destination_bytes_exact", lambda *_args: True
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda unit: {
+            "Unit": unit,
+            "LoadState": "loaded",
+            "ActiveState": "active" if unit in doctor_cli._ACTIVE_CODING_UNITS else "inactive",
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_definition",
+        lambda *_args, **_kwargs: {"exact": True, "desired_commit": commit},
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_service_process_runtime_identity",
+        lambda state, _release: {"exact": runtime_exact[state["Unit"]]},
+    )
+    monkeypatch.setattr(
+        doctor_cli, "check_units", lambda *_args, **_kwargs: {"state": "PASS"}
+    )
+    monkeypatch.setattr(doctor_cli, "_receipt", lambda *_args: "receipt")
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command == ["systemctl", "restart", stale_unit]:
+            if restart_fails:
+                return subprocess.CompletedProcess(command, 1, "", "restart failed")
+            runtime_exact[stale_unit] = True
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(doctor_cli, "_run", run)
+    return paths, commit, stale_unit, commands
+
+
+def test_repair_workers_restarts_stale_generation_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commit, stale_unit, commands = _stub_worker_repair(tmp_path, monkeypatch)
+
+    repaired = doctor_cli.repair_workers(paths, desired_commit=commit)
+    commands.clear()
+    unchanged = doctor_cli.repair_workers(paths, desired_commit=commit)
+
+    assert repaired["service_actions"] == [f"restart:{stale_unit}"]
+    assert unchanged["service_actions"] == []
+    assert commands == []
+
+
+def test_repair_workers_fails_closed_when_stale_generation_cannot_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commit, _stale_unit, _commands = _stub_worker_repair(
+        tmp_path, monkeypatch, restart_fails=True
+    )
+
+    with pytest.raises(doctor_cli.DoctorError, match="restart failed"):
+        doctor_cli.repair_workers(paths, desired_commit=commit)
+
+
+def test_active_coding_service_units_bind_selected_immutable_runtime() -> None:
+    for unit in doctor_cli._ACTIVE_CODING_UNITS:
+        if not unit.endswith(".service"):
+            continue
+        source = ROOT / "systemd" / unit
+        assert (
+            "WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current"
+            in source.read_text(encoding="utf-8")
+        )
+
+
 def test_inventory_marks_unique_work_for_preservation(tmp_path: Path) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     worktree = paths.worktrees / "candidate"

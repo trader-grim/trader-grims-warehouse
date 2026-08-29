@@ -11,7 +11,7 @@ User=codex
 Group=codex
 SupplementaryGroups=tgw-coders
 UMask=0002
-WorkingDirectory=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current
 Environment=HOME=/home/codex
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=GIT_OPTIONAL_LOCKS=0
