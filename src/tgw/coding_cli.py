@@ -960,9 +960,15 @@ def _queue_evidence(
             coding_lifecycle.validate_job_binding(
                 record, failed_receipt.get("coding_lifecycle")
             )
+            resumable_partial = (
+                stage == "implementation"
+                and queue_name == "codex-implement"
+                and failed_receipt.get("outcome") == "partial"
+            )
             if (
                 failed_receipt.get("status") != "FAIL"
-                or failed_receipt.get("outcome") != "failed"
+                or failed_receipt.get("outcome")
+                != ("partial" if resumable_partial else "failed")
                 or failed_receipt.get("established_conditions") != []
                 or failed_receipt.get("treatment_id") != queue_name
                 or failed_receipt.get("plan_binding")
@@ -989,6 +995,60 @@ def _queue_evidence(
                 stage,
                 "failed",
                 reason=f"{queue_name} negative receipt artifacts are invalid",
+                job_ids=ids,
+            )
+        if resumable_partial:
+            if not isinstance(payload, Mapping):
+                return _stage(
+                    record,
+                    stage,
+                    "failed",
+                    reason="partial implementation queue payload is unavailable",
+                    job_ids=ids,
+                )
+            plan = record["binding"]["plan_todo_binding"]
+            expected = {
+                "todo_id": int(record["target"]),
+                "plan_commit": plan["plan_commit"],
+                "solution_hash": plan["solution_hash"],
+                "source_commit": record["binding"]["source_commit"],
+                "source_tree": record["binding"]["source_tree"],
+                "actor": payload.get("todo_agent"),
+                "worktree": str(worktree),
+                "treatment_id": queue_name,
+                "treatment_version": str(payload.get("treatment_version", "1")),
+            }
+            observed = classify(worktree, expected)
+            attempt_history = observed.get("history")
+            latest_attempt = (
+                attempt_history[-1]
+                if isinstance(attempt_history, list) and attempt_history
+                else None
+            )
+            if (
+                observed.get("state") != "RESUMABLE_PARTIAL"
+                or not isinstance(latest_attempt, Mapping)
+                or latest_attempt.get("job_id") != str(row["job_id"])
+                or latest_attempt.get("attempt_count") != row.get("attempt_count")
+                or latest_attempt.get("outcome") != "partial"
+                or latest_attempt.get("artifacts") != artifacts
+            ):
+                return _stage(
+                    record,
+                    stage,
+                    "failed",
+                    reason=(
+                        "partial implementation receipt has no exact resumable "
+                        f"lineage: {observed.get('state')}"
+                    ),
+                    job_ids=ids,
+                )
+            return _stage(
+                record,
+                stage,
+                "resumable_partial",
+                receipt=observed,
+                reason="codex-implement preserved one exact resumable partial attempt",
                 job_ids=ids,
             )
         detail = "; ".join(
