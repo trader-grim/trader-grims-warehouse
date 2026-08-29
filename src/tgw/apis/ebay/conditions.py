@@ -215,7 +215,7 @@ def condition_policy_for_category(cfg: Dict[str, Any], category_id: str) -> Dict
 def condition_policy_census(cfg: Dict[str, Any], expected_sets: int = 26) -> Dict[str, Any]:
     """Read-only coverage/drift census of the cached eBay policy observation."""
     policies = _get_policies(cfg)
-    sets = sorted({tuple(sorted(cid for cid, _label in rows)) for rows in policies.values()})
+    sets = sorted({tuple(sorted({cid for cid, _label in rows})) for rows in policies.values()})
     covered = sum(isinstance(_required_mem_cache.get(key), bool) for key in policies)
     return {'schema': 'tgw-ebay-condition-policy-census/v1', 'category_count': len(policies),
             'required_flag_coverage': covered, 'required_flag_missing_or_invalid': len(policies) - covered,

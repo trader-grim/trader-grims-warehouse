@@ -3781,7 +3781,7 @@ def condition_policy_census(cache_path: Path) -> dict[str, Any]:
         raise DoctorError("condition policy cache policies must be an object")
     flags = raw.get("item_condition_required")
     flags = flags if isinstance(flags, dict) else {}
-    sets = sorted({tuple(sorted(str(row[0]) for row in rows if isinstance(row, list) and row)) for rows in policies.values() if isinstance(rows, list)})
+    sets = sorted({tuple(sorted({str(row[0]) for row in rows if isinstance(row, list) and row})) for rows in policies.values() if isinstance(rows, list)})
     covered = sum(isinstance(flags.get(str(category)), bool) for category in policies)
     return {"schema": "tgw-doctor-ebay-condition-policy-census/v1", "cache_path": str(cache_path),
             "category_count": len(policies), "required_flag_coverage": covered,

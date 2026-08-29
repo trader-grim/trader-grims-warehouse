@@ -193,6 +193,23 @@ def test_warm_cache_keeps_policy_and_requirement_snapshot(tmp_path, monkeypatch)
     assert reads == [True]
 
 
+def test_condition_policy_census_deduplicates_ids_within_each_category(tmp_path):
+    _write_disk_cache(
+        tmp_path,
+        {
+            'single': [['1000', 'New']],
+            'duplicate-row': [['1000', 'New'], ['1000', 'New duplicate']],
+        },
+        required={'single': True, 'duplicate-row': True},
+    )
+
+    report = conditions.condition_policy_census(_cfg(tmp_path), expected_sets=1)
+
+    assert report['actual_distinct_condition_id_sets'] == 1
+    assert report['condition_id_sets'] == [['1000']]
+    assert report['drift'] is False
+
+
 def test_refresh_preserves_recognized_optional_category_without_conditions(
     tmp_path, monkeypatch
 ):

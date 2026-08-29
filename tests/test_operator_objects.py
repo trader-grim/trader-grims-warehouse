@@ -377,6 +377,10 @@ def test_illegal_condition_is_display_only_until_explicit_remap_or_clear():
         "label": "Used - Good — not allowed; remap or clear",
         "display_only": True,
     }
+    assert condition["options"][1] == {
+        "value": "",
+        "label": "Clear listing condition",
+    }
     assert published["item"]["record"]["condition"] == "Good"
     assert commands["save-inventory"]["enabled"] is True
     assert commands["save-listing-draft"]["enabled"] is True

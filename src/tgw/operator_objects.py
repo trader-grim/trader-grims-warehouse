@@ -285,8 +285,18 @@ def build_item_operator_object(
     required_flag_valid = context.get("required_flag_valid") is True if policy_fields_present else True
     listing_condition_required = context.get("item_condition_required") is True if policy_fields_present else True
     display_conditions = list(conditions)
-    if not listing_condition_required:
-        display_conditions.insert(0, {"value": "", "label": "No listing condition"})
+    if policy_fields_present or not listing_condition_required:
+        display_conditions.insert(
+            0,
+            {
+                "value": "",
+                "label": (
+                    "Clear listing condition"
+                    if listing_condition_required
+                    else "No listing condition"
+                ),
+            },
+        )
     if current_condition and not valid_condition:
         display_conditions.insert(0, {"value": current_condition, "label": f"{draft.get('condition_label') or current_condition} — not allowed; remap or clear", "display_only": True})
 

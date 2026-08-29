@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -166,6 +168,95 @@ def test_thin_web_item_page_uses_only_published_object_and_command_contract(monk
     assert "saveValues('item_fields')" in response.text
     assert "saveValues('draft_listing')" in response.text
     assert "x.display_only?'disabled'" in response.text
+    assert "saveBaseline={item_fields:{},draft_listing:{},aspects:{}}" in response.text
+    assert "function resetSaveBaseline()" in response.text
+    assert "JSON.stringify(value)!==saveBaseline[scope][name]" in response.text
+    assert "resetSaveBaseline();" in response.text
+
+
+def test_shipped_browser_command_generation_submits_only_dirty_controls(monkeypatch):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is unavailable for the shipped browser contract test")
+    monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
+    client = TestClient(http_server.app)
+    http_server._sessions["operator-object-js"] = float("inf")
+    client.cookies.set("tgw_session", "operator-object-js")
+    response = client.get("/form/operator/items/sku-1")
+    script = response.text.split("<script>", 1)[1].split("</script>", 1)[0]
+    harness = r"""
+resetSaveBaseline();
+const initialInventory=commandValues('save-inventory');
+const initialListing=commandValues('save-listing-draft');
+controls.find(x=>x.dataset.field==='title'&&x.dataset.scope==='item_fields').value='Renamed';
+const titleInventory=commandValues('save-inventory');
+resetSaveBaseline();
+const secondInventory=commandValues('save-inventory');
+controls.find(x=>x.dataset.field==='price').value='12.5';
+const priceListing=commandValues('save-listing-draft');
+resetSaveBaseline();
+condition.value='';
+const clearListing=commandValues('save-listing-draft');
+condition.value='USED_GOOD';
+resetSaveBaseline();
+condition.value='NEW';
+const remapListing=commandValues('save-listing-draft');
+resetSaveBaseline();
+controls.find(x=>x.dataset.field==='category_group').value='cameras';
+const groupInventory=commandValues('save-inventory');
+resetSaveBaseline();
+aspects[0].value='Other';
+const aspectListing=commandValues('save-listing-draft');
+globalThis.__result={initialInventory,initialListing,titleInventory,secondInventory,priceListing,clearListing,remapListing,groupInventory,aspectListing};
+"""
+    runner = f"""
+const vm=require('node:vm');
+const controls=[
+  {{value:'Thing',dataset:{{scope:'item_fields',field:'title',type:'string',nullable:'false'}}}},
+  {{value:'books',dataset:{{scope:'item_fields',field:'category_group',type:'string',nullable:'false'}}}},
+  {{value:'custom-size',dataset:{{scope:'item_fields',field:'size_class',type:'string',nullable:'false'}}}},
+  {{value:'operator-specific hint',dataset:{{scope:'item_fields',field:'ai_hint',type:'string',nullable:'false'}}}},
+  {{value:'Listing',dataset:{{scope:'draft_listing',field:'title',type:'string',nullable:'false'}}}},
+  {{value:'10',dataset:{{scope:'draft_listing',field:'price',type:'number',nullable:'true'}}}},
+  {{value:'USED_GOOD',dataset:{{scope:'draft_listing',field:'condition_enum',type:'string',nullable:'false'}}}}
+];
+const aspects=[{{value:'TGW',dataset:{{aspect:'Brand'}}}}];
+const condition=controls.find(x=>x.dataset.field==='condition_enum');
+const itemNode={{innerHTML:''}};
+const document={{
+  title:'',
+  querySelectorAll(selector){{
+    if(selector==='[data-aspect]')return aspects;
+    if(selector==='[data-command]')return [];
+    const match=selector.match(/^\\[data-scope="([^"]+)"\\]\\[data-field\\]$/);
+    return match?controls.filter(x=>x.dataset.scope===match[1]):[];
+  }},
+  getElementById(id){{return id==='condition_enum'?condition:itemNode;}}
+}};
+const sandbox={{controls,aspects,condition,document,location:{{pathname:'/form/operator/items/sku-1'}},fetch:()=>new Promise(()=>{{}}),encodeURIComponent,decodeURIComponent}};
+vm.runInNewContext({json.dumps(script + harness)},sandbox);
+process.stdout.write(JSON.stringify(sandbox.__result));
+"""
+
+    completed = subprocess.run(
+        [node, "-e", runner],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result == {
+        "initialInventory": {"item_fields": {}},
+        "initialListing": {"draft_listing": {}},
+        "titleInventory": {"item_fields": {"title": "Renamed"}},
+        "secondInventory": {"item_fields": {}},
+        "priceListing": {"draft_listing": {"price": 12.5}},
+        "clearListing": {"draft_listing": {"condition_enum": ""}},
+        "remapListing": {"draft_listing": {"condition_enum": "NEW"}},
+        "groupInventory": {"item_fields": {"category_group": "cameras"}},
+        "aspectListing": {"draft_listing": {"item_specifics": {"Brand": "Other"}}},
+    }
 
 
 def test_command_rejects_stale_generation_before_dispatch(monkeypatch):
@@ -395,3 +486,188 @@ def test_group_selection_is_one_atomic_http_patch_and_preserves_later_category(
 
     assert response.status_code == 200, response.text
     assert patches == [expected_patch]
+
+
+def test_unrelated_inventory_save_does_not_reapply_unchanged_group_defaults(
+    monkeypatch, tmp_path
+):
+    item = {
+        "sku": "sku-1",
+        "title": "Thing",
+        "category_group": "books",
+        "size_class": "custom-size",
+        "ai_hint": "operator-specific hint",
+        "draft_listing": {
+            "category_id": "261186",
+            "condition_enum": "USED_GOOD",
+            "item_specifics": {},
+        },
+    }
+    published = build_item_operator_object(
+        item=item,
+        workflow_card=_card(),
+        category_context={
+            "conditions": [{"enum": "USED_GOOD", "label": "Used - Good"}],
+            "aspects": [],
+            "category_groups": [{
+                "value": "books",
+                "label": "Books",
+                "size_class": "small",
+                "ai_hint": "printed book",
+                "ebay_categories": ["261186"],
+            }],
+        },
+    )
+    refreshed = deepcopy(published)
+    refreshed["object_generation"] = "gen-2"
+    patches = []
+    monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
+    monkeypatch.setattr(http_server, "_cfg", {"itemdata_root": tmp_path})
+    monkeypatch.setattr(
+        http_server,
+        "_current_item_operator_object",
+        lambda sku: refreshed if patches else published,
+    )
+    monkeypatch.setattr(
+        http_server,
+        "patch_item",
+        lambda sku, body, request, operator: patches.append(dict(body.fields))
+        or {"ok": True},
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_workflow_provider_identity",
+        lambda: (_ for _ in ()).throw(AssertionError("inventory save called a provider")),
+    )
+
+    response = TestClient(http_server.app).post(
+        "/api/operator/items/sku-1/commands",
+        headers=AUTH,
+        json={
+            "command_id": "save-inventory",
+            "object_generation": "gen-1",
+            # Defensive HTTP reproduction: even a stale client that resends
+            # the unchanged group must not overwrite custom server fields.
+            "values": {
+                "item_fields": {
+                    "title": "Renamed",
+                    "category_group": "books",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert patches == [{"title": "Renamed", "category_group": "books"}]
+    assert published["item"]["record"]["size_class"] == "custom-size"
+    assert published["item"]["record"]["ai_hint"] == "operator-specific hint"
+
+
+@pytest.mark.parametrize(
+    ("draft_values", "expected_patch"),
+    [
+        ({"title": "Unrelated title"}, {"draft_listing": {"title": "Unrelated title"}}),
+        ({"condition_enum": ""}, {"draft_listing": {"condition_enum": ""}}),
+        ({"condition_enum": "NEW"}, {"draft_listing": {"condition_enum": "NEW"}}),
+    ],
+    ids=["unrelated-edit", "explicit-clear", "explicit-remap"],
+)
+def test_illegal_condition_listing_draft_http_remediation_paths(
+    monkeypatch, tmp_path, draft_values, expected_patch
+):
+    item = {
+        "sku": "sku-1",
+        "title": "Thing",
+        "draft_listing": {
+            "category_id": "123",
+            "condition_enum": "USED_GOOD",
+            "condition_label": "Used - Good",
+            "item_specifics": {},
+        },
+    }
+    published = build_item_operator_object(
+        item=item,
+        workflow_card=_card(),
+        category_context={
+            "category_recognized": True,
+            "item_condition_required": True,
+            "required_flag_valid": True,
+            "conditions": [{"enum": "NEW", "label": "New"}],
+            "aspects": [],
+        },
+    )
+    refreshed = deepcopy(published)
+    refreshed["object_generation"] = "gen-2"
+    patches = []
+    monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
+    monkeypatch.setattr(http_server, "_cfg", {"itemdata_root": tmp_path})
+    monkeypatch.setattr(
+        http_server,
+        "_current_item_operator_object",
+        lambda sku: refreshed if patches else published,
+    )
+    monkeypatch.setattr(
+        http_server,
+        "patch_item",
+        lambda sku, body, request, operator: patches.append(dict(body.fields))
+        or {"ok": True},
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_workflow_provider_identity",
+        lambda: (_ for _ in ()).throw(AssertionError("draft save called a provider")),
+    )
+
+    response = TestClient(http_server.app).post(
+        "/api/operator/items/sku-1/commands",
+        headers=AUTH,
+        json={
+            "command_id": "save-listing-draft",
+            "object_generation": "gen-1",
+            "values": {"draft_listing": draft_values},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert patches == [expected_patch]
+
+
+@pytest.mark.parametrize(
+    ("command_id", "values"),
+    [
+        ("save-inventory", {"item_fields": {}}),
+        ("save-listing-draft", {"draft_listing": {}}),
+    ],
+)
+def test_second_sparse_save_is_an_idempotent_http_noop(
+    monkeypatch, tmp_path, command_id, values
+):
+    monkeypatch.setattr(http_server, "_api_key", AUTH["Authorization"].removeprefix("Bearer "))
+    monkeypatch.setattr(http_server, "_cfg", {"itemdata_root": tmp_path})
+    monkeypatch.setattr(http_server, "_current_item_operator_object", lambda sku: _published())
+    monkeypatch.setattr(
+        http_server,
+        "patch_item",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("an empty dirty-field domain must not patch")
+        ),
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_workflow_provider_identity",
+        lambda: (_ for _ in ()).throw(AssertionError("local no-op called a provider")),
+    )
+
+    response = TestClient(http_server.app).post(
+        "/api/operator/items/sku-1/commands",
+        headers=AUTH,
+        json={
+            "command_id": command_id,
+            "object_generation": "gen-1",
+            "values": values,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["command_id"] == command_id
+    assert response.json()["object_generation"] == "gen-1"

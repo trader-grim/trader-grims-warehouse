@@ -1260,42 +1260,42 @@ def execute_item_operator_command(
         if body.command_id == "save-inventory":
             item_fields = checked_values.get("item_fields", {})
             patch_fields = {**item_fields}
+            current_record = published["item"]["record"]
             selected_group = patch_fields.get("category_group")
-            if selected_group:
+            if selected_group and selected_group != current_record.get("category_group"):
                 options = published["field_schema"].get("category_groups", [])
                 selected = next((option for option in options if option.get("value") == selected_group), None)
                 if selected is None:
                     raise HTTPException(status_code=422, detail="category_group is not a published TGW group")
                 patch_fields.update(category_group=selected_group, size_class=selected.get("size_class", ""), ai_hint=selected.get("ai_hint", ""))
-                current_record = published["item"]["record"]
                 current_draft = current_record.get("draft_listing") if isinstance(current_record.get("draft_listing"), dict) else {}
                 if not (current_draft.get("category_id") or current_record.get("ebay_category_id")):
                     categories = selected.get("ebay_categories") or []
                     if categories:
                         patch_fields["draft_listing"] = {"category_id": categories[0]}
         elif body.command_id == "save-listing-draft":
-            patch_fields = {
-                "draft_listing": checked_values.get("draft_listing", {}),
-            }
+            draft_fields = checked_values.get("draft_listing", {})
+            patch_fields = {"draft_listing": draft_fields} if draft_fields else {}
         else:
             patch_fields = {"draft_listing": checked_values}
-        patch_item(
-            sku,
-            PatchBody(fields=patch_fields),
-            Request({
-                "type": "http",
-                "headers": [],
-                "_tgw_operator_object_capability": _OPERATOR_OBJECT_CAPABILITY,
-            }),
-            operator_identity,
-        )
-        published = _current_item_operator_object(sku)
-        command = next(item for item in published["commands"] if item["id"] == body.command_id)
-        if not command["enabled"]:
-            raise HTTPException(
-                status_code=409,
-                detail={"code": "command_held_after_update", "reason": command.get("reason")},
+        if patch_fields:
+            patch_item(
+                sku,
+                PatchBody(fields=patch_fields),
+                Request({
+                    "type": "http",
+                    "headers": [],
+                    "_tgw_operator_object_capability": _OPERATOR_OBJECT_CAPABILITY,
+                }),
+                operator_identity,
             )
+            published = _current_item_operator_object(sku)
+            command = next(item for item in published["commands"] if item["id"] == body.command_id)
+            if not command["enabled"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "command_held_after_update", "reason": command.get("reason")},
+                )
 
     if body.command_id in local_save_commands:
         return {
