@@ -551,6 +551,477 @@ def test_resume_intent_is_durable_before_dispatch_and_retries_use_new_fence(
     ] == ["new"]
 
 
+def test_fast_terminal_resume_job_consumes_intent_before_next_partial(
+    tmp_path: Path,
+) -> None:
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+    partial = advance(
+        store,
+        record["root_id"],
+        {
+            "implementation": lambda current: stage_result(
+                current,
+                "implementation",
+                "resumable_partial",
+                reason="first partial",
+            )
+        },
+    )
+    intent = {
+        "schema": "tgw-local-coding-lifecycle-resume-intent/v1",
+        "root_id": record["root_id"],
+        "binding_hash": record["binding"]["binding_hash"],
+        "todo_id": 1915,
+        "resume_of": "sha256:" + "3" * 64,
+        "resume_fingerprint": "sha256:" + "4" * 64,
+        "worktree": record["binding"]["worktree"],
+        "source_commit": record["binding"]["source_commit"],
+        "source_tree": record["binding"]["source_tree"],
+    }
+    reopened = request_resume(store, partial["root_id"], receipt=intent)
+    first_resume_fence = job_binding(reopened)
+    terminal = advance(
+        store,
+        record["root_id"],
+        {
+            "implementation": lambda current: stage_result(
+                current,
+                "implementation",
+                "resumable_partial",
+                reason="worker completed before queue read",
+                job_ids=["fast-terminal-job"],
+            )
+        },
+    )
+    assert terminal["state"] == "RESUMABLE_PARTIAL"
+    assert terminal.get("resume_intent") is None
+    assert terminal["active_implementation_generation"]["intent_hash"] == (
+        first_resume_fence["resume_intent_hash"]
+    )
+    next_resume = request_resume(store, terminal["root_id"], receipt=intent)
+    assert job_binding(next_resume) != first_resume_fence
+
+
+def test_disposable_start_partial_resume_closes_exact_successor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Exercise the real worker→journal→CLI resume seam without a provider."""
+    from tgw.development.partial_resume import candidate_changed_paths, history
+    from tgw.workers.coding import CodingWorker
+
+    repository = tmp_path / "repository"
+    worktree_root = tmp_path / "worktrees"
+    worktree = worktree_root / "todo-1915-disposable-canary"
+    repository.mkdir()
+    worktree_root.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "canary@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Disposable Coding Canary"],
+        cwd=repository,
+        check=True,
+    )
+    (repository / "base.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "base.txt"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "canary base"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+    source = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    source_tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=repository,
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "coding/canary/start-partial-resume",
+            str(worktree),
+            source,
+        ],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+
+    binding = plan_binding(worktree, source=source, source_tree=source_tree)
+    row = {
+        "id": 1915,
+        "agent": "codex",
+        "done_at": None,
+        "status_note": json.dumps(binding),
+    }
+    lifecycle_root = tmp_path / "lifecycles"
+    config = {
+        "postgres_dsn": "disposable-canary",
+        "coding": {
+            "lifecycle_root": str(lifecycle_root),
+            "repository_root": str(repository),
+            "worktree_root": str(worktree_root),
+        },
+    }
+    store = store_at(lifecycle_root)
+    solution = {
+        "plan_commit": binding["plan_commit"],
+        "solution_hash": binding["solution_hash"],
+        "closure_hash": binding["closure_hash"],
+    }
+    local = __import__("tgw.development.local_workflow", fromlist=["load_solution"])
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: config)
+    monkeypatch.setattr(
+        coding_cli,
+        "_pp_runtime_binding",
+        lambda *_args: {
+            "selected_commit": source,
+            "selected_tree": source_tree,
+        },
+    )
+    monkeypatch.setattr(
+        coding_cli, "_plan_binding_for_todo", lambda _identifier: (row, binding)
+    )
+    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda _identifier: row)
+    monkeypatch.setattr(local, "load_solution", lambda _path: solution)
+    monkeypatch.setattr(
+        coding_cli,
+        "LifecycleStore",
+        lambda _root: LifecycleStore(lifecycle_root, group_gid=os.getegid()),
+    )
+
+    rows = []
+
+    def dispatched_start(todo_id, **kwargs):
+        record = store.find(todo_id)
+        assert record is not None
+        stage = kwargs["lifecycle_stage"]
+        queue = {
+            "implementation": "codex-implement",
+            "controller": "controller-verify",
+        }[stage]
+        payload = {
+            "treatment_id": queue,
+            "treatment_version": "1",
+            "graph_id": f"canary-{stage}-{len(rows) + 1}",
+            "object_id": str(worktree),
+            "object_generation": f"canary-generation-{len(rows) + 1}",
+            "todo_id": todo_id,
+            "todo_agent": "codex",
+            "worktree": str(worktree),
+            "plan_binding": binding,
+            "coding_lifecycle": kwargs["lifecycle_job_binding"],
+        }
+        if kwargs.get("resume_only"):
+            observed = coding_cli.classify(
+                worktree,
+                {
+                    "todo_id": todo_id,
+                    "plan_commit": binding["plan_commit"],
+                    "solution_hash": binding["solution_hash"],
+                    "source_commit": source,
+                    "source_tree": source_tree,
+                    "actor": "codex",
+                    "worktree": str(worktree),
+                    "treatment_id": "codex-implement",
+                    "treatment_version": "1",
+                },
+            )
+            payload.update(
+                {
+                    "resume_of": observed["resume_of"],
+                    "resume_fingerprint": observed["fingerprint"],
+                }
+            )
+        rows.append(
+            {
+                "job_id": f"canary-{queue}-{len(rows) + 1}",
+                "queue_name": queue,
+                "state": "queued",
+                "attempt_count": 1,
+                "lease_token": (
+                    "00000000-0000-4000-8000-"
+                    f"{len(rows) + 1:012d}"
+                ),
+                "payload_json": payload,
+            }
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(coding_cli, "start", dispatched_start)
+    monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: rows)
+    monkeypatch.setattr("tgw.queue.worker_base.state_machine.init", lambda _dsn: None)
+    monkeypatch.setattr("tgw.apis.nats_client.init_nats", lambda _config: None)
+
+    def queue_row(job_id):
+        return next(row for row in rows if row["job_id"] == job_id)
+
+    def mark_running(job_id, owner, lease_token):
+        queue_row(job_id).update(
+            state="running", lease_owner=owner, lease_token=lease_token
+        )
+
+    def mark_dead_letter(job_id, _owner, _lease_token, detail, *, result=None):
+        job = queue_row(job_id)
+        job.update(
+            state="dead_letter",
+            error_code="HARD_FAILURE",
+            error_detail=detail,
+            finished_at="2026-08-28T00:00:00+00:00",
+            lease_owner=None,
+            lease_token=None,
+        )
+        job["payload_json"]["result"] = result
+
+    def close_local_success(job_id, _owner, _lease_token, result, publish):
+        compensators = []
+        publish(compensators.append)
+        assert len(compensators) == 1
+        job = queue_row(job_id)
+        job.update(
+            state="succeeded",
+            finished_at="2026-08-28T00:01:00+00:00",
+            lease_owner=None,
+            lease_token=None,
+            error_code=None,
+            error_detail=None,
+        )
+        job["payload_json"]["result"] = result
+        return True
+
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.mark_running", mark_running
+    )
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.mark_dead_letter", mark_dead_letter
+    )
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.close_local_success",
+        close_local_success,
+    )
+    monkeypatch.setattr(
+        "tgw.queue.worker_base.state_machine.get_job", queue_row
+    )
+    monkeypatch.setattr("tgw.notify.notify", lambda *_args, **_kwargs: None)
+
+    started = coding_cli.lifecycle_start(1915, config_path=tmp_path / "coding.json")
+    assert started["state"] == "QUEUED"
+    first_fence = job_binding(store.find(1915))
+    waiting = coding_cli.supervise(started["root_id"], config_path=tmp_path / "coding.json")
+    assert (waiting["state"], waiting["stage"]) == ("WAITING", "implementation")
+    first_job = rows[0]
+
+    def preserve_partial(_treatment, _payload, selected_worktree):
+        (selected_worktree / "partial.txt").write_text(
+            "preserved partial bytes\n", encoding="utf-8"
+        )
+        return {
+            "outcome": "partial",
+            "established_conditions": [],
+            "artifacts": [{"kind": "canary", "detail": "intentional partial"}],
+        }
+
+    worker = CodingWorker("codex-implement", config, launcher=preserve_partial)
+    worker._process(first_job)
+    first_result = first_job["payload_json"]["result"]
+    assert first_job["error_detail"] == (
+        "TreatmentFailure('coding treatment reported partial')"
+    )
+    rows[0] = {**first_job, "job_id": "forged-canary-job"}
+    rejected = coding_cli._queue_evidence(
+        waiting,
+        stage="implementation",
+        queue_name="codex-implement",
+        receipt_name="implementation-receipt.json",
+        dispatch=lambda: pytest.fail("terminal partial must not redispatch"),
+    )
+    assert rejected["outcome"] == "failed"
+    assert "no exact resumable lineage" in rejected["reason"]
+    rows[0] = first_job
+
+    receipt_path = worktree / "implementation-receipt.json"
+    exact_receipt_bytes = receipt_path.read_bytes()
+    forged_receipt = json.loads(exact_receipt_bytes)
+    forged_receipt["artifacts"] = [
+        {"kind": "forged", "detail": "not the queue-persisted result"}
+    ]
+    receipt_path.write_text(
+        json.dumps(forged_receipt, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    rejected = coding_cli._queue_evidence(
+        waiting,
+        stage="implementation",
+        queue_name="codex-implement",
+        receipt_name="implementation-receipt.json",
+        dispatch=lambda: pytest.fail("terminal partial must not redispatch"),
+    )
+    assert rejected["outcome"] == "failed"
+    assert "durable terminal queue provenance" in rejected["reason"]
+    receipt_path.write_bytes(exact_receipt_bytes)
+
+    first_job["state"] = "cancelled"
+    rejected = coding_cli._queue_evidence(
+        waiting,
+        stage="implementation",
+        queue_name="codex-implement",
+        receipt_name="implementation-receipt.json",
+        dispatch=lambda: pytest.fail("cancelled partial must not redispatch"),
+    )
+    assert rejected["outcome"] == "failed"
+    assert "durable terminal queue provenance" in rejected["reason"]
+    first_job["state"] = "dead_letter"
+
+    partial = coding_cli.supervise(
+        started["root_id"], config_path=tmp_path / "coding.json"
+    )
+    assert (partial["state"], partial["stage"]) == (
+        "RESUMABLE_PARTIAL",
+        "implementation",
+    ), (partial.get("failure"), partial.get("stages", {}).get("implementation"))
+    assert partial["stages"]["implementation"]["receipt"]["state"] == (
+        "RESUMABLE_PARTIAL"
+    )
+
+    resumed = coding_cli.resume(1915, config_path=tmp_path / "coding.json")
+    assert resumed["schema"] == "tgw-local-coding-resume/v2"
+    assert resumed["ok"] is True
+    assert resumed["lifecycle_state"] == "WAITING"
+    reopened = store.find(1915)
+    assert reopened is not None
+    assert job_binding(reopened) != first_fence
+
+    waiting = coding_cli.supervise(
+        started["root_id"], config_path=tmp_path / "coding.json"
+    )
+    assert (waiting["state"], waiting["stage"]) == ("WAITING", "implementation")
+    second_job = rows[1]
+    assert second_job["payload_json"]["resume_of"] == resumed["coding_state"]["resume_of"]
+    second_fence = second_job["payload_json"]["coding_lifecycle"]
+    assert waiting.get("resume_intent") is None
+    assert waiting["active_implementation_generation"]["kind"] == "resume"
+    assert job_binding(waiting) == second_fence
+
+    worker = CodingWorker("codex-implement", config, launcher=preserve_partial)
+    worker._process(second_job)
+    second_result = second_job["payload_json"]["result"]
+    attempts = history(worktree)
+    assert [attempt["outcome"] for attempt in attempts] == ["partial", "partial"]
+    current_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert current_receipt == second_result
+    assert current_receipt["coding_lifecycle"] == second_fence
+    assert current_receipt["implementation_attempt_hash"] == attempts[-1][
+        "attempt_hash"
+    ]
+    archived_receipt = (
+        worktree
+        / ".tgw-coding-history"
+        / "implementation"
+        / "receipts"
+        / (attempts[0]["attempt_hash"].removeprefix("sha256:") + ".json")
+    )
+    assert json.loads(archived_receipt.read_text(encoding="utf-8")) == (
+        first_result
+    )
+
+    partial_again = coding_cli.supervise(
+        started["root_id"], config_path=tmp_path / "coding.json"
+    )
+    assert (partial_again["state"], partial_again["stage"]) == (
+        "RESUMABLE_PARTIAL",
+        "implementation",
+    )
+    # Old journals can have reached the second partial before one-shot intent
+    # consumption existed. The CLI must rotate that stale live intent rather
+    # than returning a false resume_reused no-op forever.
+    stale_generation = partial_again.pop("active_implementation_generation")
+    partial_again["resume_intent"] = stale_generation["intent"]
+    store.put(partial_again)
+    resumed_again = coding_cli.resume(1915, config_path=tmp_path / "coding.json")
+    assert "resume_reused" not in resumed_again
+    assert resumed_again["resume_intent_hash"] != resumed["resume_intent_hash"]
+    assert job_binding(store.find(1915)) != second_fence
+    waiting = coding_cli.supervise(
+        started["root_id"], config_path=tmp_path / "coding.json"
+    )
+    assert (waiting["state"], waiting["stage"]) == ("WAITING", "implementation")
+    third_job = rows[2]
+    assert third_job["payload_json"]["coding_lifecycle"] != second_fence
+
+    def close_successor(_treatment, _payload, selected_worktree):
+        subprocess.run(
+            ["git", "add", "partial.txt"], cwd=selected_worktree, check=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "close disposable canary"],
+            cwd=selected_worktree,
+            check=True,
+            capture_output=True,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=selected_worktree,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=selected_worktree,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        return {
+            "outcome": "satisfied",
+            "established_conditions": ["implemented"],
+            "artifacts": [
+                {
+                    "kind": "closed_candidate",
+                    "commit": head,
+                    "tree": tree,
+                    "base_commit": source,
+                    "changed_paths": candidate_changed_paths(
+                        selected_worktree, source, head
+                    ),
+                }
+            ],
+        }
+
+    worker = CodingWorker("codex-implement", config, launcher=close_successor)
+    worker._process(third_job)
+    advanced = coding_cli.supervise(
+        started["root_id"], config_path=tmp_path / "coding.json"
+    )
+    assert (advanced["state"], advanced["stage"]) == ("WAITING", "controller")
+    assert [attempt["outcome"] for attempt in history(worktree)] == [
+        "partial",
+        "partial",
+        "satisfied",
+    ]
+    assert rows[3]["queue_name"] == "controller-verify"
+
+
 def test_controller_finding_automatically_starts_one_fenced_remediation_generation(
     tmp_path: Path,
 ) -> None:

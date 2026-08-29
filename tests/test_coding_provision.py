@@ -8,6 +8,7 @@ import contextlib
 import inspect
 import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,38 @@ def test_coding_defaults_use_shared_development_repository() -> None:
 
     assert coding_execution.DEFAULT_REPOSITORY_ROOT == expected
     assert coding_worker.DEFAULT_REPOSITORY_ROOT == expected
+
+
+def test_deployed_wrapper_and_candidate_parser_expose_coding_resume() -> None:
+    wrapper = Path("/usr/local/bin/tgw").read_text(encoding="utf-8")
+    assert "exec /opt/TGW/tgw-lib/bin/tgw-coding" in wrapper
+
+    deployed = subprocess.run(
+        ["/usr/local/bin/tgw", "coding", "resume", "--help"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert deployed.returncode == 0, deployed.stderr
+    assert "usage: tgw coding resume" in deployed.stdout
+    assert "TODO_ID" in deployed.stdout
+
+    repository = Path(__file__).resolve().parents[1]
+    candidate = subprocess.run(
+        [sys.executable, "-m", "tgw.coding_cli", "resume", "--help"],
+        cwd=repository,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(repository / "src"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert candidate.returncode == 0, candidate.stderr
+    assert "usage: tgw coding resume" in candidate.stdout
+    assert "TODO_ID" in candidate.stdout
     assert "/opt/TGW/src/trader-grims-warehouse" not in {
         str(coding_execution.DEFAULT_REPOSITORY_ROOT),
         str(coding_worker.DEFAULT_REPOSITORY_ROOT),
@@ -1697,14 +1730,68 @@ def test_coding_cli_access_status_reads_only_the_local_workflow(
     observed: list[tuple[int | None, object]] = []
     monkeypatch.setattr(
         coding_cli,
-        "status",
-        lambda todo_id, *, config_path: observed.append((todo_id, config_path))
+        "access_status",
+        lambda todo_id, *, config_path, full_jobs: observed.append(
+            (todo_id, config_path, full_jobs)
+        )
         or {"ok": True, "dependencies": {"tgw_prod": False}},
     )
 
     assert coding_cli.run(argparse.Namespace(coding_op="access-status", request_id=request_id, config=None)) == 0
-    assert observed == [(expected_todo, coding_cli.DEFAULT_CONFIG)]
+    assert observed == [(expected_todo, coding_cli.DEFAULT_CONFIG, False)]
     assert json.loads(capsys.readouterr().out)["dependencies"]["tgw_prod"] is False
+
+
+def test_coding_cli_access_status_compacts_jobs_unless_explicitly_requested(
+    monkeypatch,
+):
+    jobs = [
+        {"job_id": "1", "state": "succeeded", "payload_json": {"large": "x" * 1000}},
+        {"job_id": "2", "state": "dead_letter", "payload_json": {"large": "y" * 1000}},
+        {"job_id": "3", "state": "succeeded", "payload_json": {"large": "z" * 1000}},
+    ]
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {})
+    monkeypatch.setattr(
+        coding_cli,
+        "status_command",
+        lambda _args: {
+            "ok": True,
+            "actor": "codex",
+            "group": "tgw-coders",
+            "dependencies": {"tgw_prod": False},
+        },
+    )
+    monkeypatch.setattr(
+        coding_cli,
+        "_job_state_counts",
+        lambda todo_id: {"dead_letter": 1, "succeeded": 2},
+    )
+    observed_limits = []
+    monkeypatch.setattr(
+        coding_cli,
+        "_jobs",
+        lambda todo_id, *, limit: observed_limits.append((todo_id, limit)) or jobs,
+    )
+
+    compact = coding_cli.access_status(1915, config_path="disposable")
+    assert compact["schema"] == "tgw-local-coding-access-status/v1"
+    assert compact["job_count"] == 3
+    assert compact["job_state_counts"] == {"dead_letter": 1, "succeeded": 2}
+    assert compact["jobs_included"] is False
+    assert "jobs" not in compact
+    assert observed_limits == []
+
+    full = coding_cli.access_status(
+        1915, config_path="disposable", full_jobs=True
+    )
+    assert full["jobs_included"] is True
+    assert full["jobs"] == jobs
+    assert observed_limits == [(1915, 3)]
+
+    parsed = coding_cli.parser().parse_args(
+        ["access-status", "1915", "--full-jobs"]
+    )
+    assert parsed.full_jobs is True
 
 
 @pytest.mark.parametrize(
