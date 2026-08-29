@@ -1151,7 +1151,7 @@ def _current_item_operator_object(sku: str) -> Dict[str, Any]:
             )
         draft = item.get("draft_listing") if isinstance(item.get("draft_listing"), dict) else {}
         category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "")
-        current_condition = str(draft.get("condition_enum") or draft.get("condition") or "")
+        current_condition = str(draft.get("condition_enum") or "")  # Never use legacy human record labels as eBay enums.
         category_context = ebay_category_context(category_id, current_condition=current_condition) if category_id and category_id != "99" else {}
         category_context = dict(category_context)
         groups_path = _cfg.get("category_groups_path")

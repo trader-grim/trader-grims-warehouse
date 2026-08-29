@@ -295,7 +295,9 @@ def build_item_operator_object(
         label = condition.get("label") or condition.get("condition_label")
         if isinstance(value, str) and value and isinstance(label, str) and label:
             conditions.append({"value": value, "label": label})
-    current_condition = str(draft.get("condition_enum") or draft.get("condition") or "")
+    # Only the Inventory API enum is listing state.  A legacy human-readable
+    # ``draft_listing.condition`` belongs to the record-condition vocabulary.
+    current_condition = str(draft.get("condition_enum") or "")
     category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "").strip()
     policy_fields_present = "category_recognized" in context or "required_flag_valid" in context
     valid_condition = (
@@ -327,15 +329,29 @@ def build_item_operator_object(
     aspects = []
     missing_aspects = []
     specifics = get_ebay_aspects(item)
+    category_aspects: dict[str, Mapping[str, Any]] = {}
+    category_order: list[str] = []
     for aspect in context.get("aspects", ()):
         if not isinstance(aspect, Mapping) or not isinstance(aspect.get("name"), str):
             continue
+        name = aspect["name"]
+        if not name or name in category_aspects:
+            continue
+        category_aspects[name] = aspect
+        category_order.append(name)
+    custom_names = sorted(set(specifics) - set(category_aspects), key=str.casefold)
+    for name in category_order + custom_names:
+        aspect = category_aspects.get(name, {})
         descriptor = {
-            "name": aspect["name"],
+            "name": name,
             "required": bool(aspect.get("required")),
-            "mode": aspect.get("mode"),
+            "mode": (
+                aspect.get("mode")
+                if name in category_aspects
+                else "FREE_TEXT"
+            ),
             "allowed_values": list(aspect.get("allowed_values") or ()),
-            "value": specifics.get(aspect["name"]),
+            "value": specifics.get(name),
         }
         aspects.append(descriptor)
         if descriptor["required"] and not descriptor["value"]:

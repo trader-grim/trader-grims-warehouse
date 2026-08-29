@@ -281,6 +281,7 @@ def test_live_shaped_lowercase_config_preserves_display_and_cached_policy(
         "notes": "before",
         "draft_listing": {
             "category_id": "108857",
+            "condition": "Very Good",
             "condition_enum": "",
             "item_specifics": {"Color": "Cerulean", "Format": "Poster"},
         },
@@ -316,12 +317,6 @@ def test_live_shaped_lowercase_config_preserves_display_and_cached_policy(
         "item_condition_required": {"108857": False},
     }), encoding="utf-8")
     provider_aspects = [
-        {
-            "name": "Color",
-            "required": False,
-            "mode": "FREE_TEXT",
-            "allowed_values": [],
-        },
         {
             "name": "Format",
             "required": False,
