@@ -6128,6 +6128,61 @@ def test_repair_workers_compares_noop_restart_to_immediate_action_identity(
     ) is not None
 
 
+def test_repair_workers_refuses_to_join_transitional_obligation_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commit, unit, commands = _stub_worker_repair(
+        tmp_path,
+        monkeypatch,
+        initial_status="EXACT",
+    )
+    tree = "b" * 40
+    doctor_cli._write_restart_obligation(
+        paths,
+        unit,
+        commit=commit,
+        tree=tree,
+        reasons=["unit-definition-change"],
+        state=doctor_cli._unit_state(unit),
+    )
+    original_state = doctor_cli._unit_state
+    original_run = doctor_cli._run
+    enabled = False
+
+    def unit_state(observed_unit: str) -> dict[str, str]:
+        state = original_state(observed_unit)
+        if observed_unit == unit and enabled:
+            state = {
+                **state,
+                "ActiveState": "activating",
+                "SubState": "start",
+                "MainPID": "2002",
+                "InvocationID": "2" * 32,
+                "ExecMainStartTimestampMonotonic": "20002",
+            }
+        return state
+
+    def run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal enabled
+        result = original_run(command, **kwargs)
+        if command == ["systemctl", "enable", unit]:
+            enabled = True
+        return result
+
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+
+    with pytest.raises(doctor_cli.DoctorError, match="service state is activating"):
+        doctor_cli.repair_workers(paths, desired_commit=commit)
+    assert ["systemctl", "restart", unit] not in commands
+    assert ["systemctl", "start", unit] not in commands
+    assert doctor_cli._read_restart_obligation(
+        paths, unit, commit=commit, tree=tree
+    ) is not None
+
+
 def test_repair_workers_replays_debt_after_daemon_reload_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

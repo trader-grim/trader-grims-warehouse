@@ -915,3 +915,52 @@ def test_plan_render_repair_keeps_debt_when_restart_is_a_noop(
         tree=tree,
     ) is not None
     assert "plan-render-worker" not in receipts
+
+
+def test_plan_render_repair_refuses_to_join_transitional_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, commands, receipts = _stub_plan_render_repair_action(
+        tmp_path,
+        monkeypatch,
+        runtime_status="EXACT",
+        config_changed=True,
+    )
+    desired = "a" * 40
+    tree = "c" * 40
+    original_state = doctor_cli._unit_state
+    original_run = doctor_cli._run
+    enabled = False
+
+    def unit_state(unit: str) -> dict[str, str]:
+        if enabled:
+            return {
+                **_active_plan_render_state(2),
+                "ActiveState": "activating",
+                "SubState": "start",
+            }
+        return original_state(unit)
+
+    def run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal enabled
+        result = original_run(command, **kwargs)
+        if command == ["systemctl", "enable", doctor_cli._PLAN_RENDER_UNIT]:
+            enabled = True
+        return result
+
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+    monkeypatch.setattr(doctor_cli, "_run", run)
+
+    with pytest.raises(doctor_cli.DoctorError, match="service state is activating"):
+        doctor_cli.repair_plan_render_worker(paths)
+    assert ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT] not in commands
+    assert ["systemctl", "start", doctor_cli._PLAN_RENDER_UNIT] not in commands
+    assert doctor_cli._read_restart_obligation(
+        paths,
+        doctor_cli._PLAN_RENDER_UNIT,
+        commit=desired,
+        tree=tree,
+    ) is not None
+    assert "plan-render-worker" not in receipts
