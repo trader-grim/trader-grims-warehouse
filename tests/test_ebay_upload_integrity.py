@@ -459,10 +459,20 @@ def test_malformed_and_stale_photo_rows_do_not_skip_or_survive_upload(
             'local': str(tmp_path / sku / '1.jpg'),
             'url': 'https://x/1.jpg',
             'provider_effect_id': 'test-upload-effect',
-            'prepared_content_sha256': (
-                'fed533bb1fe1ea061640939cc1a8254568d3e272402fc6ad081bf20bed8e9fe9'
-            ),
-        },
+                'prepared_content_sha256': (
+                    'fed533bb1fe1ea061640939cc1a8254568d3e272402fc6ad081bf20bed8e9fe9'
+                ),
+                'source_content_sha256': (
+                    'fed533bb1fe1ea061640939cc1a8254568d3e272402fc6ad081bf20bed8e9fe9'
+                ),
+                'ebay_image_id': None,
+                'ebay_image_location': None,
+                'ebay_image_expiration': None,
+                'ebay_media_method': 'createImageFromFile',
+                'photo_order': 0,
+                'attempt_identity': 'test-upload-effect',
+                'media_api_receipt': None,
+            },
     ]
 
 

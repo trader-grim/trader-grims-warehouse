@@ -1,19 +1,25 @@
-"""
-tgw.ebay.upload — Upload item photos to eBay via UploadSiteHostedPictures.
+"""eBay Commerce Media API image adapter (PP-PHOTO-001 Phase A).
 
-Uses the eBay Trading API multipart POST to upload a local photo and return
-the eBay-hosted EPS URL.  Callers should use the ebay_upload queue worker
-rather than calling this directly.
+The worker prepares immutable, derived upload bytes before reserving and
+dispatching a provider effect. Local-file upload is the Phase A path. The URL
+adapter is separate and accepts only a configured TGW-controlled HTTPS origin.
+
+Contract pin: Media API ``v1_beta`` image resource (1.4.0-beta, 2025-04-17).
+Supported formats are JPG/JPEG, GIF, PNG, BMP, TIFF, AVIF, HEIC and WEBP;
+the documented examples currently report a 12 MiB maximum and width+height
+strictly below 15,000 pixels.
 """
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import logging
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Mapping
+from urllib.parse import quote, urlsplit
 
 import requests
 
@@ -22,217 +28,276 @@ from tgw.apis.ebay.client import capture_response, load_token
 
 log = logging.getLogger(__name__)
 
-_TRADING_ENDPOINT = 'https://api.ebay.com/ws/api.dll'
-_API_VERSION = '1155'
-_SITE_ID = '0'   # EBAY_US
-
-_NS = 'urn:ebay:apis:eBLBaseComponents'
-
+_MEDIA_VERSION = 'v1_beta'
+_MEDIA_ROOT = f'/commerce/media/{_MEDIA_VERSION}/image'
+_PRODUCTION_ORIGIN = 'https://api.ebay.com'
+_SANDBOX_ORIGIN = 'https://api.sandbox.ebay.com'
+_MAX_UPLOAD_BYTES = 12 * 1024 * 1024
+_MAX_DIMENSION_PX = 15_000  # compatibility name used by resize regression tests
+_MAX_UPLOAD_DIMENSION_SUM_PX = 14_999
+_SUPPORTED_SUFFIXES = frozenset({
+    '.jpg', '.jpeg', '.gif', '.png', '.bmp', '.tif', '.tiff',
+    '.avif', '.heic', '.webp',
+})
 _MIME = {
-    '.jpg':  'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.png':  'image/png',
-    '.gif':  'image/gif',
-    '.tif':  'image/tiff',
-    '.tiff': 'image/tiff',
+    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+    '.png': 'image/png', '.bmp': 'image/bmp', '.tif': 'image/tiff',
+    '.tiff': 'image/tiff', '.avif': 'image/avif', '.heic': 'image/heic',
+    '.webp': 'image/webp',
 }
-
-# UploadSiteHostedPictures limits the *sum* of image width and height to
-# 15000px. Its error says only "File dimension limit exceeds 15000 pixels",
-# which is easily—but incorrectly—read as a per-axis limit. Keep one-pixel
-# headroom because eBay documents the boundary as strictly less than 15000.
-_MAX_DIMENSION_PX = 15000
-_MAX_UPLOAD_DIMENSION_SUM_PX = _MAX_DIMENSION_PX - 1
-
 _PIL_FORMAT_BY_SUFFIX = {
-    '.jpg':  'JPEG',
-    '.jpeg': 'JPEG',
-    '.png':  'PNG',
-    '.gif':  'GIF',
-    '.tif':  'TIFF',
-    '.tiff': 'TIFF',
+    '.jpg': 'JPEG', '.jpeg': 'JPEG', '.gif': 'GIF', '.png': 'PNG',
+    '.bmp': 'BMP', '.tif': 'TIFF', '.tiff': 'TIFF', '.webp': 'WEBP',
+    '.avif': 'AVIF', '.heic': 'HEIF',
 }
 
 
 class PhotoResizeError(RuntimeError):
-    """Raised when a photo needed a pre-upload resize but couldn't be
-    processed (e.g. corrupt/unreadable image) — distinct from a plain
-    upload failure so it doesn't get masked as an eBay-side rejection
-    (packet #1398 spec item 3)."""
+    """The source could not be validated or its derived upload resized."""
 
 
 class UploadDefinitivelyRejected(RuntimeError):
-    """EPS response proves that the upload was not accepted."""
+    """The provider or local contract proves no image was accepted."""
 
 
 class UploadQuotaExceeded(UploadDefinitivelyRejected):
-    """EPS definitively rejected this call because its quota was exhausted."""
+    """The provider definitively rejected for rate/quota reasons."""
+
+
+class MediaUploadResult(str):
+    """EPS URL compatible with legacy callers, with complete Media metadata."""
+
+    def __new__(cls, image_url: str, metadata: Mapping[str, Any]):
+        value = str.__new__(cls, image_url)
+        value.metadata = dict(metadata)
+        return value
 
 
 @dataclass(frozen=True)
 class PreparedUpload:
-    """Exact immutable request material prepared before effect dispatch."""
-
     photo_path: Path
     image_bytes: bytes
     mime: str
-    xml_payload: str
-    headers: Dict[str, str]
+    source_sha256: str
+    prepared_sha256: str
+    method: str = 'createImageFromFile'
+    order: int | None = None
+    attempt_identity: str | None = None
 
 
-def _prepare_upload_bytes(photo_path: Path) -> bytes:
-    """
-    Return the bytes to POST for *photo_path*.
+def _raw_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    raw = cfg.get('raw', cfg)
+    return raw if isinstance(raw, dict) else cfg
 
-    Normal case (within eBay's dimension limit): reads the file's raw
-    bytes unchanged — no re-encoding, no quality loss, byte-identical to
-    the stored file.
 
-    Oversized case (combined width and height >= the EPS limit): downscales a
-    temporary in-memory copy to fit within the limit, preserving aspect
-    ratio. The original file on disk is never opened for writing and is
-    never touched (Prime Directive 1 — raw is permanent, derived is
-    recomputable; this resized copy is upload-time-only, never persisted
-    back to ItemData).
-    """
+def _origin(cfg: Dict[str, Any]) -> str:
+    return (_SANDBOX_ORIGIN if _raw_config(cfg).get('ebay_environment') == 'sandbox'
+            else _PRODUCTION_ORIGIN)
+
+
+def _error_detail(resp: requests.Response) -> str:
+    try:
+        body = resp.json()
+    except (ValueError, TypeError):
+        return resp.text[:1000]
+    errors = body.get('errors') if isinstance(body, dict) else None
+    if isinstance(errors, list):
+        return '; '.join(
+            f"{e.get('errorId', 'unknown')}: {e.get('message', '')}"
+            for e in errors if isinstance(e, dict)
+        )[:1000]
+    return json.dumps(body, sort_keys=True)[:1000]
+
+
+def _validate_and_derive(photo_path: Path) -> tuple[bytes, bytes]:
+    suffix = photo_path.suffix.lower()
+    if suffix not in _SUPPORTED_SUFFIXES:
+        raise UploadDefinitivelyRejected(
+            f'unsupported image extension: {suffix or "(none)"}')
     raw = photo_path.read_bytes()
-
+    if not raw:
+        raise UploadDefinitivelyRejected(f'empty image: {photo_path.name}')
     try:
         from PIL import Image
     except ImportError:
-        # No Pillow available — fall back to raw bytes; eBay will reject an
-        # oversized image with the same error as before this fix, no worse
-        # than pre-#1398 behavior.
-        log.warning('Pillow not installed — skipping dimension pre-flight for %s',
-                    photo_path.name)
-        return raw
-
+        if len(raw) > _MAX_UPLOAD_BYTES:
+            raise UploadDefinitivelyRejected(
+                'image exceeds 12 MiB and Pillow is unavailable')
+        return raw, raw
     width = height = None
     try:
-        with Image.open(io.BytesIO(raw)) as img:
-            width, height = img.size
-            if width + height <= _MAX_UPLOAD_DIMENSION_SUM_PX:
-                return raw
-
-            scale = _MAX_UPLOAD_DIMENSION_SUM_PX / float(width + height)
-            new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
-            img_format = img.format or _PIL_FORMAT_BY_SUFFIX.get(
-                photo_path.suffix.lower(), 'JPEG')
-            resized = img.resize(new_size, Image.LANCZOS)
+        with Image.open(io.BytesIO(raw)) as image:
+            image.verify()
+        with Image.open(io.BytesIO(raw)) as image:
+            width, height = image.size
+            if (width + height <= _MAX_UPLOAD_DIMENSION_SUM_PX
+                    and len(raw) <= _MAX_UPLOAD_BYTES):
+                return raw, raw
+            scale = min(1.0, _MAX_UPLOAD_DIMENSION_SUM_PX / float(width + height))
+            resized = image if scale == 1.0 else image.resize(
+                (max(1, int(width * scale)), max(1, int(height * scale))),
+                Image.LANCZOS)
+            image_format = image.format or _PIL_FORMAT_BY_SUFFIX.get(suffix, 'JPEG')
+            if image_format in {'HEIF', 'AVIF'}:
+                image_format = 'JPEG'
+            if image_format == 'JPEG' and resized.mode not in ('RGB', 'L'):
+                resized = resized.convert('RGB')
             buf = io.BytesIO()
-            save_kwargs: Dict[str, Any] = {}
-            if img_format == 'JPEG':
-                if resized.mode not in ('RGB', 'L'):
-                    resized = resized.convert('RGB')
-                save_kwargs['quality'] = 90
-            resized.save(buf, format=img_format, **save_kwargs)
-            resized_bytes = buf.getvalue()
+            kwargs = {'quality': 90} if image_format in {'JPEG', 'WEBP'} else {}
+            resized.save(buf, format=image_format, **kwargs)
+            derived = buf.getvalue()
     except Exception as exc:
-        # Distinct exception type so the caller (and dead-letter triage) can
-        # tell "resize itself failed / corrupt image" apart from a plain
-        # upload failure (packet #1398 spec item 3 — may overlap with
-        # PP-DATAINTEGRITY-001's corrupt-photo detection; noted separately,
-        # not silently merged into this fix).
         dims = f'{width}x{height}' if width is not None else 'unknown'
         raise PhotoResizeError(
-            f'failed to resize oversized photo {photo_path.name} ({dims}): {exc}') from exc
-
-    log.info('resized oversized photo %s: %dx%d -> %dx%d (exceeds %dpx limit)',
-             photo_path.name, width, height, new_size[0], new_size[1],
-             _MAX_DIMENSION_PX)
-    from tgw import logging as tgw_logging
-    tgw_logging.log_event('ebay_upload_photo_resized', photo=photo_path.name,
-                          original_dimensions=f'{width}x{height}',
-                          resized_dimensions=f'{new_size[0]}x{new_size[1]}',
-                          max_dimension_px=_MAX_DIMENSION_PX)
-    return resized_bytes
+            f'failed to validate/resize photo {photo_path.name} ({dims}): {exc}') from exc
+    if len(derived) > _MAX_UPLOAD_BYTES:
+        raise UploadDefinitivelyRejected('derived image exceeds eBay 12 MiB limit')
+    return raw, derived
 
 
-def _build_upload_payload(picture_name: str) -> str:
-    """
-    Build the UploadSiteHostedPicturesRequest XML body.
-
-    *picture_name* (typically a photo's filename stem) is placed as element
-    text content via ElementTree, which XML-escapes it automatically --
-    unlike raw f-string interpolation, this is safe for names containing
-    `&`, `<`, `>`, etc.
-    """
-    root = ET.Element('UploadSiteHostedPicturesRequest', xmlns=_NS)
-    ET.SubElement(root, 'PictureName').text = picture_name
-    ET.SubElement(root, 'PictureSet').text = 'Supersize'
-    body = ET.tostring(root, encoding='unicode')
-    return f'<?xml version="1.0" encoding="utf-8"?>{body}'
+def _prepare_upload_bytes(photo_path: Path) -> bytes:
+    """Compatibility helper returning immutable raw or in-memory derived bytes."""
+    return _validate_and_derive(photo_path)[1]
 
 
-def prepare_upload(cfg: Dict[str, Any], photo_path: Path) -> PreparedUpload:
-    """Prepare the exact outbound bytes, then perform the no-write quota check."""
-    if not photo_path.exists():
+def prepare_upload(cfg: Dict[str, Any], photo_path: Path, *, order: int | None = None,
+                   attempt_identity: str | None = None) -> PreparedUpload:
+    """Prepare exact bytes and no-write quota-check before effect dispatch."""
+    if not photo_path.is_file():
         raise FileNotFoundError(f'photo not found: {photo_path}')
-    token = load_token(cfg)
+    raw, derived = _validate_and_derive(photo_path)
     prepared = PreparedUpload(
-        photo_path=photo_path,
-        image_bytes=_prepare_upload_bytes(photo_path),
-        mime=_MIME.get(photo_path.suffix.lower(), 'image/jpeg'),
-        xml_payload=_build_upload_payload(photo_path.stem),
-        headers={
-            'X-EBAY-API-IAF-TOKEN': token,
-            'X-EBAY-API-COMPATIBILITY-LEVEL': _API_VERSION,
-            'X-EBAY-API-CALL-NAME': 'UploadSiteHostedPictures',
-            'X-EBAY-API-SITEID': _SITE_ID,
-        },
+        photo_path=photo_path, image_bytes=derived,
+        mime=_MIME[photo_path.suffix.lower()],
+        source_sha256=hashlib.sha256(raw).hexdigest(),
+        prepared_sha256=hashlib.sha256(derived).hexdigest(),
+        order=order, attempt_identity=attempt_identity,
     )
     quota.precheck(cfg, 'ebay_eps')
     return prepared
 
 
-def upload_prepared(cfg: Dict[str, Any], prepared: PreparedUpload) -> str:
-    """Dispatch a previously prepared request exactly once (no preflight)."""
-    photo_path = prepared.photo_path
-    files = {
-        'XML Payload': ('', prepared.xml_payload.encode('utf-8'),
-                        'text/xml;charset=utf-8'),
-        'image': (photo_path.name, prepared.image_bytes, prepared.mime),
+def _receipt(resp: requests.Response, request: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        'request': dict(request),
+        'response': {
+            'status': resp.status_code,
+            'headers': {str(k): str(v) for k, v in resp.headers.items()},
+            'body_utf8': resp.content.decode('utf-8', errors='replace'),
+            'body_sha256': hashlib.sha256(resp.content).hexdigest(),
+        },
     }
-    resp = requests.post(
-        _TRADING_ENDPOINT, headers=prepared.headers, files=files, timeout=90,
-    )
+
+
+def _dispatch(cfg: Dict[str, Any], *, method: str, path: str,
+              request_receipt: Dict[str, Any], **kwargs: Any) -> MediaUploadResult:
+    resp = requests.post(f'{_origin(cfg)}{path}', timeout=90, **kwargs)
     quota.record(cfg, 'ebay_eps')
+    capture_response(cfg, 'media', method, request_receipt,
+                     resp.status_code, resp.content)
+    receipt = _receipt(resp, request_receipt)
     if resp.status_code == 429:
-        quota.record_429(cfg, 'ebay_eps', photo_path.name)
-    capture_response(cfg, 'eps', f'UploadSiteHostedPictures {photo_path.name}',
-                     None, resp.status_code, resp.content)
-    if resp.status_code == 429:
-        raise UploadQuotaExceeded('UploadSiteHostedPictures HTTP 429')
-    if resp.status_code in {400, 401, 403, 404, 405, 413, 415, 422}:
+        quota.record_429(cfg, 'ebay_eps', method)
+        raise UploadQuotaExceeded(f'{method} HTTP 429: {_error_detail(resp)}')
+    if resp.status_code >= 500 or resp.status_code in {408, 425}:
+        resp.raise_for_status()
+    if not 200 <= resp.status_code < 300:
         raise UploadDefinitivelyRejected(
-            f'UploadSiteHostedPictures HTTP {resp.status_code}')
+            f'{method} HTTP {resp.status_code}: {_error_detail(resp)}')
+    location = resp.headers.get('Location', '')
+    image_id = location.rstrip('/').rsplit('/', 1)[-1] if location else ''
+    try:
+        payload = resp.json() if resp.content else {}
+    except ValueError as exc:
+        raise RuntimeError(f'{method}: malformed success response') from exc
+    image_url = payload.get('imageUrl') if isinstance(payload, dict) else None
+    if not image_id or not isinstance(image_url, str) or not image_url:
+        raise RuntimeError(
+            f'{method}: success missing Location image identifier or imageUrl')
+    return MediaUploadResult(image_url, {
+        'image_id': image_id, 'location': location, 'image_url': image_url,
+        'expiration_date': payload.get('expirationDate'), 'method': method,
+        'api_version': _MEDIA_VERSION, 'receipt': receipt,
+    })
+
+
+def upload_prepared(cfg: Dict[str, Any], prepared: PreparedUpload) -> MediaUploadResult:
+    """Dispatch createImageFromFile exactly once with already-prepared bytes."""
+    token = load_token(cfg)
+    request = {
+        'method': prepared.method, 'path': f'{_MEDIA_ROOT}/create_image_from_file',
+        'filename': prepared.photo_path.name, 'mime': prepared.mime,
+        'source_sha256': prepared.source_sha256,
+        'prepared_sha256': prepared.prepared_sha256,
+        'prepared_byte_length': len(prepared.image_bytes), 'order': prepared.order,
+        'attempt_identity': prepared.attempt_identity,
+        'authorization_sha256': hashlib.sha256(token.encode()).hexdigest(),
+    }
+    result = _dispatch(
+        cfg, method=prepared.method, path=request['path'], request_receipt=request,
+        headers={'Authorization': f'Bearer {token}', 'Accept': 'application/json'},
+        files={'image': (prepared.photo_path.name, prepared.image_bytes, prepared.mime)},
+    )
+    result.metadata.update({
+        'source_sha256': prepared.source_sha256,
+        'prepared_sha256': prepared.prepared_sha256, 'order': prepared.order,
+        'attempt_identity': prepared.attempt_identity,
+    })
+    return result
+
+
+def create_image_from_url(cfg: Dict[str, Any], image_url: str, *,
+                          order: int | None = None,
+                          attempt_identity: str | None = None) -> MediaUploadResult:
+    """Future adapter for verified TGW-controlled HTTPS object URLs only."""
+    parsed = urlsplit(image_url)
+    configured = _raw_config(cfg).get('ebay_media_controlled_https_origins', [])
+    allowed = {str(value).rstrip('/') for value in configured
+               if isinstance(value, str)}
+    origin = f'{parsed.scheme}://{parsed.netloc}'
+    if (parsed.scheme != 'https' or not parsed.netloc or parsed.username
+            or parsed.password or parsed.fragment or origin not in allowed):
+        raise UploadDefinitivelyRejected(
+            'createImageFromUrl requires an allowlisted TGW-controlled HTTPS object origin')
+    token = load_token(cfg)
+    quota.precheck(cfg, 'ebay_eps')
+    request = {
+        'method': 'createImageFromUrl',
+        'path': f'{_MEDIA_ROOT}/create_image_from_url', 'imageUrl': image_url,
+        'order': order, 'attempt_identity': attempt_identity,
+        'authorization_sha256': hashlib.sha256(token.encode()).hexdigest(),
+    }
+    result = _dispatch(
+        cfg, method='createImageFromUrl', path=request['path'],
+        request_receipt=request,
+        headers={'Authorization': f'Bearer {token}', 'Accept': 'application/json',
+                 'Content-Type': 'application/json'}, json={'imageUrl': image_url},
+    )
+    result.metadata.update({'order': order, 'attempt_identity': attempt_identity})
+    return result
+
+
+def get_image(cfg: Dict[str, Any], image_id: str) -> Dict[str, Any]:
+    """Read-only reconciliation probe for an ID captured from Location."""
+    if not image_id or '/' in image_id:
+        raise ValueError('invalid Media API image identifier')
+    token = load_token(cfg)
+    path = f'{_MEDIA_ROOT}/{quote(image_id, safe="")}'
+    quota.precheck(cfg, 'ebay_eps')
+    resp = requests.get(
+        f'{_origin(cfg)}{path}', headers={'Authorization': f'Bearer {token}',
+                                         'Accept': 'application/json'}, timeout=30)
+    quota.record(cfg, 'ebay_eps')
+    capture_response(cfg, 'media', 'getImage', {'path': path},
+                     resp.status_code, resp.content)
+    if resp.status_code == 429:
+        quota.record_429(cfg, 'ebay_eps', 'getImage')
+        raise UploadQuotaExceeded('getImage HTTP 429')
+    if resp.status_code == 404:
+        raise UploadDefinitivelyRejected('getImage HTTP 404')
     resp.raise_for_status()
-
-    root = ET.fromstring(resp.text)
-    ack = root.findtext(f'{{{_NS}}}Ack') or ''
-    if ack not in ('Success', 'Warning'):
-        msgs = root.findall(f'.//{{{_NS}}}ShortMessage')
-        error_text = '; '.join(m.text or '' for m in msgs) or 'unknown error'
-        if 'usage limit' in error_text.lower():
-            quota.record_429(cfg, 'ebay_eps', error_text)
-            raise UploadQuotaExceeded(
-                f'UploadSiteHostedPictures failed ({ack}): {error_text}')
-        raise UploadDefinitivelyRejected(
-            f'UploadSiteHostedPictures failed ({ack}): {error_text}')
-
-    url = root.findtext(f'{{{_NS}}}SiteHostedPictureDetails/{{{_NS}}}FullURL') or ''
-    if not url:
-        raise RuntimeError('UploadSiteHostedPictures: no FullURL in response')
-    log.info('uploaded %s → %s', photo_path.name, url[:60])
-    return url
+    return resp.json()
 
 
-def upload_photo(cfg: Dict[str, Any], photo_path: Path) -> str:
-    """
-    Upload *photo_path* to eBay EPS and return the eBay-hosted FullURL.
-
-    Raises FileNotFoundError if the photo does not exist.
-    Raises RuntimeError if eBay rejects the upload.
-    Raises requests.exceptions.* on network failures (caller may retry).
-    """
+def upload_photo(cfg: Dict[str, Any], photo_path: Path) -> MediaUploadResult:
     return upload_prepared(cfg, prepare_upload(cfg, photo_path))

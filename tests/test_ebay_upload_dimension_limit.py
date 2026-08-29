@@ -8,6 +8,7 @@ copy only — the stored original on disk is never touched.
 """
 
 import io
+import json
 
 import pytest
 
@@ -128,16 +129,13 @@ def test_upload_photo_sends_resized_bytes(tmp_path, monkeypatch):
     captured = {}
 
     class _FakeResp:
-        status_code = 200
-        content = b''
-        text = (
-            '<?xml version="1.0" encoding="utf-8"?>'
-            '<UploadSiteHostedPicturesResponse xmlns="urn:ebay:apis:eBLBaseComponents">'
-            '<Ack>Success</Ack>'
-            '<SiteHostedPictureDetails><FullURL>https://i.ebayimg.com/x.jpg</FullURL>'
-            '</SiteHostedPictureDetails>'
-            '</UploadSiteHostedPicturesResponse>'
-        )
+        status_code = 201
+        headers = {'Location': '/commerce/media/v1_beta/image/image-1'}
+        content = b'{"imageUrl":"https://i.ebayimg.com/x.jpg","expirationDate":"2026-09-30T00:00:00Z"}'
+        text = content.decode()
+
+        def json(self):
+            return json.loads(self.content)
 
         def raise_for_status(self):
             return None

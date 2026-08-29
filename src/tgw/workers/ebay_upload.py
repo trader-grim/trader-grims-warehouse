@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
@@ -76,10 +77,10 @@ class EbayUploadWorker(QueueWorker):
 
     def _current_workflow_binding(self, sku: str) -> Dict[str, str]:
         """Rebuild the authoritative identity after partial progress writes."""
-        from tgw.workflow_kernel.evaluator import evaluate
         from tgw.workflow.item_snapshot import build_item_snapshot
         from tgw.workflow.profiles import TGW_EBAY_LISTABLE
         from tgw.workflow.treatments import TGW_TREATMENTS
+        from tgw.workflow_kernel.evaluator import evaluate
 
         snapshot = build_item_snapshot(
             _cfg_sku_json(self.config, sku), TGW_EBAY_LISTABLE,
@@ -304,7 +305,7 @@ class EbayUploadWorker(QueueWorker):
         quota_detail = ''
         quota_rejected_photo_key = ''
 
-        for photo in photos:
+        for photo_order, photo in enumerate(photos):
             if str(photo) in existing:
                 log.debug('already uploaded: %s', photo.name)
                 continue
@@ -326,15 +327,17 @@ class EbayUploadWorker(QueueWorker):
                         ) from exc
                     prepared = prepare_upload(self.config, photo)
                     digest = hashlib.sha256(prepared.image_bytes).hexdigest()
+                    source_digest = getattr(prepared, 'source_sha256', digest)
                     quota_epochs = payload.get('quota_effect_epochs', {})
                     quota_epochs = quota_epochs if isinstance(quota_epochs, dict) else {}
                     quota_epoch = int(quota_epochs.get(photo_key, 0))
                     request = {
                         'sku': sku, 'photo_key': photo_key,
                         'prepared_content_sha256': digest,
+                        'source_content_sha256': source_digest,
                         'prepared_byte_length': len(prepared.image_bytes),
                         'filename': photo.name, 'mime': prepared.mime,
-                        'picture_name': photo.stem, 'picture_set': 'Supersize',
+                        'method': 'createImageFromFile', 'order': photo_order,
                         'quota_epoch': quota_epoch,
                     }
                     current_item = json.loads(json_path.read_text(encoding='utf-8'))
@@ -389,21 +392,45 @@ class EbayUploadWorker(QueueWorker):
                             ),
                         )
                     else:
+                        if hasattr(prepared, 'attempt_identity'):
+                            prepared = replace(
+                                prepared, order=photo_order,
+                                attempt_identity=effect.effect_id,
+                            )
                         url = upload_prepared(self.config, prepared)
+                        media_metadata = dict(getattr(url, 'metadata', {}))
                         from tgw.provider_effects import finish_provider_effect
                         effect = finish_provider_effect(
                             effect.effect_id, state='succeeded',
-                            result={'url': url, 'prepared_content_sha256': digest,
-                                    'photo_key': photo_key},
+                            result={
+                                'url': str(url),
+                                'prepared_content_sha256': digest,
+                                'source_content_sha256': source_digest,
+                                'photo_key': photo_key, 'order': photo_order,
+                                'attempt_identity': effect.effect_id,
+                                **media_metadata,
+                            },
                         )
                     provider_effect_ids.append(effect.effect_id)
                 else:
                     url = upload_photo(self.config, photo)
-                entry = {'local': str(photo), 'url': url}
+                entry = {'local': str(photo), 'url': str(url)}
                 if provider_effect_mode == 'workflow':
+                    result_metadata = dict(effect.result or {})
                     entry.update({
                         'provider_effect_id': effect.effect_id,
                         'prepared_content_sha256': digest,
+                        'source_content_sha256': result_metadata.get(
+                            'source_content_sha256', source_digest),
+                        'ebay_image_id': result_metadata.get('image_id'),
+                        'ebay_image_location': result_metadata.get('location'),
+                        'ebay_image_expiration': result_metadata.get('expiration_date'),
+                        'ebay_media_method': result_metadata.get(
+                            'method', 'createImageFromFile'),
+                        'photo_order': result_metadata.get('order', photo_order),
+                        'attempt_identity': result_metadata.get(
+                            'attempt_identity', effect.effect_id),
+                        'media_api_receipt': result_metadata.get('receipt'),
                     })
                 uploaded.append(entry)
                 tgw_logging.log_event('ebay_photo_uploaded', sku=sku,
