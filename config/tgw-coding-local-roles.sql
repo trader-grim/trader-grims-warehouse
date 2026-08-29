@@ -60,11 +60,13 @@ GRANT EXECUTE ON FUNCTION public.recover_expired_jobs()
 -- universal ``tgw_coding`` role itself is revoked by this migration and is
 -- therefore not a blocking dependency.
 --
--- ACL dependencies are inventoried cluster-wide through ``pg_shdepend``, the
--- same dependency view ``DROP ROLE`` uses, so privileges granted to the
+-- ACL and cross-database ownership dependencies are inventoried cluster-wide
+-- through ``pg_shdepend``, the same dependency view ``DROP ROLE`` uses, so
+-- privileges granted to (deptype 'a') and objects owned by (deptype 'o') the
 -- obsolete role inside *other* databases are reported even though this
--- migration connects to one database.  Such cross-database privileges cannot
--- be revoked from this connection: the operator clears them per-database (or
+-- migration connects to one database.  Such cross-database dependencies
+-- cannot be cleared from this connection: the operator reassigns ownership
+-- (``REASSIGN OWNED BY ... TO ...``) or revokes privileges per-database (or
 -- drops the obsolete test database) and reruns the repair.
 DO $$
 DECLARE
@@ -105,7 +107,11 @@ BEGIN
               FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.member
              WHERE m.roleid = r.oid
             UNION ALL
-            SELECT 'ACL dependency: privileges in database ' || COALESCE(d.datname, '<shared>')
+            SELECT CASE s.deptype
+                     WHEN 'o' THEN 'owns object in database '
+                     ELSE 'ACL dependency: privileges in database '
+                   END
+                   || COALESCE(d.datname, d2.datname, '<shared>')
                    || CASE
                         WHEN s.classid = 'pg_database'::regclass THEN ' on the database'
                         WHEN s.classid = 'pg_namespace'::regclass
@@ -116,6 +122,8 @@ BEGIN
                       END
               FROM pg_shdepend s
               LEFT JOIN pg_database d ON d.oid = s.dbid
+              LEFT JOIN pg_database d2
+                     ON s.classid = 'pg_database'::regclass AND d2.oid = s.objid
               LEFT JOIN pg_class c
                      ON s.classid = 'pg_class'::regclass AND s.objid = c.oid
                     AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
@@ -125,7 +133,14 @@ BEGIN
                     AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
              WHERE s.refclassid = 'pg_authid'::regclass
                AND s.refobjid = r.oid
-               AND s.deptype = 'a'
+               AND s.deptype IN ('a', 'o')
+               -- Owned databases are already reported by the datdba branch.
+               AND NOT (s.deptype = 'o' AND s.classid = 'pg_database'::regclass)
+               -- Current-database object ownership is already reported by the
+               -- relowner/nspowner/proowner branches.
+               AND NOT (s.deptype = 'o'
+                        AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+                        AND s.classid IN ('pg_class'::regclass, 'pg_namespace'::regclass, 'pg_proc'::regclass))
             UNION ALL
             SELECT 'owns default ACLs in database ' || current_database()
               FROM pg_default_acl WHERE defaclrole = r.oid

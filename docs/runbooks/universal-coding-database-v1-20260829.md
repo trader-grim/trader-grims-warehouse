@@ -63,7 +63,11 @@ Doctor's `repair database`:
 
 - pipes the exact committed role SQL through `sudo -u postgres psql`
   (creating/altering `tgw_coding` and retiring obsolete login roles only when
-  the ownership/dependency inventory is empty);
+  the cluster-wide ownership/dependency inventory is empty; the inventory
+  uses `pg_shdepend` — the same dependency view `DROP ROLE` uses — so
+  privileges granted to and objects owned by the obsolete role in *other*
+  databases are reported even though the migration connects to one
+  database);
 - writes the canonical `tgw-coders` map into
   `/etc/postgresql/17/main/pg_ident.conf` while preserving every unrelated
   map and comment byte-for-byte;
@@ -72,6 +76,29 @@ Doctor's `repair database`:
   in `/etc/postgresql/17/main/pg_hba.conf` before any broader
   `local ... all ... peer` line, preserving all other lines;
 - runs `SELECT pg_reload_conf();` and re-checks both database checks.
+
+## Clearing cross-database dependencies (fail-closed remediation)
+
+A retirement refusal lists every dependency the cluster-wide inventory can
+see. Dependencies that live *inside other databases* (privileges granted to
+or objects owned by the obsolete role) cannot be cleared from the repair's
+single connection; clear them per-database, then rerun the repair:
+
+```sql
+-- connected to each database that holds owned objects or privileges
+REASSIGN OWNED BY codex, db TO postgres;            -- non-destructive ownership move
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM codex, db;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM codex, db;
+REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM codex, db;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM codex, db;
+REVOKE ALL PRIVILEGES ON DATABASE <that database> FROM codex, db;
+DROP OWNED BY codex, db;   -- safe only after the inventory proved no owned objects
+```
+
+A database reported only as a leftover test artifact (for example
+`tgw_todo_1811_test`, `tgw_todo_1814_test`) may instead be dropped after
+operator confirmation; dropping it removes its objects and dependencies in
+one step.
 
 Only PostgreSQL configuration is reloaded; no coding service is restarted for
 this binding change because the DSN change is picked up from the shared
