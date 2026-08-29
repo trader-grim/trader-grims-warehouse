@@ -50,9 +50,19 @@ marks off-host protection degraded; it never reports full success.
 Collectors use bounded per-store barriers, not global quiescence. Capture Git refs;
 start the PostgreSQL snapshot/base backup and record start/stop LSN and timeline;
 snapshot or walk each filesystem at a recorded barrier; hash every staged object.
-The manifest binds refs, PostgreSQL/WAL positions, filesystem/media object manifests,
-tool versions, start/completion times, failure state, retention class and every tier.
-`tgw-lib-recovery verify RECEIPT OBJECT_ROOT` performs cold hash readback. Missing,
+The v2 manifest binds exact Git commits/trees/ref maps and capture times; PostgreSQL
+start/stop LSN, timeline, WAL continuity, schema hash and migration identity;
+filesystem barrier IDs/times/methods; filesystem/media object manifests including
+uid/gid/mode, ACLs, xattrs and hard-link groups; tool versions, start/completion
+times, failure state, retention class and every tier. Success also requires verified
+readback evidence for a local-fast replica and an encrypted off-host replica in a
+different named failure domain. Secrets must name the encryption mechanism, assert
+plaintext exclusion, and bind operator-held offline key custody.
+
+Receipts are Ed25519-signed with an operator-controlled key and full success requires
+verified WORM/object-lock/append-only receipt storage; local chmod is not treated as
+immutability. `tgw-lib-recovery verify RECEIPT OBJECT_ROOT TRUSTED_PUBLIC_KEY KEY_ID`
+performs trusted-signature and cold metadata/hash readback. Missing,
 failed, empty, duplicated, escaping, or mutated objects make the generation incomplete.
 
 Baseline objectives: local snapshots RPO 1 hour/RTO 2 hours; off-host RPO 24 hours/RTO

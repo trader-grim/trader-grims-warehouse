@@ -1,17 +1,14 @@
-"""Independent, fail-closed recovery manifests for the tgw-lib authority domain.
-
-This module deliberately performs no remote writes, pruning, or snapshot creation.
-Store-specific collectors stage objects; this code verifies and seals one generation
-only after every required recovery tier is complete and content-addressed.
-"""
+"""Fail-closed manifests for independent tgw-lib recovery generations."""
 
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -20,17 +17,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA = "tgw-lib-recovery-generation/v1"
-REQUIRED_TIERS = (
-    "plan_git",
-    "source_git",
-    "postgresql",
-    "library",
-    "tgw_lib_state",
-    "master_media",
-    "unix_identities",
-    "encrypted_secrets",
-)
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+SCHEMA = "tgw-lib-recovery-generation/v2"
+REQUIRED_TIERS = ("plan_git", "source_git", "postgresql", "library", "tgw_lib_state", "master_media", "unix_identities", "encrypted_secrets")
+SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+OID = re.compile(r"[0-9a-f]{40,64}\Z")
+LSN = re.compile(r"[0-9A-F]+/[0-9A-F]+\Z", re.I)
 
 
 class ManifestError(ValueError):
@@ -49,9 +45,23 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _acl(path: Path) -> str | None:
+    command = shutil.which("getfacl")
+    if not command:
+        return None
+    result = subprocess.run([command, "-cp", "--", str(path)], capture_output=True, text=True, timeout=5, check=False)
+    return result.stdout if result.returncode == 0 else None
+
+
+def _xattrs(path: Path) -> dict[str, str]:
+    try:
+        return {key: base64.b64encode(os.getxattr(path, key, follow_symlinks=False)).decode() for key in sorted(os.listxattr(path, follow_symlinks=False))}
+    except (AttributeError, OSError):
+        return {}
+
+
 def object_record(path: Path, root: Path) -> dict[str, Any]:
-    resolved = path.resolve()
-    base = root.resolve()
+    resolved, base = path.resolve(), root.resolve()
     try:
         relative = resolved.relative_to(base)
     except ValueError as exc:
@@ -64,52 +74,118 @@ def object_record(path: Path, root: Path) -> dict[str, Any]:
         "sha256": sha256_file(resolved),
         "size": info.st_size,
         "mode": stat.S_IMODE(info.st_mode),
+        "uid": info.st_uid,
+        "gid": info.st_gid,
+        "inode": info.st_ino,
+        "hardlinks": info.st_nlink,
+        "hardlink_group": f"{info.st_dev}:{info.st_ino}",
+        "acl": _acl(resolved),
+        "xattrs": _xattrs(resolved),
     }
 
 
-def _require_text(value: Any, field: str) -> str:
+def _text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ManifestError(f"missing {field}")
     return value
 
 
-def validate_generation(manifest: dict[str, Any], root: Path, verify_objects: bool = True) -> None:
-    if manifest.get("schema") != SCHEMA:
-        raise ManifestError("unsupported generation schema")
-    if manifest.get("state") != "complete":
-        raise ManifestError("generation state is not complete")
-    _require_text(manifest.get("generation"), "generation")
-    _require_text(manifest.get("started_at"), "started_at")
-    _require_text(manifest.get("completed_at"), "completed_at")
-    _require_text(manifest.get("retention_class"), "retention_class")
-    tools = manifest.get("tools")
-    if not isinstance(tools, dict) or not tools:
-        raise ManifestError("missing tool versions")
-    barriers = manifest.get("barriers")
-    if not isinstance(barriers, dict):
+def _time(value: Any, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(_text(value, field).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ManifestError(f"invalid {field}") from exc
+    if parsed.tzinfo is None:
+        raise ManifestError(f"invalid {field}")
+    return parsed
+
+
+def _validate_barriers(value: Any) -> None:
+    if not isinstance(value, dict):
         raise ManifestError("missing per-store barriers")
-    for field in ("git_refs", "postgresql", "filesystems"):
-        if not barriers.get(field):
-            raise ManifestError(f"missing barrier {field}")
+    git = value.get("git_refs")
+    if not isinstance(git, dict):
+        raise ManifestError("missing barrier git_refs")
+    for repo in ("plan", "source"):
+        item = git.get(repo)
+        if not isinstance(item, dict) or not OID.fullmatch(str(item.get("commit", ""))) or not OID.fullmatch(str(item.get("tree", ""))) or not item.get("refs"):
+            raise ManifestError(f"invalid git barrier {repo}")
+        _time(item.get("captured_at"), f"git_refs.{repo}.captured_at")
+    pg = value.get("postgresql")
+    if not isinstance(pg, dict) or not LSN.fullmatch(str(pg.get("start_lsn", ""))) or not LSN.fullmatch(str(pg.get("stop_lsn", ""))):
+        raise ManifestError("invalid PostgreSQL LSN barrier")
+    if not isinstance(pg.get("timeline"), int) or pg["timeline"] < 1 or pg.get("wal_contiguous") is not True:
+        raise ManifestError("missing PostgreSQL timeline/WAL continuity")
+    if not SHA256.fullmatch(str(pg.get("schema_sha256", ""))):
+        raise ManifestError("invalid PostgreSQL schema identity")
+    _text(pg.get("migration_identity"), "postgresql.migration_identity")
+    _time(pg.get("captured_at"), "postgresql.captured_at")
+    filesystems = value.get("filesystems")
+    if not isinstance(filesystems, dict) or not filesystems:
+        raise ManifestError("missing barrier filesystems")
+    for name, item in filesystems.items():
+        if not isinstance(item, dict) or item.get("method") not in {"snapshot", "bounded-walk"} or not SHA256.fullmatch(str(item.get("manifest_sha256", ""))):
+            raise ManifestError(f"invalid filesystem barrier {name}")
+        _text(item.get("barrier_id"), f"filesystems.{name}.barrier_id")
+        _time(item.get("captured_at"), f"filesystems.{name}.captured_at")
+
+
+def validate_generation(manifest: dict[str, Any], root: Path, verify_objects: bool = True) -> None:
+    if manifest.get("schema") != SCHEMA or manifest.get("state") != "complete":
+        raise ManifestError("unsupported or incomplete generation")
+    generation = _text(manifest.get("generation"), "generation")
+    if not SAFE_ID.fullmatch(generation) or generation in {".", ".."}:
+        raise ManifestError("generation must be a safe basename")
+    if _time(manifest.get("completed_at"), "completed_at") < _time(manifest.get("started_at"), "started_at"):
+        raise ManifestError("generation completes before it starts")
+    _text(manifest.get("retention_class"), "retention_class")
+    if not isinstance(manifest.get("tools"), dict) or not manifest["tools"]:
+        raise ManifestError("missing tool versions")
+    _validate_barriers(manifest.get("barriers"))
+    replicas = manifest.get("replicas")
+    if not isinstance(replicas, dict):
+        raise ManifestError("missing replica evidence")
+    for name in ("local_fast", "off_host_encrypted"):
+        replica = replicas.get(name)
+        if (
+            not isinstance(replica, dict)
+            or replica.get("state") != "verified"
+            or replica.get("readback_verified") is not True
+            or not SHA256.fullmatch(str(replica.get("manifest_sha256", "")))
+            or not replica.get("failure_domain")
+        ):
+            raise ManifestError(f"missing verified replica: {name}")
+    if replicas["local_fast"]["failure_domain"] == replicas["off_host_encrypted"]["failure_domain"]:
+        raise ManifestError("replicas share a failure domain")
+    offhost = replicas["off_host_encrypted"]
+    if offhost.get("encryption") not in {"age", "restic", "borg-repokey", "aes-256-gcm"} or offhost.get("key_custody") != "operator-held-offline":
+        raise ManifestError("off-host replica lacks encryption/key-custody evidence")
+    receipt = manifest.get("receipt")
+    if not isinstance(receipt, dict) or receipt.get("storage") not in {"object-lock", "append-only-remote", "worm"} or receipt.get("immutability_verified") is not True:
+        raise ManifestError("missing immutable receipt storage evidence")
     tiers = manifest.get("tiers")
     if not isinstance(tiers, dict):
         raise ManifestError("missing tiers")
+    root = root.resolve()
+    seen: set[str] = set()
+    hardlink_groups: dict[str, tuple[int, int]] = {}
     for name in REQUIRED_TIERS:
         tier = tiers.get(name)
-        if not isinstance(tier, dict) or tier.get("state") != "complete":
-            raise ManifestError(f"required tier is not complete: {name}")
-        if not tier.get("objects"):
-            raise ManifestError(f"required tier has no objects: {name}")
-    seen: set[str] = set()
-    for name, tier in tiers.items():
-        for obj in tier.get("objects", []):
-            rel = _require_text(obj.get("path"), f"{name}.object.path")
+        if not isinstance(tier, dict) or tier.get("state") != "complete" or not tier.get("objects"):
+            raise ManifestError(f"required tier is incomplete or empty: {name}")
+        if name == "encrypted_secrets" and (tier.get("encryption") not in {"age", "aes-256-gcm"} or tier.get("key_custody") != "operator-held-offline" or tier.get("plaintext_excluded") is not True):
+            raise ManifestError("encrypted_secrets lacks encryption/key-custody evidence")
+        for obj in tier["objects"]:
+            rel = _text(obj.get("path"), f"{name}.object.path")
             if rel in seen:
                 raise ManifestError(f"object appears in multiple tiers: {rel}")
             seen.add(rel)
+            for field in ("mode", "uid", "gid", "inode", "hardlinks", "hardlink_group", "acl", "xattrs"):
+                if field not in obj:
+                    raise ManifestError(f"object lacks recovery metadata: {rel}.{field}")
             candidate = (root / rel).resolve()
             try:
-                candidate.relative_to(root.resolve())
+                candidate.relative_to(root)
             except ValueError as exc:
                 raise ManifestError(f"object escapes generation root: {rel}") from exc
             if verify_objects:
@@ -119,18 +195,38 @@ def validate_generation(manifest: dict[str, Any], root: Path, verify_objects: bo
                     raise ManifestError(f"object size differs: {rel}")
                 if sha256_file(candidate) != obj.get("sha256"):
                     raise ManifestError(f"object hash differs: {rel}")
+                info = candidate.stat()
+                if stat.S_IMODE(info.st_mode) != obj["mode"] or info.st_uid != obj["uid"] or info.st_gid != obj["gid"]:
+                    raise ManifestError(f"object ownership/mode differs: {rel}")
+                if _xattrs(candidate) != obj["xattrs"] or _acl(candidate) != obj["acl"]:
+                    raise ManifestError(f"object ACL/xattrs differ: {rel}")
+                identity = (info.st_dev, info.st_ino)
+                prior = hardlink_groups.setdefault(obj["hardlink_group"], identity)
+                if prior != identity or info.st_nlink < obj["hardlinks"]:
+                    raise ManifestError(f"object hard-link relationship differs: {rel}")
 
 
-def seal_generation(staging: Path, manifest: dict[str, Any], destination: Path) -> Path:
-    """Atomically publish a verified generation; never overwrite a receipt."""
+def _beneath(base: Path, candidate: Path) -> Path:
+    base, candidate = base.resolve(), candidate.resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise ManifestError("receipt path escapes destination") from exc
+    return candidate
+
+
+def seal_generation(staging: Path, manifest: dict[str, Any], destination: Path, signing_key: Ed25519PrivateKey, key_id: str) -> Path:
+    """Sign and atomically publish a receipt; durable WORM evidence is mandatory."""
     validate_generation(manifest, staging, verify_objects=True)
     destination.mkdir(parents=True, exist_ok=True)
-    target = destination / f"{manifest['generation']}.json"
+    target = _beneath(destination, destination / f"{manifest['generation']}.json")
+    temporary = _beneath(destination, destination / f".{manifest['generation']}.{os.getpid()}.tmp")
     if target.exists():
         raise ManifestError(f"immutable receipt already exists: {target}")
-    temporary = destination / f".{manifest['generation']}.{os.getpid()}.tmp"
     payload = dict(manifest)
-    payload["manifest_sha256"] = "sha256:" + hashlib.sha256(canonical_bytes(manifest)).hexdigest()
+    digest = hashlib.sha256(canonical_bytes(manifest)).digest()
+    payload["manifest_sha256"] = "sha256:" + digest.hex()
+    payload["signature"] = {"algorithm": "ed25519", "key_id": _text(key_id, "key_id"), "value": base64.b64encode(signing_key.sign(digest)).decode()}
     try:
         with temporary.open("xb") as stream:
             stream.write(canonical_bytes(payload))
@@ -139,68 +235,129 @@ def seal_generation(staging: Path, manifest: dict[str, Any], destination: Path) 
         os.chmod(temporary, 0o440)
         os.link(temporary, target)
         temporary.unlink()
-        directory_fd = os.open(destination, os.O_RDONLY)
+        descriptor = os.open(destination, os.O_RDONLY)
         try:
-            os.fsync(directory_fd)
+            os.fsync(descriptor)
         finally:
-            os.close(directory_fd)
+            os.close(descriptor)
     finally:
         temporary.unlink(missing_ok=True)
     return target
 
 
-def _command_version(command: str) -> str | None:
-    executable = shutil.which(command)
-    if not executable:
-        return None
-    result = subprocess.run([executable, "--version"], text=True, capture_output=True, timeout=5, check=False)
-    line = (result.stdout or result.stderr).splitlines()
-    return line[0].strip() if line else executable
-
-
-def inventory(paths: Iterable[Path]) -> dict[str, Any]:
-    """Read-only topology/capacity inventory; absence remains explicit."""
-    mounts: list[dict[str, Any]] = []
-    for path in paths:
-        exists = path.exists()
-        entry: dict[str, Any] = {"path": str(path), "exists": exists}
-        if exists:
-            usage = shutil.disk_usage(path)
-            entry.update({"device": os.stat(path).st_dev, "capacity": usage.total, "free": usage.free})
-        mounts.append(entry)
-    return {
-        "schema": "tgw-lib-recovery-inventory/v1",
-        "observed_at": datetime.now(UTC).isoformat(),
-        "host": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
-        "paths": mounts,
-        "tools": {name: _command_version(name) for name in ("git", "pg_dump", "pg_basebackup", "age", "restic", "borg", "btrfs", "zfs")},
-    }
-
-
-def verify_receipt(path: Path, object_root: Path) -> None:
+def verify_receipt(path: Path, object_root: Path, trusted_key: Ed25519PublicKey, expected_key_id: str) -> None:
     receipt = json.loads(path.read_text())
+    signature = receipt.pop("signature", None)
     recorded = receipt.pop("manifest_sha256", None)
-    expected = "sha256:" + hashlib.sha256(canonical_bytes(receipt)).hexdigest()
-    if recorded != expected:
+    digest = hashlib.sha256(canonical_bytes(receipt)).digest()
+    if recorded != "sha256:" + digest.hex():
         raise ManifestError("manifest hash differs")
+    if not isinstance(signature, dict) or signature.get("algorithm") != "ed25519" or signature.get("key_id") != expected_key_id:
+        raise ManifestError("receipt signer differs")
+    try:
+        trusted_key.verify(base64.b64decode(signature["value"], validate=True), digest)
+    except (InvalidSignature, ValueError, KeyError) as exc:
+        raise ManifestError("receipt signature differs") from exc
     validate_generation(receipt, object_root, verify_objects=True)
 
 
+def _run(argv: list[str]) -> str | None:
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _mount(path: Path) -> dict[str, Any]:
+    raw = _run(["findmnt", "-J", "-T", str(path), "-o", "TARGET,SOURCE,FSTYPE,OPTIONS"])
+    if not raw:
+        return {"detected": False, "snapshot_capability": None}
+    item = json.loads(raw)["filesystems"][0]
+    fstype = item.get("fstype")
+    return {
+        "detected": True,
+        "target": item.get("target"),
+        "source": item.get("source"),
+        "fstype": fstype,
+        "options": item.get("options"),
+        "snapshot_capability": fstype if fstype in {"btrfs", "zfs"} else None,
+    }
+
+
+def _git(path: Path) -> dict[str, Any] | None:
+    if not (path / ".git").exists() and not (path / "HEAD").exists():
+        return None
+    annex = _run(["git", "-C", str(path), "annex", "info", "--json"])
+    return {"object_sizes": _run(["git", "-C", str(path), "count-objects", "-v"]), "annex_state": json.loads(annex) if annex else None}
+
+
+def inventory(paths: Iterable[Path], projected_generation_bytes: int = 0, replicas: Iterable[Path] = ()) -> dict[str, Any]:
+    """Read-only topology, capacity, source-store and replica inventory."""
+    entries = []
+    for path in paths:
+        entry: dict[str, Any] = {"path": str(path), "exists": path.exists()}
+        if path.exists():
+            usage = shutil.disk_usage(path)
+            entry.update(
+                {
+                    "device": os.stat(path).st_dev,
+                    "capacity": usage.total,
+                    "free": usage.free,
+                    "projected_generation_bytes": projected_generation_bytes,
+                    "projected_generations_headroom": usage.free // projected_generation_bytes if projected_generation_bytes else None,
+                    "mount": _mount(path),
+                    "git": _git(path),
+                }
+            )
+        entries.append(entry)
+    now = datetime.now(UTC).timestamp()
+    replica_state = []
+    for path in replicas:
+        receipts = list(path.glob("*.json")) if path.is_dir() else []
+        newest = max((item.stat().st_mtime for item in receipts), default=None)
+        replica_state.append({"path": str(path), "exists": path.exists(), "receipt_count": len(receipts), "age_seconds": now - newest if newest else None})
+    schema = _run(["pg_dump", "--schema-only", "--no-owner", "--no-privileges"])
+    postgresql = {
+        "database_size": _run(["psql", "-Atqc", "SELECT pg_database_size(current_database())"]),
+        "server_version": _run(["psql", "-Atqc", "SHOW server_version"]),
+        "schema_identity": "sha256:" + hashlib.sha256(schema.encode()).hexdigest() if schema else None,
+        "migration_identity": _run(["psql", "-Atqc", "SELECT version_num FROM alembic_version ORDER BY version_num"]),
+    }
+    return {
+        "schema": "tgw-lib-recovery-inventory/v2",
+        "observed_at": datetime.now(UTC).isoformat(),
+        "host": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
+        "paths": entries,
+        "postgresql": postgresql,
+        "replicas": replica_state,
+        "tools": {name: _run([name, "--version"]) for name in ("git", "pg_dump", "pg_basebackup", "age", "restic", "borg", "btrfs", "zfs", "getfacl")},
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Read-only tgw-lib recovery inventory and receipt verification")
+    parser = argparse.ArgumentParser(description="Read-only tgw-lib recovery inventory")
     sub = parser.add_subparsers(dest="action", required=True)
     inv = sub.add_parser("inventory")
-    inv.add_argument("paths", nargs="*", type=Path, default=[Path("/opt/TGW/library"), Path("/opt/TGW/tgw-lib"), Path("/opt/TGW/data")])
+    inv.add_argument("paths", nargs="*", type=Path)
+    inv.add_argument("--projected-generation-bytes", type=int, default=0)
+    inv.add_argument("--replica", action="append", type=Path, default=[])
     verify = sub.add_parser("verify")
     verify.add_argument("receipt", type=Path)
     verify.add_argument("object_root", type=Path)
+    verify.add_argument("trusted_public_key", type=Path)
+    verify.add_argument("key_id")
     args = parser.parse_args(argv)
     try:
-        if args.action == "inventory":
-            print(json.dumps(inventory(args.paths), sort_keys=True, indent=2))
-        else:
-            verify_receipt(args.receipt, args.object_root)
+        if args.action == "verify":
+            key = load_pem_public_key(args.trusted_public_key.read_bytes())
+            if not isinstance(key, Ed25519PublicKey):
+                raise ManifestError("trusted key is not Ed25519")
+            verify_receipt(args.receipt, args.object_root, key, args.key_id)
             print("complete")
+            return 0
+        paths = args.paths or [Path("/opt/TGW/library"), Path("/opt/TGW/tgw-lib"), Path("/opt/TGW/data")]
+        print(json.dumps(inventory(paths, args.projected_generation_bytes, args.replica), sort_keys=True, indent=2))
         return 0
     except (ManifestError, OSError, json.JSONDecodeError) as exc:
         print(f"incomplete: {exc}", file=sys.stderr)
