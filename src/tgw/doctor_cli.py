@@ -11469,8 +11469,28 @@ def _wait_plan_render_repair_readiness(
                     action_state,
                     _unit_state(_PLAN_RENDER_UNIT),
                 )
+                process_runtime = last_check.get("evidence", {}).get(
+                    "process_runtime", {}
+                )
+                health_identity = {
+                    "MainPID": str(process_runtime.get("pid", "")),
+                    "InvocationID": str(process_runtime.get("invocation_id") or ""),
+                    "ExecMainStartTimestampMonotonic": str(
+                        process_runtime.get("start_timestamp_monotonic") or ""
+                    ),
+                }
+                transition_identity = last_transition["after"]
+                last_transition["health_identity"] = health_identity
+                last_transition["health_identity_matches"] = all(
+                    health_identity[key] == transition_identity[key]
+                    for key in health_identity
+                )
             if last_check["state"] == "PASS" and (
-                last_transition is None or last_transition["exact"]
+                last_transition is None
+                or (
+                    last_transition["exact"]
+                    and last_transition["health_identity_matches"]
+                )
             ):
                 return last_check, last_transition
             last_error = None

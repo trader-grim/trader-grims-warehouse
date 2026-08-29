@@ -275,10 +275,15 @@ def _plan_render_check_fixture(
     monkeypatch.setattr(
         doctor_cli,
         "_plan_render_process_runtime_identity",
-        lambda *_args, **_kwargs: {
+        lambda state, *_args, **_kwargs: {
             "status": "EXACT",
             "exact": True,
             "restart_safe": False,
+            "pid": int(state.get("MainPID", "0")),
+            "invocation_id": state.get("InvocationID"),
+            "start_timestamp_monotonic": state.get(
+                "ExecMainStartTimestampMonotonic"
+            ),
         },
     )
     monkeypatch.setattr(
@@ -640,7 +645,19 @@ def _stub_plan_render_repair_action(
     def check(*_args: object, **_kwargs: object) -> dict[str, str]:
         nonlocal check_calls
         check_calls += 1
-        return {"state": "FAIL" if check_calls == 1 else post_state}
+        state = _active_plan_render_state(generation)
+        return {
+            "state": "FAIL" if check_calls == 1 else post_state,
+            "evidence": {
+                "process_runtime": {
+                    "pid": int(state["MainPID"]),
+                    "invocation_id": state["InvocationID"],
+                    "start_timestamp_monotonic": state[
+                        "ExecMainStartTimestampMonotonic"
+                    ],
+                }
+            },
+        }
 
     monkeypatch.setattr(doctor_cli, "check_plan_render_worker", check)
     monkeypatch.setattr(
@@ -745,7 +762,19 @@ def test_plan_render_repair_waits_for_restarted_worker_health(
     def delayed_health(*_args: object, **_kwargs: object) -> dict[str, str]:
         nonlocal checks
         checks += 1
-        return {"state": "PASS" if checks == 3 else "FAIL"}
+        state = _active_plan_render_state(2)
+        return {
+            "state": "PASS" if checks == 3 else "FAIL",
+            "evidence": {
+                "process_runtime": {
+                    "pid": int(state["MainPID"]),
+                    "invocation_id": state["InvocationID"],
+                    "start_timestamp_monotonic": state[
+                        "ExecMainStartTimestampMonotonic"
+                    ],
+                }
+            },
+        }
 
     monkeypatch.setattr(doctor_cli, "check_plan_render_worker", delayed_health)
 
@@ -782,6 +811,52 @@ def test_plan_render_repair_readiness_failure_is_bounded(
     assert checks == 4
     assert ["systemctl", "restart", doctor_cli._PLAN_RENDER_UNIT] in commands
     assert "plan-render-worker" not in receipts
+
+
+def test_plan_render_repair_retries_when_healthy_invocation_churns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, _release = _plan_render_check_fixture(tmp_path, monkeypatch)
+    health_generations = iter((2, 3))
+    unit_generations = iter((3, 3))
+    action_state = _active_plan_render_state(1)
+    obligation = {"prechange_service": action_state}
+
+    def unit_state(_unit: str) -> dict[str, str]:
+        return _active_plan_render_state(next(unit_generations))
+
+    def healthy(*_args: object, **_kwargs: object) -> dict[str, object]:
+        generation = next(health_generations)
+        state = _active_plan_render_state(generation)
+        return {
+            "state": "PASS",
+            "evidence": {
+                "process_runtime": {
+                    "pid": int(state["MainPID"]),
+                    "invocation_id": state["InvocationID"],
+                    "start_timestamp_monotonic": state[
+                        "ExecMainStartTimestampMonotonic"
+                    ],
+                }
+            },
+        }
+
+    monkeypatch.setattr(doctor_cli, "_unit_state", unit_state)
+    monkeypatch.setattr(doctor_cli, "check_plan_render_worker", healthy)
+
+    result, transition = doctor_cli._wait_plan_render_repair_readiness(
+        paths,
+        desired_commit=None,
+        obligation=obligation,
+        action_state=action_state,
+        attempts=2,
+        interval_seconds=0.0,
+    )
+
+    assert result["state"] == "PASS"
+    assert transition is not None
+    assert transition["health_identity_matches"] is True
+    assert transition["after"]["InvocationID"] == f"{3:032x}"
 
 
 def test_plan_render_repair_exact_active_worker_is_noop(
@@ -896,12 +971,24 @@ def test_plan_render_repair_replays_durable_obligation_after_restart_failure(
     ) is not None
     assert "plan-render-worker" not in receipts
 
-    monkeypatch.setattr(
-        doctor_cli,
-        "check_plan_render_worker",
-        lambda *_args, **_kwargs: {"state": "PASS"},
-    )
     generation = 2
+
+    def healthy(*_args: object, **_kwargs: object) -> dict[str, object]:
+        state = _active_plan_render_state(generation)
+        return {
+            "state": "PASS",
+            "evidence": {
+                "process_runtime": {
+                    "pid": int(state["MainPID"]),
+                    "invocation_id": state["InvocationID"],
+                    "start_timestamp_monotonic": state[
+                        "ExecMainStartTimestampMonotonic"
+                    ],
+                }
+            },
+        }
+
+    monkeypatch.setattr(doctor_cli, "check_plan_render_worker", healthy)
     monkeypatch.setattr(
         doctor_cli,
         "_unit_state",
