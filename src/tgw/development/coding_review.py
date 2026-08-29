@@ -14,8 +14,10 @@ import json
 import os
 import pwd
 import re
+import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -132,6 +134,71 @@ def _run_check(
     }
 
 
+
+_MANUAL_REVIEW_REL = ".tgw-coding-history/implementation/review-manual"
+_MANUAL_REVIEW_REQUEST_NAME = "request.json"
+_MANUAL_REVIEW_DONE_NAME = "done.json"
+
+
+def _review_poll_seconds() -> float:
+    try:
+        return float(os.environ.get("TGW_REVIEW_MANUAL_POLL", "5"))
+    except ValueError as exc:
+        raise ReviewRunnerError("manual review poll interval is invalid") from exc
+
+
+def _review_timeout_seconds() -> float:
+    try:
+        return float(os.environ.get("TGW_REVIEW_MANUAL_TIMEOUT", "1500"))
+    except ValueError as exc:
+        raise ReviewRunnerError("manual review timeout is invalid") from exc
+
+
+def _manual_review_executor(request: Mapping[str, Any], worktree: Path) -> Mapping[str, Any]:
+    """Supervised review handshake: request card out, report marker in.
+
+    The supervisor/agent inspects the candidate snapshot read-only and writes
+    ``done.json`` with the exact ``tgw-code-review/v1`` report.  The runner
+    still validates the report against the snapshot hash and finding paths;
+    the marker is never completion evidence on its own.
+    """
+    root = worktree / _MANUAL_REVIEW_REL
+    root.mkdir(parents=True, exist_ok=True)
+    task_path = root / _MANUAL_REVIEW_REQUEST_NAME
+    done_path = root / _MANUAL_REVIEW_DONE_NAME
+    task_path.write_text(
+        json.dumps(
+            {
+                "schema": "tgw-manual-review-request/v1",
+                "request": dict(request),
+                "done_marker": str(done_path.resolve()),
+                "output_contract": "tgw-code-review/v1",
+                "note": (
+                    "Review the candidate snapshot at snapshot_root read-only. Write the done "
+                    "marker with the exact tgw-code-review/v1 report; the runner validates it "
+                    "against the snapshot hash and finding paths."
+                ),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    task_path.chmod(0o600)
+    deadline = time.monotonic() + _review_timeout_seconds()
+    while time.monotonic() < deadline:
+        if done_path.is_file():
+            try:
+                report = json.loads(done_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ReviewRunnerError(
+                    f"manual review completion report is invalid: {exc}"
+                ) from exc
+            shutil.rmtree(root, ignore_errors=True)
+            return report
+        time.sleep(_review_poll_seconds())
+    raise ReviewRunnerError("manual review timed out; candidate snapshot unchanged")
+
+
 def run_local_review(
     payload: Mapping[str, Any],
     worktree: Path,
@@ -239,8 +306,11 @@ def run_local_review(
         **review_context_unsigned,
         "context_hash": _hash(review_context_unsigned),
     }
+    backend = semantic_backend
+    if os.environ.get("TGW_REVIEW_EXECUTOR", "codex") == "manual":
+        backend = _manual_review_executor
     try:
-        semantic_report = dict(semantic_backend(request, worktree))
+        semantic_report = dict(backend(request, worktree))
     except (CodexReviewBackendError, OSError, ValueError) as exc:
         raise ReviewRunnerError(
             f"independent semantic review backend failed: {exc}"

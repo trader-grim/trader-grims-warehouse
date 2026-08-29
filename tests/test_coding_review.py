@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -110,3 +111,58 @@ def test_review_still_rejects_real_source_mutation(tmp_path):
         coding_review.run_local_review(
             _payload(base, commit, tree), repo, semantic_backend=_backend(commit, tree)
         )
+
+
+def test_manual_review_executor_handshake(tmp_path, monkeypatch):
+    import threading
+    import time as _time
+    repo, base, commit, tree = _repo(tmp_path)
+    monkeypatch.setenv("TGW_REVIEW_EXECUTOR", "manual")
+    monkeypatch.setattr(coding_review, "_review_poll_seconds", lambda: 0.01)
+    monkeypatch.setattr(coding_review, "_review_timeout_seconds", lambda: 10)
+    holder: dict[str, object] = {}
+
+    def worker() -> None:
+        holder["result"] = coding_review.run_local_review(_payload(base, commit, tree), repo)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    card = repo / ".tgw-coding-history/implementation/review-manual/request.json"
+    deadline = _time.monotonic() + 5
+    while not card.is_file() and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert card.is_file()
+    payload = json.loads(card.read_text(encoding="utf-8"))
+    assert payload["schema"] == "tgw-manual-review-request/v1"
+    snapshot = coding_review._candidate_snapshot_hash(commit, tree)
+    (card.parent / "done.json").write_text(
+        json.dumps({"schema": "tgw-code-review/v1", "verdict": "PASS",
+                    "snapshot_hash": snapshot, "summary": "clean", "findings": []}),
+        encoding="utf-8",
+    )
+    thread.join(10)
+    assert not thread.is_alive()
+    result = holder["result"]
+    assert result["outcome"] == "satisfied"
+    assert result["established_conditions"] == ["reviewed"]
+
+
+def test_manual_review_executor_invalid_report_fails(tmp_path, monkeypatch):
+    repo, base, commit, tree = _repo(tmp_path)
+    monkeypatch.setenv("TGW_REVIEW_EXECUTOR", "manual")
+    monkeypatch.setattr(coding_review, "_review_poll_seconds", lambda: 0.01)
+    monkeypatch.setattr(coding_review, "_review_timeout_seconds", lambda: 10)
+    done = repo / ".tgw-coding-history/implementation/review-manual/done.json"
+    done.parent.mkdir(parents=True)
+    done.write_text("not json", encoding="utf-8")
+    with pytest.raises(coding_review.ReviewRunnerError, match="backend failed"):
+        coding_review.run_local_review(_payload(base, commit, tree), repo)
+
+
+def test_manual_review_executor_times_out(tmp_path, monkeypatch):
+    repo, base, commit, tree = _repo(tmp_path)
+    monkeypatch.setenv("TGW_REVIEW_EXECUTOR", "manual")
+    monkeypatch.setattr(coding_review, "_review_poll_seconds", lambda: 0.01)
+    monkeypatch.setattr(coding_review, "_review_timeout_seconds", lambda: 0.3)
+    with pytest.raises(coding_review.ReviewRunnerError, match="timed out"):
+        coding_review.run_local_review(_payload(base, commit, tree), repo)
