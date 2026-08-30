@@ -83,6 +83,10 @@
                   "category_id": {
                     "type": "string"
                   },
+                  "category_name": {
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "condition_description": {
                     "type": "string"
                   },
@@ -272,6 +276,12 @@
             "label": "eBay category ID",
             "type": "string",
             "value": "123"
+          },
+          "category_name": {
+            "label": "eBay category name",
+            "nullable": true,
+            "type": "string",
+            "value": ""
           },
           "condition_description": {
             "label": "Condition description",
@@ -497,6 +507,10 @@
                   "category_id": {
                     "type": "string"
                   },
+                  "category_name": {
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "condition_description": {
                     "type": "string"
                   },
@@ -686,6 +700,12 @@
             "label": "eBay category ID",
             "type": "string",
             "value": "123"
+          },
+          "category_name": {
+            "label": "eBay category name",
+            "nullable": true,
+            "type": "string",
+            "value": ""
           },
           "condition_description": {
             "label": "Condition description",
@@ -917,6 +937,10 @@
                   "category_id": {
                     "type": "string"
                   },
+                  "category_name": {
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "condition_description": {
                     "type": "string"
                   },
@@ -1106,6 +1130,12 @@
             "label": "eBay category ID",
             "type": "string",
             "value": "123"
+          },
+          "category_name": {
+            "label": "eBay category name",
+            "nullable": true,
+            "type": "string",
+            "value": ""
           },
           "condition_description": {
             "label": "Condition description",
@@ -1337,6 +1367,10 @@
                   "category_id": {
                     "type": "string"
                   },
+                  "category_name": {
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "condition_description": {
                     "type": "string"
                   },
@@ -1526,6 +1560,12 @@
             "label": "eBay category ID",
             "type": "string",
             "value": "99"
+          },
+          "category_name": {
+            "label": "eBay category name",
+            "nullable": true,
+            "type": "string",
+            "value": ""
           },
           "condition_description": {
             "label": "Condition description",
@@ -1736,6 +1776,10 @@
                   "category_id": {
                     "type": "string"
                   },
+                  "category_name": {
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "condition_description": {
                     "type": "string"
                   },
@@ -1925,6 +1969,12 @@
             "label": "eBay category ID",
             "type": "string",
             "value": "123"
+          },
+          "category_name": {
+            "label": "eBay category name",
+            "nullable": true,
+            "type": "string",
+            "value": ""
           },
           "condition_description": {
             "label": "Condition description",
@@ -2144,6 +2194,10 @@
                   "category_id": {
                     "type": "string"
                   },
+                  "category_name": {
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "condition_description": {
                     "type": "string"
                   },
@@ -2333,6 +2387,12 @@
             "label": "eBay category ID",
             "type": "string",
             "value": "123"
+          },
+          "category_name": {
+            "label": "eBay category name",
+            "nullable": true,
+            "type": "string",
+            "value": ""
           },
           "condition_description": {
             "label": "Condition description",

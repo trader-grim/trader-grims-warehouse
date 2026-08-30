@@ -260,6 +260,30 @@ def test_command_values_are_validated_from_published_condition_and_aspect_schema
         validate_operator_command_values(published, "list-item", {"condition_enum": "invented"})
 
 
+def test_save_listing_draft_accepts_category_name_with_category_id():
+    """todo #1931: the picker posts category_name alongside category_id; the
+    save-listing-draft schema must publish/accept it or every category change
+    save fails with an unpublished-key 422 (operator hit this live as
+    'Error: [object Object]')."""
+    published = build_item_operator_object(
+        item=_item(),
+        workflow_card=_workflow_card(),
+        category_context=_category_context(),
+    )
+    commands = {command["id"]: command for command in published["commands"]}
+    dl_schema = (commands["save-listing-draft"]["input_schema"]
+                 .get("properties", {})
+                 .get("draft_listing", {})
+                 .get("properties", {}))
+    assert "category_id" in dl_schema
+    assert "category_name" in dl_schema
+    assert validate_operator_command_values(
+        published,
+        "save-listing-draft",
+        {"draft_listing": {"category_id": "262310", "category_name": "Model Cars & Slot Cars"}},
+    ) == {"draft_listing": {"category_id": "262310", "category_name": "Model Cars & Slot Cars"}}
+
+
 def _policy_context(**overrides):
     context = {
         "category_recognized": True,

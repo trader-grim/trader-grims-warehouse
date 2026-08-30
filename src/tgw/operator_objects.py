@@ -510,6 +510,7 @@ def build_item_operator_object(
             "price": {"type": "number", "nullable": True, "label": "Price", "value": draft.get("price")},
             "quantity": {"type": "integer", "nullable": True, "label": "Quantity", "value": draft.get("quantity")},
             "category_id": {"type": "string", "label": "eBay category ID", "value": category_id},
+            "category_name": {"type": "string", "nullable": True, "label": "eBay category name", "value": draft.get("category_name") or item.get("ebay_category_name") or ""},
             "secondary_category_id": {"type": "string", "nullable": True, "label": "Secondary category ID", "value": draft.get("secondary_category_id")},
             "condition_description": {"type": "string", "label": "Condition description", "value": draft.get("condition_description") or ""},
             "shipping_profile": {"type": "string", "label": "Shipping policy", "value": draft.get("shipping_profile") or "", "options": deepcopy(context.get("fulfillment_policies") or [])},
