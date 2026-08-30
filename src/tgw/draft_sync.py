@@ -77,6 +77,14 @@ def pin_draft_to_live(doc: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("no ebay_live mirror — run Sync from eBay first")
 
     dl = dict(doc.get("draft_listing") or {})
+    # todo #1931: the reset is a FULL reverse sync (live → draft, start-over) —
+    # the draft holds what we WANT the offer to become, so abandoning it means
+    # re-pinning everything, category included. Source is the live offer's
+    # categoryId, with the synced ebay_offer.category_id as fallback when the
+    # mirror is stale. Never invented locally; always read from eBay.
+    live_category = live_off.get("categoryId") or (doc.get("ebay_offer") or {}).get("category_id")
+    if live_category:
+        dl["category_id"] = str(live_category)
     if live_prod.get("title"):
         dl["title"] = live_prod["title"]
     if live_prod.get("description"):

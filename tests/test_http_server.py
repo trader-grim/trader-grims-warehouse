@@ -1173,6 +1173,45 @@ def test_sync_from_ebay_without_live_offer_leaves_draft_untouched(env, enqueue_c
     assert "category_name" not in doc["draft_listing"]
 
 
+def test_reset_draft_from_live_restores_corrupt_category(env, monkeypatch):
+    """todo #1931 corrected model: Reset Draft is a FULL reverse sync (live →
+    draft, start-over) — a corrupt draft category (the persisted "99" sentinel)
+    is restored from the live offer, with the display name resolved."""
+    sku = "tgw20260401000000032"
+    _seed_live_item(
+        env,
+        sku,
+        extra_fields={
+            "draft_listing": {"title": "Live Widget", "price": "9.99", "category_id": "99"},
+            "ebay_offer": {"offer_id": "OFF-LIVE-1", "status": "PUBLISHED", "category_id": "262310"},
+            "ebay_live": {
+                "offer": {
+                    "offerId": "OFF-LIVE-1",
+                    "categoryId": "262310",
+                    "pricingSummary": {"price": {"value": "9.99"}},
+                    "availableQuantity": 1,
+                },
+                "inventory_item": {"product": {"title": "Live Widget"}, "condition": "USED_GOOD"},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "tgw.apis.ebay.taxonomy.get_category_node",
+        lambda cfg, category_id: {"id": category_id, "name": "Model Cars & Slot Cars", "path": "…", "leaf": True},
+    )
+
+    r = env["client"].post(
+        f"/api/items/{sku}/action",
+        json={"action": "reset_draft_from_live"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text(encoding="utf-8"))
+    assert doc["draft_listing"]["category_id"] == "262310"
+    assert doc["draft_listing"]["category_name"] == "Model Cars & Slot Cars"
+
+
 def test_legacy_end_listing_routes_are_rejected_before_provider_effect(env, monkeypatch):
     sku = "tgw20260401000000015"
     _seed_live_item(env, sku)

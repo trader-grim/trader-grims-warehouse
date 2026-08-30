@@ -3014,6 +3014,28 @@ def item_action(
                 _pin_fields = draft_sync.pin_draft_to_live(doc)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
+            # todo #1931: the reset is a FULL reverse sync (live → draft,
+            # start-over) — pin_draft_to_live now pins the live categoryId, so
+            # a corrupt draft category ("99" sentinel, or any abandoned
+            # intent) is restored too. Resolve the display name in-process
+            # from the taxonomy node; a name-lookup failure never blocks the
+            # reset.
+            _pinned_dl = _pin_fields.get("draft_listing") or {}
+            if _pinned_dl.get("category_id") and not _pinned_dl.get("category_name"):
+                try:
+                    from .apis.ebay.taxonomy import get_category_node
+
+                    _node = get_category_node(_cfg, str(_pinned_dl["category_id"]))
+                    if _node and _node.get("name"):
+                        _pin_fields["draft_listing"] = {
+                            **_pinned_dl,
+                            "category_name": _node["name"],
+                        }
+                except Exception as _exc:
+                    log.warning(
+                        "reset_draft_from_live: category name lookup failed for %s: %s",
+                        _pinned_dl.get("category_id"), _exc,
+                    )
             _apply_patch(json_path, _pin_fields)
             return {"ok": True, "sku": sku, "action": "reset_draft_from_live"}
 

@@ -58,7 +58,7 @@ _MIGRATION_SCRIPT = _SCRIPTS / "migrate_field_set_envelope.py"
 #       neither is the item's envelope).
 # A new entry here must be justified the same way, in code review.
 _ALLOWLIST = {
-    (_SRC / "tgw" / "draft_sync.py", 90),
+    (_SRC / "tgw" / "draft_sync.py", 98),  # refreshed 2026-08-29 (todo #1931 pin category in reset)
     (_SRC / "tgw" / "workers" / "ai_identify.py", 621),  # (b) AI model response
     (_SRC / "tgw" / "workers" / "ai_identify.py", 715),  # (a) required-schema accessor patch write
     (_SRC / "tgw" / "workers" / "ai_identify.py", 736),  # (a) accessor patch write
@@ -104,13 +104,13 @@ _ALLOWLIST = {
     (_SRC / "tgw" / "http_server.py", 2842),  # (b) revision_draft.delta
     (_SRC / "tgw" / "http_server.py", 2843),  # (b) revision_draft.delta
     (_SRC / "tgw" / "http_server.py", 2848),  # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 4226),  # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
-    (_SRC / "tgw" / "http_server.py", 4286),  # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
+    (_SRC / "tgw" / "http_server.py", 4279),  # refreshed 2026-08-29 (todo #1931 sync_from_ebay/reset pins)  # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
+    (_SRC / "tgw" / "http_server.py", 4339),  # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
     # Refreshed 2026-07-20 (todo #1582, PP-AGENTTRACE-001 Phase 3): the new
     # /form/runs route + _render_runs_html() inserted ~186 lines before this
     # entry, shifting it from 5855 to 6041 — re-verified against current
     # HEAD, no accessor-routing behavior changed, only position.
-    (_SRC / "tgw" / "http_server.py", 7563),  # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 7616),  # (b) revision_draft.delta
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
