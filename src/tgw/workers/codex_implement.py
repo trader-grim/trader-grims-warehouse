@@ -62,7 +62,7 @@ _CONTEXT_TOOLS = (
 _MANUAL_REL = PurePosixPath(".tgw-coding-history/implementation/manual")
 _MANUAL_TASK_NAME = "task.json"
 _MANUAL_DONE_NAME = "done.json"
-_MANUAL_EXECUTORS = frozenset({"codex", "manual"})
+_MANUAL_EXECUTORS = frozenset({"codex", "manual", "claude"})
 
 
 def _executor() -> str:
@@ -73,11 +73,21 @@ def _executor() -> str:
 
 
 def _summary_kind() -> str:
-    return "manual_summary" if _executor() == "manual" else "codex_summary"
+    ex = _executor()
+    if ex == "manual":
+        return "manual_summary"
+    if ex == "claude":
+        return "claude_summary"
+    return "codex_summary"
 
 
 def _failure_kind() -> str:
-    return "manual_failure" if _executor() == "manual" else "codex_failure"
+    ex = _executor()
+    if ex == "manual":
+        return "manual_failure"
+    if ex == "claude":
+        return "claude_failure"
+    return "codex_failure"
 
 
 def _manual_poll_seconds() -> float:
@@ -134,7 +144,9 @@ def _execute_manual(
         json.dumps(_manual_task_payload(job, task, cwd), sort_keys=True),
         encoding="utf-8",
     )
-    task_path.chmod(0o600)
+    # Any-actor model: the manual card must be group-readable so ANY
+    # tgw-coders harness can read the task and write done.json.
+    task_path.chmod(0o640)
     deadline = time.monotonic() + _manual_timeout_seconds()
     while time.monotonic() < deadline:
         if done_path.is_file():
@@ -250,7 +262,49 @@ def _codex_auth_path() -> Path:
     return Path.home() / ".codex" / "auth.json"
 
 
-def _prompt(task: dict[str, Any], continuation: dict[str, Any] | None = None) -> str:
+def _claude_binary() -> str:
+    configured = os.environ.get("TGW_CLAUDE_BIN")
+    candidate = Path(configured) if configured else shutil.which("claude")
+    if not candidate or not os.access(candidate, os.X_OK):
+        raise HardFailure(
+            "Claude Code executable is unavailable (install and authenticate it "
+            "for the worker identity, then set TGW_CLAUDE_BIN)"
+        )
+    return str(candidate)
+
+
+def _claude_report(stdout: str) -> dict[str, Any] | None:
+    """Extract the final report JSON object from Claude Code's print-mode output.
+
+    Claude -p --output-format json emits JSONL; the prompt instructs the model
+    to END its final result text with exactly one JSON report object matching
+    _FINAL_SCHEMA, so the last JSON object in the output is the report.
+    """
+    text = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            text = line
+            continue
+        if isinstance(value, dict):
+            text = value.get("result") or value.get("text") or value.get("content") or text
+    if not isinstance(text, str):
+        return None
+    brace = text.rfind("{")
+    if brace < 0:
+        return None
+    try:
+        candidate = json.loads(text[brace:])
+    except json.JSONDecodeError:
+        return None
+    return candidate if isinstance(candidate, dict) else None
+
+
+def _prompt(task: dict[str, Any], continuation: dict[str, Any] | None = None, *, treatment: str = "Codex") -> str:
     continuation_brief = ""
     if continuation:
         continuation_brief = f"""
@@ -280,7 +334,7 @@ Validated findings:
 {findings_brief}
 Evidence: {remediation.get("failure_receipt_hash")}
 """
-    return f"""You are the Codex implementation treatment for TGW Todo #{task["todo_id"]}.
+    return f"""You are the {treatment} implementation treatment for TGW Todo #{task["todo_id"]}.
 
 Repository AGENTS.md is your actor contract. CLAUDE.md does not govern Codex.
 Work only in the current request-bound worktree. Do not commit, deploy, change
@@ -570,6 +624,44 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
     try:
         if _executor() == "manual":
             early_result, report = _execute_manual(job, task, cwd, before_head)
+        elif _executor() == "claude":
+            with tempfile.TemporaryDirectory(prefix=".tgw-claude-implement-", dir=cwd) as temporary:
+                temp = Path(temporary)
+                schema_path = temp / "schema.json"
+                schema_path.write_text(json.dumps(_FINAL_SCHEMA, sort_keys=True), encoding="utf-8")
+                command = [
+                    _claude_binary(),
+                    "-p",
+                    "--output-format",
+                    "json",
+                    "-C",
+                    str(cwd),
+                    "--permission-mode",
+                    "bypassPermissions",
+                ]
+                completed = invoke(
+                    command,
+                    cwd=cwd,
+                    input=_prompt(task, continuation, treatment="Claude"),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env={**os.environ},
+                )
+                if completed.returncode:
+                    early_result = {
+                        "outcome": "failed",
+                        "established_conditions": [],
+                        "artifacts": [{"kind": _failure_kind(), "detail": completed.stderr[-1000:] or completed.stdout[-1000:]}],
+                    }
+                else:
+                    report = _claude_report(completed.stdout)
+                    if report is None:
+                        early_result = {
+                            "outcome": "failed",
+                            "established_conditions": [],
+                            "artifacts": [{"kind": _failure_kind(), "detail": "claude final report is not parseable"}],
+                        }
         else:
             with tempfile.TemporaryDirectory(prefix=".tgw-codex-implement-", dir=cwd) as temporary:
                 temp = Path(temporary)

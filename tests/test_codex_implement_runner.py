@@ -20,6 +20,25 @@ def _isolated_codex_auth(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(codex_implement, "_codex_auth_path", lambda: auth)
 
 
+@pytest.fixture(autouse=True)
+def _no_inherited_worktree_lease(monkeypatch):
+    """Controller runs inherit worker-owned descriptors and archive roots.
+
+    ``codex_implement.run()`` treats a set ``TGW_CODING_WORKTREE_LEASE_FD`` as
+    an inherited lease and validates it against the exact worktree inode.  The
+    runner tests call ``run()`` against disposable ``tmp_path`` repositories,
+    so a leaked descriptor from the dispatching worker makes every
+    git-backed test fail with ``inherited worktree lease state for the wrong
+    inode``.  Similarly ``TGW_CODING_PRESERVATION_ARCHIVE_ROOT`` points at the
+    operator-provisioned host archive, which is not a protected same-filesystem
+    ``tgw-coders`` directory inside the controller's private mount namespace;
+    ``retire_preservation`` then fails candidate-close tests.  Clear both so
+    each test exercises the runner exactly like a standalone invocation.
+    """
+    monkeypatch.delenv("TGW_CODING_WORKTREE_LEASE_FD", raising=False)
+    monkeypatch.delenv("TGW_CODING_PRESERVATION_ARCHIVE_ROOT", raising=False)
+
+
 def _repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
@@ -714,3 +733,139 @@ def test_unknown_executor_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "bogus")
     with pytest.raises(codex_implement.HardFailure, match="unsupported implementation executor"):
         codex_implement.run(_job(), repo)
+
+
+# ---------------------------------------------------------------------------
+# Claude implementation executor (todo #1935)
+# ---------------------------------------------------------------------------
+
+def _claude_invoke(report=None, edit=None, returncode=0, stdout=None):
+    """Mock subprocess for the claude -p --output-format json invocation."""
+    def invoke(command, *, cwd, **_kwargs):
+        if edit:
+            edit(Path(cwd))
+        if stdout is not None:
+            out = stdout
+        elif report is not None:
+            # Claude -p --output-format json emits JSONL; the final result
+            # text carries the report object as a JSON string.
+            out = json.dumps({"type": "result", "result": json.dumps(report)}) + "\n"
+        else:
+            out = ""
+        return subprocess.CompletedProcess(
+            command, returncode, out,
+            "claude failure" if returncode else "",
+        )
+    return invoke
+
+
+def test_claude_binary_unavailable_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.delenv("TGW_CLAUDE_BIN", raising=False)
+    monkeypatch.setattr(codex_implement.shutil, "which", lambda name: None)
+    with pytest.raises(codex_implement.HardFailure, match="Claude Code executable is unavailable"):
+        codex_implement._claude_binary()
+
+
+def test_claude_binary_uses_configured_path(tmp_path, monkeypatch):
+    executable = tmp_path / "claude"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    monkeypatch.setenv("TGW_CLAUDE_BIN", str(executable))
+    assert codex_implement._claude_binary() == str(executable)
+
+
+def test_claude_report_extracts_trailing_json():
+    report = {"status": "implemented", "summary": "claude done", "tests": ["focused"]}
+    stdout = (
+        '{"type":"system","subtype":"init"}\n'
+        + json.dumps({"type": "result", "result": json.dumps(report)})
+        + "\n"
+    )
+    assert codex_implement._claude_report(stdout) == report
+
+
+def test_claude_report_accepts_plain_text_result():
+    report = {"status": "implemented", "summary": "plain", "tests": ["focused"]}
+    stdout = '{"type":"result","text":"' + json.dumps(report).replace('"', '\\"') + '"}\n'
+    assert codex_implement._claude_report(stdout) == report
+
+
+def test_claude_report_returns_none_on_garbage():
+    assert codex_implement._claude_report("not json at all\n") is None
+    assert codex_implement._claude_report("") is None
+
+
+def test_claude_executor_satisfied_closes_candidate(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        text=True, capture_output=True,
+    ).stdout.strip()
+    monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "claude")
+    monkeypatch.setattr(codex_implement, "_claude_binary", lambda: "/bin/true")
+    report = {"status": "implemented", "summary": "claude implemented", "tests": ["focused"]}
+
+    def edit(cwd: Path) -> None:
+        (cwd / "feature.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    result = codex_implement.run(
+        _job(),
+        repo,
+        invoke=_claude_invoke(report=report, edit=edit),
+    )
+    assert result["outcome"] == "satisfied"
+    assert result["established_conditions"] == ["implemented"]
+    kinds = [item["kind"] for item in result["artifacts"]]
+    assert "claude_summary" in kinds
+    assert "tests_reported" in kinds
+    assert "closed_candidate" in kinds
+    closed = next(item for item in result["artifacts"] if item["kind"] == "closed_candidate")
+    assert closed["base_commit"] == baseline
+    assert closed["changed_paths"] == ["feature.py"]
+    assert subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, check=True,
+        text=True, capture_output=True,
+    ).stdout == ""
+
+
+def test_claude_executor_nonzero_exit_fails(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "claude")
+    monkeypatch.setattr(codex_implement, "_claude_binary", lambda: "/bin/true")
+    result = codex_implement.run(
+        _job(),
+        repo,
+        invoke=_claude_invoke(returncode=2),
+    )
+    assert result["outcome"] == "failed"
+    kinds = [item["kind"] for item in result["artifacts"]]
+    assert "claude_failure" in kinds
+
+
+def test_claude_executor_unparseable_report_fails(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "claude")
+    monkeypatch.setattr(codex_implement, "_claude_binary", lambda: "/bin/true")
+    result = codex_implement.run(
+        _job(),
+        repo,
+        invoke=_claude_invoke(stdout="garbage output without a report\n"),
+    )
+    assert result["outcome"] == "failed"
+    kinds = [item["kind"] for item in result["artifacts"]]
+    assert "claude_failure" in kinds
+    assert any("not parseable" in item.get("detail", "") for item in result["artifacts"])
+
+
+def test_claude_executor_invalid_report_contract_fails(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "claude")
+    monkeypatch.setattr(codex_implement, "_claude_binary", lambda: "/bin/true")
+    result = codex_implement.run(
+        _job(),
+        repo,
+        invoke=_claude_invoke(report={"status": "implemented", "summary": "", "tests": []}),
+    )
+    assert result["outcome"] == "failed"
+    kinds = [item["kind"] for item in result["artifacts"]]
+    assert "claude_failure" in kinds
