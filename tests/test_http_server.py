@@ -1120,6 +1120,59 @@ def test_legacy_ebay_update_action_never_reaches_queue(env, monkeypatch):
     assert r.status_code == 400
 
 
+def test_sync_from_ebay_pins_live_category_into_draft(env, enqueue_calls, monkeypatch):
+    """todo #1931: a manual Sync Draft snaps the draft's category to the live
+    eBay category in-process (the machine fence may not PATCH draft_listing —
+    the operator-object command boundary owns it, C12/C14)."""
+    sku = "tgw20260401000000030"
+    _seed_live_item(
+        env,
+        sku,
+        extra_fields={
+            "draft_listing": {"title": "Live Widget", "price": "9.99", "category_id": ""},
+            "ebay_offer": {"offer_id": "OFF-LIVE-1", "status": "PUBLISHED", "category_id": "12345"},
+        },
+    )
+    monkeypatch.setattr(
+        "tgw.apis.ebay.taxonomy.get_category_node",
+        lambda cfg, category_id: {"id": category_id, "name": "Collectibles", "path": "Collectibles", "leaf": True},
+    )
+
+    r = env["client"].post(
+        f"/api/items/{sku}/action",
+        json={"action": "sync_from_ebay"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.json()["action"] == "sync_from_ebay"
+    assert any(
+        call["kwargs"].get("queue_name") == "ebay_sync"
+        and call["kwargs"].get("payload", {}).get("reason") == "manual"
+        for call in enqueue_calls
+    )
+
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text(encoding="utf-8"))
+    assert doc["draft_listing"]["category_id"] == "12345"
+    assert doc["draft_listing"]["category_name"] == "Collectibles"
+
+
+def test_sync_from_ebay_without_live_offer_leaves_draft_untouched(env, enqueue_calls):
+    """Never invented locally: no live category in ebay_offer, no draft pin."""
+    sku = "tgw20260401000000031"
+    _seed_live_item(env, sku)  # ebay_offer carries no category_id
+
+    r = env["client"].post(
+        f"/api/items/{sku}/action",
+        json={"action": "sync_from_ebay"},
+        headers=AUTH_HEADERS,
+    )
+    assert r.status_code == 200
+
+    doc = json.loads((env["itemdata_root"] / sku / f"{sku}.json").read_text(encoding="utf-8"))
+    assert "category_id" not in doc["draft_listing"]
+    assert "category_name" not in doc["draft_listing"]
+
+
 def test_legacy_end_listing_routes_are_rejected_before_provider_effect(env, monkeypatch):
     sku = "tgw20260401000000015"
     _seed_live_item(env, sku)

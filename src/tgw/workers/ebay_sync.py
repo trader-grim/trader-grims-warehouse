@@ -874,6 +874,19 @@ class EbaySyncWorker(QueueWorker):
         top_level_updates: Dict[str, Any] = {}
         if live_marketplace_id and item.get("marketplace_id") != live_marketplace_id:
             top_level_updates["marketplace_id"] = live_marketplace_id
+        # todo #1931: mirror the LIVE categoryId to the canonical top-level
+        # field. ebay_sync previously wrote category only into ebay_offer, so
+        # any item staged before the live category could differ had no
+        # canonical record of it — the Draft Editor fell back to "unset"
+        # (category "99") for SKUs with a real live listing (reproduced on
+        # tgw201809090907247), leaving the category picker unseeded and the
+        # staging gate (save-inventory) unsatisfied. Mirrored top-level so the
+        # operator object, the editor's fallback reads, and category-context
+        # all see one canonical value. Never invented locally; always read
+        # from eBay (same rule as marketplace_id above).
+        live_category_id = category_id
+        if live_category_id and item.get("ebay_category_id") != live_category_id:
+            top_level_updates["ebay_category_id"] = live_category_id
         if top_level_updates:
             item.update(top_level_updates)
             fence_patch_item(self.config, sku, top_level_updates)

@@ -2971,6 +2971,37 @@ def item_action(
                 )
             except psycopg2.errors.UniqueViolation:
                 job_id = None
+            # todo #1931: a manual Sync Draft must snap the draft's category to
+            # what eBay actually has. The worker mirrors the live categoryId to
+            # the canonical top-level ebay_category_id (machine fence PATCH),
+            # but draft_listing is owned by the operator-object command boundary
+            # (C12/C14) — the machine fence may not write it. So the draft pin
+            # happens HERE, in-process, on the operator's explicit manual sync,
+            # through the same sanctioned _apply_patch used by
+            # reset_draft_from_live / accept_proposals. Source is the last
+            # synced ebay_offer.category_id (the freshest local truth; the
+            # enqueued worker refreshes it live). Never invented: no offer,
+            # no pin.
+            try:
+                doc = load_item_doc(json_path)
+                dl = doc.get("draft_listing") if isinstance(doc.get("draft_listing"), dict) else {}
+                live_cat = str((doc.get("ebay_offer") or {}).get("category_id") or "")
+                if live_cat and str(dl.get("category_id") or "") != live_cat:
+                    dl_fields: Dict[str, Any] = {"category_id": live_cat}
+                    try:
+                        from .apis.ebay.taxonomy import get_category_node
+
+                        node = get_category_node(_cfg, live_cat)
+                        if node and node.get("name"):
+                            dl_fields["category_name"] = node["name"]
+                    except Exception as _exc:
+                        log.warning(
+                            "sync_from_ebay: category name lookup failed for %s: %s",
+                            live_cat, _exc,
+                        )
+                    _apply_patch(json_path, {"draft_listing": dl_fields})
+            except Exception as _exc:
+                log.warning("sync_from_ebay: draft category pin skipped for %s: %s", sku, _exc)
             return {"ok": True, "sku": sku, "action": "sync_from_ebay", "job_id": job_id}
 
         elif action == "reset_draft_from_live":
