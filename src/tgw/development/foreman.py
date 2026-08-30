@@ -101,6 +101,10 @@ class ForemanConfig:
     # by the recurring Foreman.  Jobs without this value are historical and can
     # never satisfy a lifecycle stage.
     lifecycle_bindings: dict[int, dict[str, Any]] = field(default_factory=dict)
+    # Transient generation identity.  Kept outside the immutable lifecycle
+    # binding so each remediation can supersede its predecessor without
+    # invalidating controller/review jobs carried by the same root.
+    lifecycle_intent_bindings: dict[int, str] = field(default_factory=dict)
     # An exact root at its implementation stage may need a new fenced recovery
     # receipt for an already-closed candidate.  This never means reimplement:
     # the existing typed worker validates/re-emits the immutable lineage.
@@ -768,6 +772,13 @@ def tick(
                 # a newly reconciled root.  Conversely, every replay of this
                 # exact root remains queue-idempotent.
                 dedupe_key = f"{dedupe_key}:lifecycle:{lifecycle_hash[7:]}"
+            lifecycle_intent_hash = cfg.lifecycle_intent_bindings.get(todo.todo_id)
+            if lifecycle_intent_hash is not None:
+                if re.fullmatch(r"sha256:[0-9a-f]{64}", lifecycle_intent_hash) is None:
+                    result = replace(result, errors=result.errors + 1)
+                    log.error("todo %d has malformed implementation intent", todo.todo_id)
+                    continue
+                dedupe_key = f"{dedupe_key}:intent:{lifecycle_intent_hash[7:]}"
             if _has_active_job(dedupe_key, check_active_fn):
                 result = replace(result, skipped_active=result.skipped_active + 1)
                 continue
@@ -813,6 +824,11 @@ def tick(
                 **(
                     {"coding_lifecycle": cfg.lifecycle_bindings[chosen.todo.todo_id]}
                     if chosen.todo.todo_id in cfg.lifecycle_bindings
+                    else {}
+                ),
+                **(
+                    {"implementation_intent_hash": cfg.lifecycle_intent_bindings[chosen.todo.todo_id]}
+                    if chosen.todo.todo_id in cfg.lifecycle_intent_bindings
                     else {}
                 ),
             }

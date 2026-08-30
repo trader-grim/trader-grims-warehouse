@@ -513,10 +513,9 @@ def _replace_prior_lifecycle_negative_receipt(
             "prior coding receipt does not bind the archived lifecycle generation"
         )
     return (
-        old_lifecycle.get("resume_intent_hash")
-        != new_lifecycle.get("resume_intent_hash")
-        and old_lifecycle.get("job_binding_hash")
-        != new_lifecycle.get("job_binding_hash")
+        existing.get("implementation_intent_hash")
+        != receipt.get("implementation_intent_hash")
+        and old_lifecycle == new_lifecycle
     )
 
 
@@ -973,6 +972,11 @@ class CodingWorker(QueueWorker):
                     lifecycle_binding,
                     plan_binding=plan_binding,
                 )
+                intent_hash = payload.get("implementation_intent_hash")
+                if intent_hash is not None and re.fullmatch(
+                    r"sha256:[0-9a-f]{64}", str(intent_hash)
+                ) is None:
+                    raise LifecycleError("coding implementation intent hash is invalid")
                 if treatment_id == "claude-review":
                     from tgw.development.coding_lifecycle import (
                         validate_candidate_job_binding,
@@ -1147,6 +1151,11 @@ class CodingWorker(QueueWorker):
                             else {}
                         ),
                         **(
+                            {"implementation_intent_hash": payload["implementation_intent_hash"]}
+                            if payload.get("implementation_intent_hash") is not None
+                            else {}
+                        ),
+                        **(
                             {"coding_candidate": dict(payload["coding_candidate"])}
                             if payload.get("coding_candidate") is not None
                             else {}
@@ -1259,6 +1268,11 @@ class CodingWorker(QueueWorker):
                     else {}
                 ),
                 **(
+                    {"implementation_intent_hash": payload["implementation_intent_hash"]}
+                    if payload.get("implementation_intent_hash") is not None
+                    else {}
+                ),
+                **(
                     {"coding_candidate": dict(payload["coding_candidate"])}
                     if payload.get("coding_candidate") is not None
                     else {}
@@ -1308,6 +1322,11 @@ class CodingWorker(QueueWorker):
             **(
                 {"coding_lifecycle": dict(payload["coding_lifecycle"])}
                 if payload.get("coding_lifecycle") is not None
+                else {}
+            ),
+            **(
+                {"implementation_intent_hash": payload["implementation_intent_hash"]}
+                if payload.get("implementation_intent_hash") is not None
                 else {}
             ),
             **(

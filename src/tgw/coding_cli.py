@@ -299,6 +299,7 @@ def start(
     source_commit: str | None = None,
     resume_only: bool = False,
     lifecycle_job_binding: Mapping[str, Any] | None = None,
+    lifecycle_intent_hash: str | None = None,
     lifecycle_remediation: Mapping[str, Any] | None = None,
     lifecycle_stage: str | None = None,
     dispatch_jobs: bool = True,
@@ -510,6 +511,11 @@ def start(
             lifecycle_bindings=(
                 {todo_id: dict(lifecycle_job_binding)}
                 if lifecycle_job_binding is not None
+                else {}
+            ),
+            lifecycle_intent_bindings=(
+                {todo_id: lifecycle_intent_hash}
+                if lifecycle_intent_hash is not None
                 else {}
             ),
             lifecycle_rebind=(
@@ -930,6 +936,7 @@ def _receipt_file(path: Path) -> tuple[dict[str, Any], str]:
 def _bound_jobs(record: Mapping[str, Any], queue_name: str) -> list[dict[str, Any]]:
     identifier = int(record["target"])
     expected_job_binding = coding_lifecycle.job_binding(record)
+    expected_intent_hash = coding_lifecycle.implementation_intent_hash(record)
     expected_plan = record["binding"]["plan_todo_binding"]
     result = []
     for row in _jobs(identifier, limit=250):
@@ -940,10 +947,11 @@ def _bound_jobs(record: Mapping[str, Any], queue_name: str) -> list[dict[str, An
             continue
         observed = payload.get("coding_lifecycle")
         if isinstance(observed, Mapping) and observed.get("root_id") == record["root_id"]:
-            # A journaled resume intent deliberately changes the job fence.
-            # Earlier jobs remain history but cannot become evidence for the
-            # resumed generation and must not poison its exact lookup.
             if dict(observed) != expected_job_binding:
+                continue
+            # Intent identity is deliberately outside the immutable root
+            # binding.  It still fences exact queue evidence by generation.
+            if payload.get("implementation_intent_hash") != expected_intent_hash:
                 continue
             coding_lifecycle.validate_job_binding(record, observed)
             if payload.get("plan_binding") != expected_plan:
@@ -1314,6 +1322,7 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
                 config_path=config_path,
                 source_commit=record["binding"]["source_commit"],
                 lifecycle_job_binding=coding_lifecycle.job_binding(record),
+                lifecycle_intent_hash=coding_lifecycle.implementation_intent_hash(record),
                 lifecycle_remediation=(
                     remediation_intent
                     if isinstance(remediation_intent, Mapping)
@@ -1335,6 +1344,7 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
                 config_path=config_path,
                 source_commit=record["binding"]["source_commit"],
                 lifecycle_job_binding=coding_lifecycle.job_binding(record),
+                lifecycle_intent_hash=coding_lifecycle.implementation_intent_hash(record),
                 lifecycle_stage="controller",
             ),
         )
@@ -1456,6 +1466,11 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
                     ),
                     lifecycle_bindings={
                         int(record["target"]): coding_lifecycle.job_binding(record)
+                    },
+                    lifecycle_intent_bindings={
+                        int(record["target"]): intent_hash
+                        for intent_hash in [coding_lifecycle.implementation_intent_hash(record)]
+                        if intent_hash is not None
                     },
                     lifecycle_rebind={
                         int(record["target"]): "claude-review"

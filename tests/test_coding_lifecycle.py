@@ -525,7 +525,7 @@ def test_resume_intent_is_durable_before_dispatch_and_retries_use_new_fence(
     reopened = request_resume(store, record["root_id"], receipt=intent)
     new_fence = job_binding(reopened)
     assert reopened["state"] == "WAITING"
-    assert new_fence != old_fence
+    assert new_fence == old_fence
     assert request_resume(store, record["root_id"], receipt=intent) == reopened
 
     rows = [
@@ -542,6 +542,7 @@ def test_resume_intent_is_durable_before_dispatch_and_retries_use_new_fence(
             "queue_name": "codex-implement",
             "payload_json": {
                 "coding_lifecycle": new_fence,
+                "implementation_intent_hash": coding_lifecycle.implementation_intent_hash(reopened),
                 "plan_binding": record["binding"]["plan_todo_binding"],
             },
         },
@@ -599,10 +600,13 @@ def test_fast_terminal_resume_job_consumes_intent_before_next_partial(
     assert terminal["state"] == "RESUMABLE_PARTIAL"
     assert terminal.get("resume_intent") is None
     assert terminal["active_implementation_generation"]["intent_hash"] == (
-        first_resume_fence["resume_intent_hash"]
+        coding_lifecycle.implementation_intent_hash(reopened)
     )
     next_resume = request_resume(store, terminal["root_id"], receipt=intent)
-    assert job_binding(next_resume) != first_resume_fence
+    assert job_binding(next_resume) == first_resume_fence
+    assert coding_lifecycle.implementation_intent_hash(next_resume) != (
+        coding_lifecycle.implementation_intent_hash(reopened)
+    )
 
 
 def test_disposable_start_partial_resume_closes_exact_successor(
@@ -732,9 +736,14 @@ def test_disposable_start_partial_resume_closes_exact_successor(
             "todo_id": todo_id,
             "todo_agent": "codex",
             "worktree": str(worktree),
-            "plan_binding": binding,
-            "coding_lifecycle": kwargs["lifecycle_job_binding"],
-        }
+                "plan_binding": binding,
+                "coding_lifecycle": kwargs["lifecycle_job_binding"],
+                **(
+                    {"implementation_intent_hash": kwargs["lifecycle_intent_hash"]}
+                    if kwargs.get("lifecycle_intent_hash") is not None
+                    else {}
+                ),
+            }
         if kwargs.get("resume_only"):
             observed = coding_cli.classify(
                 worktree,
@@ -911,7 +920,7 @@ def test_disposable_start_partial_resume_closes_exact_successor(
     assert resumed["lifecycle_state"] == "WAITING"
     reopened = store.find(1915)
     assert reopened is not None
-    assert job_binding(reopened) != first_fence
+    assert job_binding(reopened) == first_fence
 
     waiting = coding_cli.supervise(
         started["root_id"], config_path=tmp_path / "coding.json"
@@ -962,13 +971,16 @@ def test_disposable_start_partial_resume_closes_exact_successor(
     resumed_again = coding_cli.resume(1915, config_path=tmp_path / "coding.json")
     assert "resume_reused" not in resumed_again
     assert resumed_again["resume_intent_hash"] != resumed["resume_intent_hash"]
-    assert job_binding(store.find(1915)) != second_fence
+    assert job_binding(store.find(1915)) == second_fence
     waiting = coding_cli.supervise(
         started["root_id"], config_path=tmp_path / "coding.json"
     )
     assert (waiting["state"], waiting["stage"]) == ("WAITING", "implementation")
     third_job = rows[2]
-    assert third_job["payload_json"]["coding_lifecycle"] != second_fence
+    assert third_job["payload_json"]["coding_lifecycle"] == second_fence
+    assert third_job["payload_json"]["implementation_intent_hash"] != (
+        second_job["payload_json"]["implementation_intent_hash"]
+    )
 
     def close_successor(_treatment, _payload, selected_worktree):
         subprocess.run(
@@ -1082,7 +1094,7 @@ def test_controller_finding_automatically_starts_one_fenced_remediation_generati
     assert observed["remediation_intent"]["candidate_commit"] == "e" * 40
     assert "resume_intent" not in observed
     assert observed["remediation_history"][0]["resume_intent"] == resume_intent
-    assert job_binding(observed) != original_fence
+    assert job_binding(observed) == original_fence
 
 
 @pytest.mark.parametrize("remediation_rounds", [1, 2, 3])
@@ -1166,9 +1178,7 @@ def test_review_failures_auto_remediate_with_stable_generation_binding(
     assert observed["state"] == "TECHNICALLY_COMPLETE"
     assert len(observed["remediation_history"]) == remediation_rounds
     assert implementation_calls == remediation_rounds + 1
-    assert len({item["job_binding_hash"] for item in generation_fences}) == (
-        remediation_rounds
-    )
+    assert len({item["job_binding_hash"] for item in generation_fences}) == 1
     assert carried_findings == [
         [
             {
@@ -1190,20 +1200,29 @@ def test_review_failures_auto_remediate_with_stable_generation_binding(
 def test_review_remediation_stops_after_maximum_rounds(tmp_path: Path) -> None:
     store = store_at(tmp_path / "journal")
     record = new(store)
+    stable_binding = job_binding(record)
     review_calls = 0
+    intent_hashes = []
 
     def satisfied(stage):
-        return lambda current: stage_result(
-            current,
-            stage,
-            "satisfied",
-            receipt={"stage": stage},
-            job_ids=(
-                [f"implementation-{len(current.get('remediation_history', []))}"]
-                if stage == "implementation"
-                else []
-            ),
-        )
+        def result(current):
+            assert job_binding(current) == stable_binding
+            if stage == "implementation" and current.get("remediation_intent"):
+                intent_hashes.append(
+                    coding_lifecycle.implementation_intent_hash(current)
+                )
+            return stage_result(
+                current,
+                stage,
+                "satisfied",
+                receipt={"stage": stage},
+                job_ids=(
+                    [f"implementation-{len(current.get('remediation_history', []))}"]
+                    if stage == "implementation"
+                    else []
+                ),
+            )
+        return result
 
     def review(current):
         nonlocal review_calls
@@ -1226,6 +1245,9 @@ def test_review_remediation_stops_after_maximum_rounds(tmp_path: Path) -> None:
     assert observed["state"] == "REMEDIATION_REQUIRED"
     assert observed["stage"] == "review"
     assert len(observed["remediation_history"]) == 3
+    assert job_binding(observed) == stable_binding
+    assert len(intent_hashes) == 3
+    assert len(set(intent_hashes)) == 3
     assert review_calls == 4
     assert observed["failure"]["reason"] == "diagnostic findings remain"
 

@@ -1313,6 +1313,7 @@ def test_lifecycle_rebind_dispatches_new_fenced_recovery_for_closed_candidate():
                 coding_config={"worktree_root": "/tmp"},
                 treatments=(CODEX_IMPLEMENT,),
                 lifecycle_bindings={1915: lifecycle},
+                lifecycle_intent_bindings={1915: "sha256:" + "7" * 64},
                 lifecycle_rebind={1915: "codex-implement"},
             ),
             todo_ids={1915},
@@ -1326,9 +1327,10 @@ def test_lifecycle_rebind_dispatches_new_fenced_recovery_for_closed_candidate():
     assert result.dispatched == 1
     payload = enqueue.call_args.kwargs["payload"]
     assert payload["coding_lifecycle"] == lifecycle
+    assert payload["implementation_intent_hash"] == "sha256:" + "7" * 64
     assert payload["treatment_id"] == "codex-implement"
     assert enqueue.call_args.kwargs["dedupe_key"].endswith(
-        ":lifecycle:" + "9" * 64
+        ":lifecycle:" + "9" * 64 + ":intent:" + "7" * 64
     )
 
 

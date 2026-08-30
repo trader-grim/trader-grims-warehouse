@@ -75,8 +75,7 @@ def test_negative_review_receipt_tracks_each_remediation_generation(
     for generation in range(1, failure_rounds + 1):
         fence = {
             **stable,
-            "resume_intent_hash": "sha256:" + str(generation) * 64,
-            "job_binding_hash": "sha256:" + str(generation + 3) * 64,
+            "job_binding_hash": "sha256:" + "4" * 64,
         }
         receipt = {
             "status": "FAIL",
@@ -85,6 +84,7 @@ def test_negative_review_receipt_tracks_each_remediation_generation(
             "object_id": str(tmp_path),
             "plan_binding": plan,
             "coding_lifecycle": fence,
+            "implementation_intent_hash": "sha256:" + str(generation) * 64,
             "artifacts": [{"generation": generation}],
         }
         _write_receipt(path, receipt)

@@ -24,7 +24,7 @@ from typing import Any, Callable, Mapping
 
 SCHEMA = "tgw-local-coding-lifecycle/v2"
 BINDING_SCHEMA = "tgw-local-coding-lifecycle-binding/v2"
-JOB_BINDING_SCHEMA = "tgw-local-coding-lifecycle-job-binding/v2"
+JOB_BINDING_SCHEMA = "tgw-local-coding-lifecycle-job-binding/v3"
 STAGES = (
     "implementation",
     "controller",
@@ -201,22 +201,22 @@ def job_binding(record: Mapping[str, Any]) -> dict[str, Any]:
         "execution_root_identity": binding["execution_root_identity"],
         "card_idempotency_key": binding["card_idempotency_key"],
         "closure_hash": binding["closure_hash"],
-        # This is a generation fence, despite the legacy field name in the
-        # queue contract.  Do not infer it from one-shot intent fields: those
-        # are deliberately consumed after dispatch, while controller/review
-        # jobs must retain the implementation generation's exact binding.
-        "resume_intent_hash": (
-            record.get("implementation_generation_intent_hash")
-            # Compatibility for journals created before the stable field was
-            # introduced.  Active is authoritative once dispatch consumed
-            # the one-shot request; all three values identify the same
-            # generation at their respective transition boundary.
-            or record.get("active_implementation_generation", {}).get("intent_hash")
-            or record.get("remediation_intent", {}).get("remediation_intent_hash")
-            or record.get("resume_intent", {}).get("resume_intent_hash")
-        ),
     }
     return {**unsigned, "job_binding_hash": _hash(unsigned)}
+
+
+def implementation_intent_hash(record: Mapping[str, Any]) -> str | None:
+    """Return the transient implementation generation identity separately."""
+
+    value = (
+        record.get("implementation_generation_intent_hash")
+        or record.get("active_implementation_generation", {}).get("intent_hash")
+        or record.get("remediation_intent", {}).get("remediation_intent_hash")
+        or record.get("resume_intent", {}).get("resume_intent_hash")
+    )
+    if value is not None and _SHA256.fullmatch(str(value)) is None:
+        raise LifecycleError("coding implementation intent hash is invalid")
+    return value
 
 
 def _bind_active_implementation_generation(
@@ -304,7 +304,6 @@ def validate_job_binding_payload(
             "execution_root_identity",
             "card_idempotency_key",
             "closure_hash",
-            "resume_intent_hash",
             "job_binding_hash",
         }
         or result.get("schema") != JOB_BINDING_SCHEMA
@@ -316,10 +315,6 @@ def validate_job_binding_payload(
         != plan_binding.get("execution_root", {}).get("identity_hash")
         or result.get("card_idempotency_key") != plan_binding.get("idempotency_key")
         or result.get("closure_hash") != plan_binding.get("closure_hash")
-        or (
-            result.get("resume_intent_hash") is not None
-            and _SHA256.fullmatch(str(result.get("resume_intent_hash"))) is None
-        )
     ):
         raise LifecycleError("coding job lifecycle binding is malformed or stale")
     return result
