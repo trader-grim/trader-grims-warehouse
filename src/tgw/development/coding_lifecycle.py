@@ -201,17 +201,19 @@ def job_binding(record: Mapping[str, Any]) -> dict[str, Any]:
         "execution_root_identity": binding["execution_root_identity"],
         "card_idempotency_key": binding["card_idempotency_key"],
         "closure_hash": binding["closure_hash"],
-        # A remediation generation supersedes an earlier resume generation.
-        # Prefer its hash even when old journals still carry the archived
-        # resume intent so queue deduplication cannot reuse a terminal resume.
+        # This is a generation fence, despite the legacy field name in the
+        # queue contract.  Do not infer it from one-shot intent fields: those
+        # are deliberately consumed after dispatch, while controller/review
+        # jobs must retain the implementation generation's exact binding.
         "resume_intent_hash": (
-            record.get("remediation_intent", {}).get(
-                "remediation_intent_hash"
-            )
+            record.get("implementation_generation_intent_hash")
+            # Compatibility for journals created before the stable field was
+            # introduced.  Active is authoritative once dispatch consumed
+            # the one-shot request; all three values identify the same
+            # generation at their respective transition boundary.
+            or record.get("active_implementation_generation", {}).get("intent_hash")
+            or record.get("remediation_intent", {}).get("remediation_intent_hash")
             or record.get("resume_intent", {}).get("resume_intent_hash")
-            or record.get("active_implementation_generation", {}).get(
-                "intent_hash"
-            )
         ),
     }
     return {**unsigned, "job_binding_hash": _hash(unsigned)}
@@ -250,6 +252,10 @@ def _bind_active_implementation_generation(
     if _SHA256.fullmatch(str(intent_hash or "")) is None:
         raise LifecycleError("coding implementation intent hash is invalid")
     before = job_binding(record)
+    stable_hash = record.get("implementation_generation_intent_hash")
+    if stable_hash is not None and stable_hash != intent_hash:
+        raise LifecycleError("coding implementation generation fence is stale")
+    record["implementation_generation_intent_hash"] = intent_hash
     active = {
         "schema": "tgw-local-coding-active-implementation-generation/v1",
         "kind": kind,
@@ -878,6 +884,9 @@ def _begin_bounded_remediation(
         **intent,
         "remediation_intent_hash": _hash(intent),
     }
+    record["implementation_generation_intent_hash"] = record[
+        "remediation_intent"
+    ]["remediation_intent_hash"]
     # The resume generation is preserved in the history above.  It must not
     # remain live beside remediation because implementation dispatch treats a
     # live resume intent as resume-only work.
@@ -1133,6 +1142,9 @@ def request_resume(
             **intent,
             "resume_intent_hash": _hash(intent),
         }
+        record["implementation_generation_intent_hash"] = record[
+            "resume_intent"
+        ]["resume_intent_hash"]
         record.pop("active_implementation_generation", None)
         record["stages"] = {}
         record["effects"] = {}

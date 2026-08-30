@@ -24,6 +24,7 @@ from tgw.development.coding_lifecycle import (
     record_operator_readback,
     request_resume,
     stage_result,
+    validate_job_binding,
     validate_job_binding_payload,
 )
 from tgw.development.coding_review import (
@@ -1081,6 +1082,137 @@ def test_controller_finding_automatically_starts_one_fenced_remediation_generati
     assert "resume_intent" not in observed
     assert observed["remediation_history"][0]["resume_intent"] == resume_intent
     assert job_binding(observed) != original_fence
+
+
+@pytest.mark.parametrize("remediation_rounds", [1, 2, 3])
+def test_review_failures_auto_remediate_with_stable_generation_binding(
+    tmp_path: Path, remediation_rounds: int
+) -> None:
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+    review_calls = 0
+    implementation_calls = 0
+    generation_fences: list[dict] = []
+    carried_findings: list[list[dict]] = []
+
+    def implementation(current):
+        nonlocal implementation_calls
+        implementation_calls += 1
+        result = stage_result(
+            current,
+            "implementation",
+            "satisfied",
+            receipt={"generation": implementation_calls},
+            job_ids=[f"implementation-{implementation_calls}"],
+        )
+        if current.get("remediation_intent") is not None:
+            carried_findings.append(
+                current["remediation_intent"]["diagnostic_findings"]
+            )
+            carried = job_binding(current)
+            consumed = dict(current)
+            coding_lifecycle._bind_active_implementation_generation(consumed, result)
+            validate_job_binding(consumed, carried)
+            generation_fences.append(carried)
+        return result
+
+    def satisfied(stage):
+        return lambda current: stage_result(
+            current, stage, "satisfied", receipt={"stage": stage}
+        )
+
+    def review(current):
+        nonlocal review_calls
+        review_calls += 1
+        if review_calls > remediation_rounds:
+            return stage_result(
+                current, "review", "satisfied", receipt={"verdict": "PASS"}
+            )
+        finding = {
+            "severity": "high",
+            "message": f"review finding round {review_calls}",
+        }
+        return stage_result(
+            current,
+            "review",
+            "remediation",
+            receipt={
+                "candidate": {"head": "e" * 40, "tree": "f" * 40},
+                "findings": [finding],
+            },
+            reason=finding["message"],
+            job_ids=[f"review-{review_calls}"],
+        )
+
+    handlers = {stage: satisfied(stage) for stage in STAGES}
+    handlers.update({"implementation": implementation, "review": review})
+    observed = advance(store, record["root_id"], handlers)
+
+    assert observed["state"] == "TECHNICALLY_COMPLETE"
+    assert len(observed["remediation_history"]) == remediation_rounds
+    assert implementation_calls == remediation_rounds + 1
+    assert len({item["job_binding_hash"] for item in generation_fences}) == (
+        remediation_rounds
+    )
+    assert carried_findings == [
+        [
+            {
+                "severity": "high",
+                "message": f"review finding round {index}",
+            }
+        ]
+        for index in range(1, remediation_rounds + 1)
+    ]
+    for index, archived in enumerate(observed["remediation_history"], start=1):
+        assert archived["failure_result"]["receipt"]["findings"] == [
+            {
+                "severity": "high",
+                "message": f"review finding round {index}",
+            }
+        ]
+
+
+def test_review_remediation_stops_after_maximum_rounds(tmp_path: Path) -> None:
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+    review_calls = 0
+
+    def satisfied(stage):
+        return lambda current: stage_result(
+            current,
+            stage,
+            "satisfied",
+            receipt={"stage": stage},
+            job_ids=(
+                [f"implementation-{len(current.get('remediation_history', []))}"]
+                if stage == "implementation"
+                else []
+            ),
+        )
+
+    def review(current):
+        nonlocal review_calls
+        review_calls += 1
+        return stage_result(
+            current,
+            "review",
+            "remediation",
+            receipt={
+                "candidate": {"head": "e" * 40, "tree": "f" * 40},
+                "findings": [{"message": f"still failing {review_calls}"}],
+            },
+            reason="diagnostic findings remain",
+        )
+
+    handlers = {stage: satisfied(stage) for stage in STAGES}
+    handlers["review"] = review
+    observed = advance(store, record["root_id"], handlers)
+
+    assert observed["state"] == "REMEDIATION_REQUIRED"
+    assert observed["stage"] == "review"
+    assert len(observed["remediation_history"]) == 3
+    assert review_calls == 4
+    assert observed["failure"]["reason"] == "diagnostic findings remain"
 
 
 def test_resume_recovers_worker_completed_crash_boundary_with_new_fenced_job(
