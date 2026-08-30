@@ -23,6 +23,7 @@ from tgw.queue.worker_base import HardFailure
 from tgw.workers.coding import (
     CodingWorker,
     _run_bounded_process_group,
+    _write_receipt,
     receipt_path_for_treatment,
 )
 from tgw.workflow_kernel.contracts import (
@@ -54,6 +55,40 @@ def _git_worktree(path: Path) -> None:
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
     subprocess.run(["git", "commit", "--allow-empty", "-m", "initial"], cwd=path, check=True, capture_output=True)
+
+
+@pytest.mark.parametrize("failure_rounds", [2, 3])
+def test_negative_review_receipt_tracks_each_remediation_generation(
+    tmp_path: Path, failure_rounds: int
+) -> None:
+    path = tmp_path / "review-receipt.json"
+    stable = {
+        "root_id": "root-" + "1" * 32,
+        "binding_hash": "sha256:" + "2" * 64,
+        "plan_binding_hash": "sha256:" + "3" * 64,
+        "execution_root_identity": "sha256:" + "4" * 64,
+        "card_idempotency_key": "sha256:" + "5" * 64,
+        "closure_hash": "sha256:" + "6" * 64,
+    }
+    plan = {"todo_id": 1929}
+
+    for generation in range(1, failure_rounds + 1):
+        fence = {
+            **stable,
+            "resume_intent_hash": "sha256:" + str(generation) * 64,
+            "job_binding_hash": "sha256:" + str(generation + 3) * 64,
+        }
+        receipt = {
+            "status": "FAIL",
+            "outcome": "failed",
+            "treatment_id": "claude-review",
+            "object_id": str(tmp_path),
+            "plan_binding": plan,
+            "coding_lifecycle": fence,
+            "artifacts": [{"generation": generation}],
+        }
+        _write_receipt(path, receipt)
+        assert json.loads(path.read_text()) == receipt
 
 
 def _install_controller_lineage(

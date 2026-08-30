@@ -473,6 +473,53 @@ def _archive_prior_implementation_receipt(
     return True
 
 
+def _replace_prior_lifecycle_negative_receipt(
+    path: Path, *, receipt: dict[str, Any]
+) -> bool:
+    """Allow the fixed receipt projection to follow a new lifecycle generation."""
+
+    try:
+        existing = json.loads(_regular_file_bytes(path))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HardFailure("prior coding receipt is unreadable") from exc
+    if not isinstance(existing, dict):
+        raise HardFailure("prior coding receipt is malformed")
+    old_lifecycle = existing.get("coding_lifecycle")
+    new_lifecycle = receipt.get("coding_lifecycle")
+    stable_fence_fields = (
+        "root_id",
+        "binding_hash",
+        "plan_binding_hash",
+        "execution_root_identity",
+        "card_idempotency_key",
+        "closure_hash",
+    )
+    if (
+        existing.get("status") != "FAIL"
+        or receipt.get("status") != "FAIL"
+        or existing.get("outcome") != OUTCOME_FAILED
+        or receipt.get("outcome") != OUTCOME_FAILED
+        or existing.get("treatment_id") != receipt.get("treatment_id")
+        or existing.get("plan_binding") != receipt.get("plan_binding")
+        or existing.get("object_id") != receipt.get("object_id")
+        or not isinstance(old_lifecycle, dict)
+        or not isinstance(new_lifecycle, dict)
+        or any(
+            old_lifecycle.get(field) != new_lifecycle.get(field)
+            for field in stable_fence_fields
+        )
+    ):
+        raise HardFailure(
+            "prior coding receipt does not bind the archived lifecycle generation"
+        )
+    return (
+        old_lifecycle.get("resume_intent_hash")
+        != new_lifecycle.get("resume_intent_hash")
+        and old_lifecycle.get("job_binding_hash")
+        != new_lifecycle.get("job_binding_hash")
+    )
+
+
 def _write_receipt(
     path: Path,
     receipt: dict[str, Any],
@@ -481,16 +528,18 @@ def _write_receipt(
 ) -> None:
     """Atomically persist a worktree receipt for the snapshot reader."""
     if path.exists() and receipt.get("outcome") != OUTCOME_SATISFIED:
-        if (
-            receipt.get("treatment_id") != "codex-implement"
-            or predecessor is None
-        ):
+        if receipt.get("treatment_id") == "codex-implement" and predecessor is not None:
+            replace_prior = _archive_prior_implementation_receipt(
+                path,
+                receipt=receipt,
+                predecessor=predecessor,
+            )
+        elif receipt.get("coding_lifecycle") is not None:
+            replace_prior = _replace_prior_lifecycle_negative_receipt(
+                path, receipt=receipt
+            )
+        else:
             return
-        replace_prior = _archive_prior_implementation_receipt(
-            path,
-            receipt=receipt,
-            predecessor=predecessor,
-        )
         if not replace_prior:
             return
     descriptor, temporary_text = tempfile.mkstemp(

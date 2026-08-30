@@ -46,6 +46,7 @@ from tgw.development.local_workflow import LocalCodingWorkflowError, load_config
 from tgw.development.plan_binding import execution_root_hash
 from tgw.protected_git import read_exact_tree_file, write_exact_tree_archive
 from tgw.review_contract import ReviewRunnerError
+from tgw.workers.coding import _write_receipt
 
 
 def canonical(value):
@@ -1132,6 +1133,20 @@ def test_review_failures_auto_remediate_with_stable_generation_binding(
             "severity": "high",
             "message": f"review finding round {review_calls}",
         }
+        receipt_path = tmp_path / "review-receipt.json"
+        failed_receipt = {
+            "status": "FAIL",
+            "outcome": "failed",
+            "treatment_id": "claude-review",
+            "object_id": current["binding"]["worktree"],
+            "plan_binding": current["binding"]["plan_todo_binding"],
+            "coding_lifecycle": job_binding(current),
+            "artifacts": [{"findings": [finding]}],
+        }
+        _write_receipt(receipt_path, failed_receipt)
+        validate_job_binding(
+            current, json.loads(receipt_path.read_text())["coding_lifecycle"]
+        )
         return stage_result(
             current,
             "review",
