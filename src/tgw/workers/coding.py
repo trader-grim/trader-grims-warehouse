@@ -965,6 +965,7 @@ class CodingWorker(QueueWorker):
             try:
                 from tgw.development.coding_lifecycle import (
                     LifecycleError,
+                    validate_implementation_intent_payload,
                     validate_job_binding_payload,
                 )
 
@@ -972,11 +973,10 @@ class CodingWorker(QueueWorker):
                     lifecycle_binding,
                     plan_binding=plan_binding,
                 )
-                intent_hash = payload.get("implementation_intent_hash")
-                if intent_hash is not None and re.fullmatch(
-                    r"sha256:[0-9a-f]{64}", str(intent_hash)
-                ) is None:
-                    raise LifecycleError("coding implementation intent hash is invalid")
+                validate_implementation_intent_payload(
+                    payload.get("implementation_intent"),
+                    claimed_hash=payload.get("implementation_intent_hash"),
+                )
                 if treatment_id == "claude-review":
                     from tgw.development.coding_lifecycle import (
                         validate_candidate_job_binding,

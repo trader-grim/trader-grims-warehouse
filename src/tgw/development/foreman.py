@@ -105,6 +105,9 @@ class ForemanConfig:
     # binding so each remediation can supersede its predecessor without
     # invalidating controller/review jobs carried by the same root.
     lifecycle_intent_bindings: dict[int, str] = field(default_factory=dict)
+    lifecycle_implementation_intents: dict[int, dict[str, Any]] = field(
+        default_factory=dict
+    )
     # An exact root at its implementation stage may need a new fenced recovery
     # receipt for an already-closed candidate.  This never means reimplement:
     # the existing typed worker validates/re-emits the immutable lineage.
@@ -829,6 +832,15 @@ def tick(
                 **(
                     {"implementation_intent_hash": cfg.lifecycle_intent_bindings[chosen.todo.todo_id]}
                     if chosen.todo.todo_id in cfg.lifecycle_intent_bindings
+                    else {}
+                ),
+                **(
+                    {
+                        "implementation_intent": cfg.lifecycle_implementation_intents[
+                            chosen.todo.todo_id
+                        ]
+                    }
+                    if chosen.todo.todo_id in cfg.lifecycle_implementation_intents
                     else {}
                 ),
             }

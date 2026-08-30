@@ -300,6 +300,7 @@ def start(
     resume_only: bool = False,
     lifecycle_job_binding: Mapping[str, Any] | None = None,
     lifecycle_intent_hash: str | None = None,
+    lifecycle_implementation_intent: Mapping[str, Any] | None = None,
     lifecycle_remediation: Mapping[str, Any] | None = None,
     lifecycle_stage: str | None = None,
     dispatch_jobs: bool = True,
@@ -516,6 +517,11 @@ def start(
             lifecycle_intent_bindings=(
                 {todo_id: lifecycle_intent_hash}
                 if lifecycle_intent_hash is not None
+                else {}
+            ),
+            lifecycle_implementation_intents=(
+                {todo_id: dict(lifecycle_implementation_intent)}
+                if lifecycle_implementation_intent is not None
                 else {}
             ),
             lifecycle_rebind=(
@@ -1323,6 +1329,13 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
                 source_commit=record["binding"]["source_commit"],
                 lifecycle_job_binding=coding_lifecycle.job_binding(record),
                 lifecycle_intent_hash=coding_lifecycle.implementation_intent_hash(record),
+                lifecycle_implementation_intent=(
+                    remediation_intent
+                    if isinstance(remediation_intent, Mapping)
+                    else resume_intent
+                    if isinstance(resume_intent, Mapping)
+                    else None
+                ),
                 lifecycle_remediation=(
                     remediation_intent
                     if isinstance(remediation_intent, Mapping)
@@ -1345,6 +1358,7 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
                 source_commit=record["binding"]["source_commit"],
                 lifecycle_job_binding=coding_lifecycle.job_binding(record),
                 lifecycle_intent_hash=coding_lifecycle.implementation_intent_hash(record),
+                lifecycle_implementation_intent=coding_lifecycle.implementation_intent(record),
                 lifecycle_stage="controller",
             ),
         )
@@ -1471,6 +1485,11 @@ def supervise(identity: str, *, config_path: Path | str = DEFAULT_CONFIG) -> dic
                         int(record["target"]): intent_hash
                         for intent_hash in [coding_lifecycle.implementation_intent_hash(record)]
                         if intent_hash is not None
+                    },
+                    lifecycle_implementation_intents={
+                        int(record["target"]): dict(intent)
+                        for intent in [coding_lifecycle.implementation_intent(record)]
+                        if intent is not None
                     },
                     lifecycle_rebind={
                         int(record["target"]): "claude-review"

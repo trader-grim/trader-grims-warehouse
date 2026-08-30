@@ -24,6 +24,7 @@ from tgw.development.coding_lifecycle import (
     record_operator_readback,
     request_resume,
     stage_result,
+    validate_implementation_intent_payload,
     validate_job_binding,
     validate_job_binding_payload,
 )
@@ -741,6 +742,15 @@ def test_disposable_start_partial_resume_closes_exact_successor(
                 **(
                     {"implementation_intent_hash": kwargs["lifecycle_intent_hash"]}
                     if kwargs.get("lifecycle_intent_hash") is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "implementation_intent": dict(
+                            kwargs["lifecycle_implementation_intent"]
+                        )
+                    }
+                    if kwargs.get("lifecycle_implementation_intent") is not None
                     else {}
                 ),
             }
@@ -2262,3 +2272,30 @@ def test_worker_job_binding_rejects_substitution(tmp_path: Path):
         validate_job_binding_payload(
             stale, plan_binding=record["binding"]["plan_todo_binding"]
         )
+
+
+@pytest.mark.parametrize(
+    ("schema", "hash_key"),
+    [
+        ("tgw-local-coding-remediation-intent/v1", "remediation_intent_hash"),
+        ("tgw-local-coding-lifecycle-resume-intent/v1", "resume_intent_hash"),
+    ],
+)
+def test_worker_effect_fence_requires_exact_typed_implementation_intent(
+    schema: str, hash_key: str
+):
+    unsigned = {"schema": schema, "generation": 2, "root_id": "root"}
+    intent_hash = coding_lifecycle._hash(unsigned)
+    intent = {**unsigned, hash_key: intent_hash}
+
+    assert validate_implementation_intent_payload(
+        intent, claimed_hash=intent_hash
+    ) == intent
+    with pytest.raises(LifecycleError, match="payload is absent"):
+        validate_implementation_intent_payload(None, claimed_hash=intent_hash)
+    with pytest.raises(LifecycleError, match="hash mismatch"):
+        validate_implementation_intent_payload(
+            intent, claimed_hash="sha256:" + "9" * 64
+        )
+    with pytest.raises(LifecycleError, match="absent or invalid"):
+        validate_implementation_intent_payload(intent, claimed_hash=None)

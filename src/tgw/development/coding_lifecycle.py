@@ -219,6 +219,47 @@ def implementation_intent_hash(record: Mapping[str, Any]) -> str | None:
     return value
 
 
+def implementation_intent(record: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Return the typed transient intent carried by this generation."""
+
+    active = record.get("active_implementation_generation")
+    if isinstance(active, Mapping) and isinstance(active.get("intent"), Mapping):
+        return active["intent"]
+    for key in ("remediation_intent", "resume_intent"):
+        value = record.get(key)
+        if isinstance(value, Mapping):
+            return value
+    return None
+
+
+def validate_implementation_intent_payload(
+    intent: object, *, claimed_hash: object
+) -> dict[str, Any] | None:
+    """Fence a queue-carried implementation generation before worker effects."""
+
+    if intent is None:
+        if claimed_hash is not None:
+            raise LifecycleError("coding implementation intent payload is absent")
+        return None
+    if not isinstance(intent, Mapping):
+        raise LifecycleError("coding implementation intent payload is malformed")
+    result = dict(intent)
+    schema = result.get("schema")
+    hash_key = {
+        "tgw-local-coding-remediation-intent/v1": "remediation_intent_hash",
+        "tgw-local-coding-lifecycle-resume-intent/v1": "resume_intent_hash",
+    }.get(schema)
+    if hash_key is None:
+        raise LifecycleError("coding implementation intent payload is malformed")
+    embedded_hash = result.get(hash_key)
+    if _SHA256.fullmatch(str(claimed_hash or "")) is None:
+        raise LifecycleError("coding implementation intent hash is absent or invalid")
+    unsigned = {key: value for key, value in result.items() if key != hash_key}
+    if embedded_hash != claimed_hash or embedded_hash != _hash(unsigned):
+        raise LifecycleError("coding implementation intent hash mismatch")
+    return result
+
+
 def _bind_active_implementation_generation(
     record: dict[str, Any], result: Mapping[str, Any]
 ) -> None:
