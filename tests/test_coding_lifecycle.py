@@ -2274,22 +2274,29 @@ def test_worker_job_binding_rejects_substitution(tmp_path: Path):
         )
 
 
-@pytest.mark.parametrize(
-    ("schema", "hash_key"),
-    [
-        ("tgw-local-coding-remediation-intent/v1", "remediation_intent_hash"),
-        ("tgw-local-coding-lifecycle-resume-intent/v1", "resume_intent_hash"),
-    ],
-)
 def test_worker_effect_fence_requires_exact_typed_implementation_intent(
-    schema: str, hash_key: str
+    tmp_path: Path,
 ):
-    unsigned = {"schema": schema, "generation": 2, "root_id": "root"}
+    record = new(store_at(tmp_path / "journal"))
+    lifecycle = job_binding(record)
+    unsigned = {
+        "schema": "tgw-local-coding-remediation-intent/v1",
+        "root_id": lifecycle["root_id"],
+        "binding_hash": lifecycle["binding_hash"],
+        "generation": 2,
+        "failed_stage": "review",
+        "failure_receipt_hash": "sha256:" + "3" * 64,
+        "reason": "diagnostic finding",
+        "candidate_commit": "4" * 40,
+        "candidate_tree": "5" * 40,
+        "requested_at": "2026-08-29T12:00:00+00:00",
+        "diagnostic_findings": [{"severity": "high", "message": "finding"}],
+    }
     intent_hash = coding_lifecycle._hash(unsigned)
-    intent = {**unsigned, hash_key: intent_hash}
+    intent = {**unsigned, "remediation_intent_hash": intent_hash}
 
     assert validate_implementation_intent_payload(
-        intent, claimed_hash=intent_hash
+        intent, claimed_hash=intent_hash, lifecycle_binding=lifecycle
     ) == intent
     with pytest.raises(LifecycleError, match="payload is absent"):
         validate_implementation_intent_payload(None, claimed_hash=intent_hash)
@@ -2299,3 +2306,40 @@ def test_worker_effect_fence_requires_exact_typed_implementation_intent(
         )
     with pytest.raises(LifecycleError, match="absent or invalid"):
         validate_implementation_intent_payload(intent, claimed_hash=None)
+
+    minimal = {"schema": unsigned["schema"], "generation": 2}
+    minimal_hash = coding_lifecycle._hash(minimal)
+    with pytest.raises(LifecycleError, match="incomplete or malformed"):
+        validate_implementation_intent_payload(
+            {**minimal, "remediation_intent_hash": minimal_hash},
+            claimed_hash=minimal_hash,
+            lifecycle_binding=lifecycle,
+        )
+
+    foreign_unsigned = {**unsigned, "root_id": "foreign-root"}
+    foreign_hash = coding_lifecycle._hash(foreign_unsigned)
+    with pytest.raises(LifecycleError, match="lifecycle identity mismatch"):
+        validate_implementation_intent_payload(
+            {**foreign_unsigned, "remediation_intent_hash": foreign_hash},
+            claimed_hash=foreign_hash,
+            lifecycle_binding=lifecycle,
+        )
+
+    resume_unsigned = {
+        "schema": "tgw-local-coding-lifecycle-resume-intent/v1",
+        "root_id": lifecycle["root_id"],
+        "binding_hash": lifecycle["binding_hash"],
+        "todo_id": int(record["target"]),
+        "resume_of": "sha256:" + "6" * 64,
+        "resume_fingerprint": "sha256:" + "7" * 64,
+        "worktree": record["binding"]["worktree"],
+        "source_commit": record["binding"]["source_commit"],
+        "source_tree": record["binding"]["source_tree"],
+        "generation": 1,
+        "requested_at": "2026-08-29T12:00:00+00:00",
+    }
+    resume_hash = coding_lifecycle._hash(resume_unsigned)
+    resume = {**resume_unsigned, "resume_intent_hash": resume_hash}
+    assert validate_implementation_intent_payload(
+        resume, claimed_hash=resume_hash, lifecycle_binding=lifecycle
+    ) == resume

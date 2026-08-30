@@ -233,7 +233,10 @@ def implementation_intent(record: Mapping[str, Any]) -> Mapping[str, Any] | None
 
 
 def validate_implementation_intent_payload(
-    intent: object, *, claimed_hash: object
+    intent: object,
+    *,
+    claimed_hash: object,
+    lifecycle_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Fence a queue-carried implementation generation before worker effects."""
 
@@ -245,18 +248,87 @@ def validate_implementation_intent_payload(
         raise LifecycleError("coding implementation intent payload is malformed")
     result = dict(intent)
     schema = result.get("schema")
-    hash_key = {
-        "tgw-local-coding-remediation-intent/v1": "remediation_intent_hash",
-        "tgw-local-coding-lifecycle-resume-intent/v1": "resume_intent_hash",
-    }.get(schema)
-    if hash_key is None:
+    specifications = {
+        "tgw-local-coding-remediation-intent/v1": (
+            "remediation_intent_hash",
+            {
+                "schema", "root_id", "binding_hash", "generation", "failed_stage",
+                "failure_receipt_hash", "reason", "candidate_commit", "candidate_tree",
+                "requested_at", "remediation_intent_hash",
+            },
+            {"diagnostic_findings"},
+        ),
+        "tgw-local-coding-lifecycle-resume-intent/v1": (
+            "resume_intent_hash",
+            {
+                "schema", "root_id", "binding_hash", "todo_id", "resume_of",
+                "resume_fingerprint", "worktree", "source_commit", "source_tree",
+                "generation", "requested_at", "resume_intent_hash",
+            },
+            set(),
+        ),
+    }
+    specification = specifications.get(schema)
+    if specification is None:
         raise LifecycleError("coding implementation intent payload is malformed")
+    hash_key, required, optional = specification
+    if not required.issubset(result) or not set(result).issubset(required | optional):
+        raise LifecycleError("coding implementation intent payload is incomplete or malformed")
+    if (
+        not isinstance(result.get("generation"), int)
+        or isinstance(result.get("generation"), bool)
+        or result["generation"] < 1
+        or not isinstance(result.get("requested_at"), str)
+        or not result["requested_at"]
+        or _SHA256.fullmatch(str(result.get("binding_hash", ""))) is None
+        or not isinstance(result.get("root_id"), str)
+        or not result["root_id"]
+    ):
+        raise LifecycleError("coding implementation intent payload is incomplete or malformed")
+    if schema == "tgw-local-coding-remediation-intent/v1" and (
+        result.get("failed_stage") not in {"controller", "review"}
+        or _SHA256.fullmatch(str(result.get("failure_receipt_hash", ""))) is None
+        or _COMMIT.fullmatch(str(result.get("candidate_commit", ""))) is None
+        or _COMMIT.fullmatch(str(result.get("candidate_tree", ""))) is None
+        or not isinstance(result.get("reason"), str)
+        or not result["reason"]
+        or (
+            "diagnostic_findings" in result
+            and (
+                not isinstance(result["diagnostic_findings"], list)
+                or not result["diagnostic_findings"]
+                or not all(isinstance(item, Mapping) for item in result["diagnostic_findings"])
+            )
+        )
+    ):
+        raise LifecycleError("coding implementation intent payload is incomplete or malformed")
+    if schema == "tgw-local-coding-lifecycle-resume-intent/v1" and (
+        not isinstance(result.get("todo_id"), int)
+        or isinstance(result.get("todo_id"), bool)
+        or _SHA256.fullmatch(str(result.get("resume_of", ""))) is None
+        or _SHA256.fullmatch(str(result.get("resume_fingerprint", ""))) is None
+        or not all(
+            isinstance(result.get(key), str) and bool(result[key])
+            for key in ("worktree", "source_commit", "source_tree")
+        )
+        or _COMMIT.fullmatch(result["source_commit"]) is None
+        or _COMMIT.fullmatch(result["source_tree"]) is None
+    ):
+        raise LifecycleError("coding implementation intent payload is incomplete or malformed")
     embedded_hash = result.get(hash_key)
     if _SHA256.fullmatch(str(claimed_hash or "")) is None:
         raise LifecycleError("coding implementation intent hash is absent or invalid")
     unsigned = {key: value for key, value in result.items() if key != hash_key}
     if embedded_hash != claimed_hash or embedded_hash != _hash(unsigned):
         raise LifecycleError("coding implementation intent hash mismatch")
+    if lifecycle_binding is not None:
+        if not isinstance(lifecycle_binding, Mapping):
+            raise LifecycleError("coding implementation intent lifecycle binding is malformed")
+        if (
+            result["root_id"] != lifecycle_binding.get("root_id")
+            or result["binding_hash"] != lifecycle_binding.get("binding_hash")
+        ):
+            raise LifecycleError("coding implementation intent lifecycle identity mismatch")
     return result
 
 

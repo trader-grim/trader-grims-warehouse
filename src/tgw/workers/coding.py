@@ -976,6 +976,7 @@ class CodingWorker(QueueWorker):
                 validate_implementation_intent_payload(
                     payload.get("implementation_intent"),
                     claimed_hash=payload.get("implementation_intent_hash"),
+                    lifecycle_binding=lifecycle_binding,
                 )
                 if treatment_id == "claude-review":
                     from tgw.development.coding_lifecycle import (
