@@ -3736,13 +3736,41 @@ def _actor_path_access_flags(
             "-x": os.X_OK,
         }
         return all(os.access(path, mask[flag]) for flag in flags)
-    return all(
-        _run(
-            ["sudo", "-n", "-u", actor, "/usr/bin/test", flag, str(path)]
-        ).returncode
-        == 0
-        for flag in flags
+    # Any-actor model: every coding principal shares the tgw-coders group.
+    # A per-actor sudo probe would require a sudoers entry for each actor,
+    # which the role migration deliberately removed (codex ALL=(ALL:ALL)
+    # deleted 2026-08-31).  The correct invariant is: the actor is a
+    # tgw-coders member, and the path grants the requested access to the
+    # tgw-coders group (no symlink; group bits as asked).
+    try:
+        record = pwd.getpwnam(actor)
+        group = grp.getgrnam(_CODING_RUNTIME_GROUP)
+    except KeyError as exc:
+        raise DoctorError(f"Unix access probe actor is unavailable: {actor}") from exc
+    try:
+        observed = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        return False
+    if stat.S_ISLNK(observed.st_mode):
+        return False
+    mode = stat.S_IMODE(observed.st_mode)
+    # Owner bits apply when the actor owns the path (e.g. db owns the
+    # root-effect root 2750 and accesses it as owner, not via the group);
+    # otherwise the tgw-coders group bits apply (any-actor shared surface).
+    use_owner = observed.st_uid == record.pw_uid
+    read_bit, write_bit, exec_bit = (
+        (stat.S_IRUSR, stat.S_IWUSR, stat.S_IXUSR)
+        if use_owner
+        else (stat.S_IRGRP, stat.S_IWGRP, stat.S_IXGRP)
     )
+    required = 0
+    if "-r" in flags:
+        required |= read_bit
+    if "-w" in flags:
+        required |= write_bit
+    if "-x" in flags:
+        required |= exec_bit
+    return mode & required == required
 
 
 _ACTIVE_CODING_WORKTREES_SQL = """
