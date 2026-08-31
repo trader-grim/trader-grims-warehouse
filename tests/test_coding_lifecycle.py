@@ -1107,6 +1107,62 @@ def test_controller_finding_automatically_starts_one_fenced_remediation_generati
     assert job_binding(observed) == original_fence
 
 
+def test_implementation_failure_auto_rebinds_bounded(tmp_path: Path) -> None:
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+    implementation_calls = 0
+
+    def implementation(current):
+        nonlocal implementation_calls
+        implementation_calls += 1
+        return stage_result(
+            current,
+            "implementation",
+            "failed",
+            reason="worker dead-lettered with no candidate",
+        )
+
+    observed = advance(
+        store,
+        record["root_id"],
+        {"implementation": implementation},
+    )
+
+    # Third failed implementation exhausts the budget and goes FAILED.
+    assert observed["state"] == "FAILED"
+    assert observed["stage"] == "implementation"
+    assert observed["auto_rebind_count"] == 2
+    assert len(observed["remediation_history"]) == 2
+    assert observed["remediation_history"][0]["kind"] == "auto_rebind"
+    assert observed["remediation_history"][0]["generation"] == 1
+    assert observed["remediation_history"][1]["generation"] == 2
+    assert "budget" in observed["failure"]["reason"] or observed["failure"]["reason"] == "worker dead-lettered with no candidate"
+    # The implementation handler ran three times: initial + two auto-rebinds.
+    assert implementation_calls == 3
+
+
+def test_remediation_outcome_never_auto_rebinds(tmp_path: Path) -> None:
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+
+    def implementation(current):
+        return stage_result(
+            current,
+            "implementation",
+            "remediation",
+            reason="resumable partial requires exact operator resume",
+        )
+
+    observed = advance(
+        store,
+        record["root_id"],
+        {"implementation": implementation},
+    )
+
+    assert observed["state"] == "REMEDIATION_REQUIRED"
+    assert observed.get("auto_rebind_count") in (None, 0)
+
+
 @pytest.mark.parametrize("remediation_rounds", [1, 2, 3])
 def test_review_failures_auto_remediate_with_stable_generation_binding(
     tmp_path: Path, remediation_rounds: int

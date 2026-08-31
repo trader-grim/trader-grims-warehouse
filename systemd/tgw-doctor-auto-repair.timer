@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the TGW bounded Doctor auto-repair supervisor
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=300s
+AccuracySec=30s
+Persistent=true
+Unit=tgw-doctor-auto-repair.service
+
+[Install]
+WantedBy=timers.target

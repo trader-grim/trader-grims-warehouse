@@ -12772,6 +12772,62 @@ _REPAIR_POSTCONDITIONS: dict[str, tuple[str, ...]] = {
     "obsolete-surfaces": ("cleanup.obsolete-active-surfaces",),
 }
 
+# Checks that may be auto-repaired by the bounded Doctor supervisor.  Each maps
+# a diagnostic check id to the exact _REPAIRS area it restores.  Checks outside
+# this set (context.clients RESTART_REQUIRED, source.canonical, host.boundary,
+# context.snapshot review-evidence probes, git.worktrees, peer-auth) are never
+# auto-repaired: they require operator or fresh-session action and are surfaced
+# as notices only.
+_AUTO_REPAIRABLE_CHECKS: dict[str, str] = {
+    "context.snapshot": "context",
+    "context.launcher": "context-launcher",
+    "runtime.local-coding": "runtime",
+    "database.local-coding": "database",
+    "access.unix-group": "unix-git-access",
+    "services.local-coding": "workers",
+    "services.plan-render": "plan-render-worker",
+    "cleanup.obsolete-active-surfaces": "obsolete-surfaces",
+}
+
+
+def auto_repair_decision(
+    checks: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Classify one Doctor diagnosis into repairable areas vs operator notices.
+
+    Pure decision function: it never invokes a repair.  Only a FAIL check whose
+    id is in _AUTO_REPAIRABLE_CHECKS becomes a repairable area; every other
+    non-PASS check (WARN/UNKNOWN/RESTART_REQUIRED/FAIL outside the whitelist)
+    is an operator notice that must not be auto-repaired.
+    """
+    repairable: dict[str, list[str]] = {}
+    notices: list[dict[str, Any]] = []
+    for check in checks:
+        if not isinstance(check, Mapping):
+            continue
+        check_id = check.get("id")
+        state = check.get("state")
+        if state == "FAIL" and check_id in _AUTO_REPAIRABLE_CHECKS:
+            area = _AUTO_REPAIRABLE_CHECKS[check_id]
+            repairable.setdefault(area, []).append(str(check_id))
+            continue
+        if state in {"WARN", "UNKNOWN", "RESTART_REQUIRED", "FAIL"}:
+            notices.append(
+                {
+                    "id": check_id,
+                    "state": state,
+                    "detail": str(check.get("detail", ""))[:400],
+                }
+            )
+    return {
+        "schema": "tgw-doctor-auto-repair-decision/v1",
+        "repairable": repairable,
+        "operator_notices": notices,
+        "repair_allowed": bool(repairable) and not any(
+            item["state"] == "FAIL" for item in notices
+        ),
+    }
+
 
 def repair(
     operation: str,
@@ -12919,6 +12975,95 @@ def repair(
         "target_postconditions": target_postconditions,
         "results": [result],
         "diagnosis": diagnosis,
+    }
+
+
+def auto_repair(
+    *,
+    desired_commit: str,
+    paths: DoctorPaths = DoctorPaths(),
+    apply: bool = False,
+    receipt_root: Path | None = None,
+) -> dict[str, Any]:
+    """Bounded Doctor supervisor: classify one diagnosis, optionally repair.
+
+    Never auto-repairs context.clients (RESTART_REQUIRED), source.canonical,
+    host.boundary, git.worktrees, database.local-coding-peer-auth, or any FAIL
+    check outside the _AUTO_REPAIRABLE_CHECKS whitelist.  ``apply=False`` is a
+    pure decision; ``apply=True`` runs exactly one repair per whitelisted area
+    and writes one durable receipt per attempt.
+    """
+    diagnosis = diagnose(paths)
+    decision = auto_repair_decision(diagnosis.get("checks", []))
+    results: list[dict[str, Any]] = []
+    if apply and decision["repair_allowed"]:
+        for area in sorted(decision["repairable"]):
+            result = _apply_auto_repair_via_bootstrap(area, desired_commit)
+            results.append(result)
+            if receipt_root is not None:
+                receipt_root.mkdir(parents=True, exist_ok=True)
+                receipt = {
+                    "schema": "tgw-doctor-auto-repair-receipt/v1",
+                    "area": area,
+                    "desired_commit": desired_commit,
+                    "ok": result.get("ok") is True,
+                    "observed_at": datetime.now(UTC).isoformat(),
+                }
+                receipt["receipt_hash"] = "sha256:" + hashlib.sha256(
+                    json.dumps(
+                        {k: v for k, v in receipt.items() if k != "receipt_hash"},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                target = receipt_root / (
+                    f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}-{area}.json"
+                )
+                target.write_text(
+                    json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+                target.chmod(0o444)
+    return {
+        "schema": "tgw-local-doctor-auto-repair/v1",
+        "ok": decision["repair_allowed"] and all(
+            item.get("ok") is True for item in results
+        ),
+        "decision": decision,
+        "applied": apply,
+        "results": results,
+    }
+
+
+def _apply_auto_repair_via_bootstrap(area: str, desired_commit: str) -> dict[str, Any]:
+    """Run exactly one whitelisted repair through the pinned root bootstrap.
+
+    The supervisor runs unprivileged (as db), so it delegates the root-owned
+    repair to the existing tgw-recovery sudoers pin — the same exact
+    ``/usr/local/sbin/tgw-coding-bootstrap --repair`` action the Doctor already
+    prescribes to the operator.  No sudo surface is widened.
+    """
+    completed = subprocess.run(
+        [
+            "/usr/bin/sudo",
+            "-n",
+            "/usr/local/sbin/tgw-coding-bootstrap",
+            "--commit",
+            desired_commit,
+            "--repair",
+            area,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=600,
+    )
+    detail = (completed.stderr or completed.stdout)[-800:]
+    return {
+        "area": area,
+        "ok": completed.returncode == 0,
+        "returncode": completed.returncode,
+        "detail": detail,
     }
 
 
@@ -13269,6 +13414,23 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     repair_parser.add_argument("--json", action="store_true", dest="repair_json_output")
+    auto_repair_parser = sub.add_parser(
+        "auto-repair", help="bounded Doctor supervisor: decide then optionally repair"
+    )
+    auto_repair_parser.add_argument(
+        "--commit",
+        help="exact canonical source commit (default: resolve from canonical source)",
+    )
+    auto_repair_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="apply the whitelisted repairs (default: decision only)",
+    )
+    auto_repair_parser.add_argument(
+        "--receipt-root",
+        type=Path,
+        default=Path("/opt/TGW/tgw-lib/doctor-receipts/auto"),
+    )
     return parser
 
 
@@ -13288,6 +13450,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             # check must not turn Context (or any other subsystem) into a
             # global repair gate.  Context repairs separately fail closed when
             # their own client verification is incomplete.
+            return 0 if result.get("ok") else 2
+        if args.operation == "auto-repair":
+            desired = args.commit
+            if not desired:
+                desired, _tree, _status = _source_identity(DoctorPaths())
+            result = auto_repair(
+                desired_commit=desired,
+                apply=args.apply,
+                receipt_root=args.receipt_root,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result.get("ok") else 2
         if args.operation == "inventory":
             result = inventory()

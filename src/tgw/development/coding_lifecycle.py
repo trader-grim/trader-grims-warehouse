@@ -51,6 +51,7 @@ TERMINAL = frozenset(
     {"TECHNICALLY_COMPLETE", "SUCCEEDED", "FAILED", "REMEDIATION_REQUIRED"}
 )
 FAILURE_OUTCOMES = frozenset({"failed", "remediation", "resumable_partial"})
+_AUTO_REBIND_MAX = 2
 BOUNDARIES = {
     "ssh": False,
     "sudo": False,
@@ -1009,6 +1010,47 @@ def _begin_bounded_remediation(
     return True
 
 
+def _begin_bounded_auto_rebind(
+    record: dict[str, Any], *, result: Mapping[str, Any]
+) -> bool:
+    """Boundedly auto-rebind an implementation-stage failure.
+
+    Implementation dead-letters (no closed candidate) currently drop the
+    lifecycle to FAILED and wait for an operator ``tgw coding rebind``.  The
+    continual harness instead retries the exact root a bounded number of times,
+    archiving each failed generation for the record, then surfaces FAILED only
+    when the budget is exhausted.  Remediation/resumable/conflict outcomes are
+    never auto-rebound here — they keep their own terminal paths.
+    """
+    rebind_count = record.get("auto_rebind_count")
+    if not isinstance(rebind_count, int) or rebind_count < 0:
+        rebind_count = 0
+    if rebind_count >= _AUTO_REBIND_MAX:
+        return False
+    history = record.setdefault("remediation_history", [])
+    if not isinstance(history, list):
+        return False
+    archived = {
+        "kind": "auto_rebind",
+        "generation": rebind_count + 1,
+        "stage": "implementation",
+        "stages": record.get("stages", {}),
+        "effects": record.get("effects", {}),
+        "job_ids": record.get("job_ids", []),
+        "failure_result": dict(result),
+    }
+    archived["history_hash"] = _hash(archived)
+    history.append(archived)
+    record["auto_rebind_count"] = rebind_count + 1
+    record["stages"] = {}
+    record["effects"] = {}
+    record["job_ids"] = []
+    record["stage"] = "implementation"
+    record["state"] = "WAITING"
+    record.pop("failure", None)
+    return True
+
+
 def advance(
     store: LifecycleStore,
     identity: str,
@@ -1139,13 +1181,29 @@ def advance(
                     record["updated_at"] = _now()
                     record = store.put(record)
                     continue
+                if stage == "implementation" and outcome == "failed":
+                    if _begin_bounded_auto_rebind(record, result=result):
+                        record["updated_at"] = _now()
+                        record = store.put(record)
+                        continue
                 record["state"] = (
                     "FAILED" if outcome == "failed" else "REMEDIATION_REQUIRED"
                 )
                 record["stages"][stage] = result
+                budget_exhausted = (
+                    stage == "implementation"
+                    and outcome == "failed"
+                    and record.get("auto_rebind_count", 0) >= _AUTO_REBIND_MAX
+                )
                 record["failure"] = {
                     "stage": stage,
-                    "reason": result.get("reason", outcome),
+                    "reason": (
+                        f"auto-rebind budget exhausted after "
+                        f"{record.get('auto_rebind_count', 0)} retries; "
+                        f"{result.get('reason', outcome)}"
+                        if budget_exhausted
+                        else result.get("reason", outcome)
+                    ),
                 }
                 break
             _save_effect(record, stage, result)

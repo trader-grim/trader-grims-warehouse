@@ -2245,6 +2245,44 @@ def test_context_process_match_ignores_parent_shell_command_text() -> None:
     assert not doctor_cli._is_context_process(["bash", "-c", "/opt/TGW/tgw-lib/bin/tgw-context-mcp"])
 
 
+def test_auto_repair_decision_whitelists_only_safe_fail_areas() -> None:
+    checks = [
+        doctor_cli._check("context.snapshot", "FAIL", "stale context"),
+        doctor_cli._check("context.launcher", "FAIL", "launcher differs"),
+        doctor_cli._check("services.plan-render", "FAIL", "plan render stale"),
+        doctor_cli._check("context.clients", "RESTART_REQUIRED", "stale process"),
+        doctor_cli._check("source.canonical", "FAIL", "dirty source"),
+        doctor_cli._check("host.boundary", "PASS", "ok"),
+    ]
+    decision = doctor_cli.auto_repair_decision(checks)
+    assert decision["repairable"] == {
+        "context": ["context.snapshot"],
+        "context-launcher": ["context.launcher"],
+        "plan-render-worker": ["services.plan-render"],
+    }
+    # source.canonical is a FAIL outside the whitelist → repair not allowed.
+    assert decision["repair_allowed"] is False
+    notice_ids = [item["id"] for item in decision["operator_notices"]]
+    assert "context.clients" in notice_ids
+    assert "source.canonical" in notice_ids
+
+
+def test_auto_repair_decision_allows_repair_when_only_whitelisted_fail() -> None:
+    checks = [
+        doctor_cli._check("runtime.local-coding", "FAIL", "drift"),
+        doctor_cli._check("database.local-coding", "FAIL", "grants"),
+        doctor_cli._check("context.clients", "RESTART_REQUIRED", "stale process"),
+        doctor_cli._check("host.boundary", "PASS", "ok"),
+    ]
+    decision = doctor_cli.auto_repair_decision(checks)
+    assert decision["repairable"] == {
+        "runtime": ["runtime.local-coding"],
+        "database": ["database.local-coding"],
+    }
+    # RESTART_REQUIRED is a notice, not a FAIL gate → repair still allowed.
+    assert decision["repair_allowed"] is True
+
+
 def test_context_process_entrypoint_rejects_legacy_module_mode(tmp_path: Path) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     selected = (
