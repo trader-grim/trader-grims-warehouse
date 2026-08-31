@@ -54,6 +54,10 @@ _CONTEXT_MCP_TOOLS = {
     "tgw_context_runbooks",
     "tgw_context_code_graph",
     "tgw_context_onboarding",
+    "tgw_context_todo_exact",
+    "tgw_context_todo_current",
+    "tgw_context_todo_dependencies",
+    "tgw_context_todo_inventory",
 }
 _ACTOR_VERIFICATION_MAX_INPUT = 4 * 1024 * 1024
 _CONTEXT_REGISTRATION_MAX_INPUT = 256 * 1024

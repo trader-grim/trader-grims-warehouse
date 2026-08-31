@@ -837,6 +837,8 @@ def test_fail_closed_path_and_materialization_checks_and_bounded_surface(bound_c
         "tgw_context_status", "tgw_context_confirm_rebind", "tgw_context_bundle",
         "tgw_context_plan_graph", "tgw_context_plan_source",
         "tgw_context_runbooks", "tgw_context_code_graph", "tgw_context_onboarding",
+        "tgw_context_todo_exact", "tgw_context_todo_current",
+        "tgw_context_todo_dependencies", "tgw_context_todo_inventory",
     }
     payload = json.loads(context.tgw_context_status())
     assert payload["ok"] is False
@@ -858,6 +860,18 @@ def test_every_exported_tool_revalidates_fail_closed_bindings(monkeypatch):
         "tgw_context_runbooks": lambda: context.tgw_context_runbooks(),
         "tgw_context_onboarding": lambda: context.tgw_context_onboarding("codex"),
         "tgw_context_code_graph": lambda: context.tgw_context_code_graph(),
+        "tgw_context_todo_exact": lambda: context.tgw_context_todo_exact(
+            1936, "doctor",
+        ),
+        "tgw_context_todo_current": lambda: context.tgw_context_todo_current(
+            "doctor",
+        ),
+        "tgw_context_todo_dependencies": lambda: context.tgw_context_todo_dependencies(
+            1936, "doctor", [1935],
+        ),
+        "tgw_context_todo_inventory": lambda: context.tgw_context_todo_inventory(
+            "planning-inventory",
+        ),
     }
     assert set(context.mcp._tool_manager._tools) == set(ordinary)
     assert set(context.governed_review_mcp._tool_manager._tools) == {

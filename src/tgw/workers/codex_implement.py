@@ -57,6 +57,10 @@ _CONTEXT_TOOLS = (
     "tgw_context_status",
     "tgw_context_onboarding",
     "tgw_context_runbooks",
+    "tgw_context_todo_exact",
+    "tgw_context_todo_current",
+    "tgw_context_todo_dependencies",
+    "tgw_context_todo_inventory",
 )
 
 _MANUAL_REL = PurePosixPath(".tgw-coding-history/implementation/manual")

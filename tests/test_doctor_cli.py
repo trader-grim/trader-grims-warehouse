@@ -2807,15 +2807,47 @@ def test_context_cold_probe_keeps_stdin_open_until_eof_sensitive_fourth_response
         "tgw_context_plan_source": ("path", "start_line", "max_lines", "authority"),
         "tgw_context_onboarding": ("actor",),
         "tgw_context_runbooks": ("query", "path", "start_line", "max_lines", "limit", "authority"),
+        "tgw_context_todo_exact": ("todo_id", "role", "expected_generation", "expected_evidence_head"),
+        "tgw_context_todo_current": ("role", "expected_generation", "expected_evidence_head"),
+        "tgw_context_todo_dependencies": ("todo_id", "role", "declared", "expected_generation", "expected_evidence_head"),
+        "tgw_context_todo_inventory": ("purpose", "limit", "cursor", "include_bodies"),
     }
     schemas = {
         name: {
             "type": "object",
             "properties": {
-                field: {"type": "integer" if field in {"limit", "start_line", "max_lines"} else "string"}
+                field: {
+                    "type": (
+                        "integer"
+                        if field in {"limit", "start_line", "max_lines", "todo_id"}
+                        else "array"
+                        if field == "declared"
+                        else "boolean"
+                        if field == "include_bodies"
+                        else "string"
+                    )
+                }
                 for field in fields
             },
-            **({"required": [next(iter(fields))]} if name in {"tgw_context_plan_graph", "tgw_context_plan_source", "tgw_context_onboarding"} else {}),
+            **(
+                {"required": {
+                    "tgw_context_plan_graph": ["task"],
+                    "tgw_context_plan_source": ["path"],
+                    "tgw_context_onboarding": ["actor"],
+                    "tgw_context_bundle": ["task"],
+                    "tgw_context_todo_exact": ["todo_id", "role"],
+                    "tgw_context_todo_current": ["role"],
+                    "tgw_context_todo_dependencies": ["todo_id", "role", "declared"],
+                    "tgw_context_todo_inventory": ["purpose"],
+                }[name]}
+                if name in {
+                    "tgw_context_plan_graph", "tgw_context_plan_source",
+                    "tgw_context_onboarding", "tgw_context_bundle",
+                    "tgw_context_todo_exact", "tgw_context_todo_current",
+                    "tgw_context_todo_dependencies", "tgw_context_todo_inventory",
+                }
+                else {}
+            ),
         }
         for name, fields in schema_fields.items()
     }
@@ -3582,6 +3614,10 @@ def test_context_staged_probe_executes_shebang_below_root_only_parent(
             "limit",
             "authority",
         ),
+        "tgw_context_todo_exact": ("todo_id", "role", "expected_generation", "expected_evidence_head"),
+        "tgw_context_todo_current": ("role", "expected_generation", "expected_evidence_head"),
+        "tgw_context_todo_dependencies": ("todo_id", "role", "declared", "expected_generation", "expected_evidence_head"),
+        "tgw_context_todo_inventory": ("purpose", "limit", "cursor", "include_bodies"),
     }
     tools = []
     for name, fields in schema_fields.items():
@@ -3589,9 +3625,15 @@ def test_context_staged_probe_executes_shebang_below_root_only_parent(
             "type": "object",
             "properties": {
                 field: {
-                    "type": "integer"
-                    if field in {"limit", "start_line", "max_lines"}
-                    else "string"
+                    "type": (
+                        "integer"
+                        if field in {"limit", "start_line", "max_lines", "todo_id"}
+                        else "array"
+                        if field == "declared"
+                        else "boolean"
+                        if field == "include_bodies"
+                        else "string"
+                    )
                 }
                 for field in fields
             },
@@ -3600,8 +3642,24 @@ def test_context_staged_probe_executes_shebang_below_root_only_parent(
             "tgw_context_plan_graph",
             "tgw_context_plan_source",
             "tgw_context_onboarding",
+            "tgw_context_bundle",
+            "tgw_context_todo_exact",
+            "tgw_context_todo_current",
+            "tgw_context_todo_dependencies",
+            "tgw_context_todo_inventory",
         }:
-            schema["required"] = [fields[0]]
+            schema["required"] = list(
+                {
+                    "tgw_context_plan_graph": ["task"],
+                    "tgw_context_plan_source": ["path"],
+                    "tgw_context_onboarding": ["actor"],
+                    "tgw_context_bundle": ["task"],
+                    "tgw_context_todo_exact": ["todo_id", "role"],
+                    "tgw_context_todo_current": ["role"],
+                    "tgw_context_todo_dependencies": ["todo_id", "role", "declared"],
+                    "tgw_context_todo_inventory": ["purpose"],
+                }[name]
+            )
         tools.append(
             {
                 "name": name,
@@ -3802,6 +3860,10 @@ def test_context_cold_probe_rejects_false_error_mismatch_and_output_schema(
         "tgw_context_runbooks": (
             "query", "path", "start_line", "max_lines", "limit", "authority",
         ),
+        "tgw_context_todo_exact": ("todo_id", "role", "expected_generation", "expected_evidence_head"),
+        "tgw_context_todo_current": ("role", "expected_generation", "expected_evidence_head"),
+        "tgw_context_todo_dependencies": ("todo_id", "role", "declared", "expected_generation", "expected_evidence_head"),
+        "tgw_context_todo_inventory": ("purpose", "limit", "cursor", "include_bodies"),
     }
     tools = []
     for name, fields in schema_fields.items():
@@ -3809,9 +3871,15 @@ def test_context_cold_probe_rejects_false_error_mismatch_and_output_schema(
             "type": "object",
             "properties": {
                 field: {
-                    "type": "integer"
-                    if field in {"limit", "start_line", "max_lines"}
-                    else "string"
+                    "type": (
+                        "integer"
+                        if field in {"limit", "start_line", "max_lines", "todo_id"}
+                        else "array"
+                        if field == "declared"
+                        else "boolean"
+                        if field == "include_bodies"
+                        else "string"
+                    )
                 }
                 for field in fields
             },
@@ -3820,8 +3888,24 @@ def test_context_cold_probe_rejects_false_error_mismatch_and_output_schema(
             "tgw_context_plan_graph",
             "tgw_context_plan_source",
             "tgw_context_onboarding",
+            "tgw_context_bundle",
+            "tgw_context_todo_exact",
+            "tgw_context_todo_current",
+            "tgw_context_todo_dependencies",
+            "tgw_context_todo_inventory",
         }:
-            schema["required"] = [fields[0]]
+            schema["required"] = list(
+                {
+                    "tgw_context_plan_graph": ["task"],
+                    "tgw_context_plan_source": ["path"],
+                    "tgw_context_onboarding": ["actor"],
+                    "tgw_context_bundle": ["task"],
+                    "tgw_context_todo_exact": ["todo_id", "role"],
+                    "tgw_context_todo_current": ["role"],
+                    "tgw_context_todo_dependencies": ["todo_id", "role", "declared"],
+                    "tgw_context_todo_inventory": ["purpose"],
+                }[name]
+            )
         tools.append({
             "name": name,
             "description": "read only",

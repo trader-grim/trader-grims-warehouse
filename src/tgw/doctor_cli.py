@@ -3105,6 +3105,8 @@ def _probe_context_stdio_process(
         "tgw_context_status", "tgw_context_current_task", "tgw_context_bundle",
         "tgw_context_code_graph", "tgw_context_plan_graph", "tgw_context_plan_source",
         "tgw_context_onboarding", "tgw_context_runbooks",
+        "tgw_context_todo_exact", "tgw_context_todo_current",
+        "tgw_context_todo_dependencies", "tgw_context_todo_inventory",
     }
     if not isinstance(tools, list) or {item.get("name") for item in tools if isinstance(item, Mapping)} != required:
         raise DoctorError("installed Context MCP read-only tool set differs")
@@ -3117,11 +3119,20 @@ def _probe_context_stdio_process(
         "tgw_context_plan_source": {"path", "start_line", "max_lines", "authority"},
         "tgw_context_onboarding": {"actor"},
         "tgw_context_runbooks": {"query", "path", "start_line", "max_lines", "limit", "authority"},
+        "tgw_context_todo_exact": {"todo_id", "role", "expected_generation", "expected_evidence_head"},
+        "tgw_context_todo_current": {"role", "expected_generation", "expected_evidence_head"},
+        "tgw_context_todo_dependencies": {"todo_id", "role", "declared", "expected_generation", "expected_evidence_head"},
+        "tgw_context_todo_inventory": {"purpose", "limit", "cursor", "include_bodies"},
     }
     schema_required = {
         "tgw_context_plan_graph": {"task"},
         "tgw_context_plan_source": {"path"},
         "tgw_context_onboarding": {"actor"},
+        "tgw_context_bundle": {"task"},
+        "tgw_context_todo_exact": {"todo_id", "role"},
+        "tgw_context_todo_current": {"role"},
+        "tgw_context_todo_dependencies": {"todo_id", "role", "declared"},
+        "tgw_context_todo_inventory": {"purpose"},
     }
     for item in tools:
         schema = item.get("inputSchema") if isinstance(item, Mapping) else None
@@ -3147,7 +3158,16 @@ def _probe_context_stdio_process(
             or set(schema.get("required", [])) != schema_required.get(item["name"], set())
             or any(
                 not isinstance(value, Mapping)
-                or value.get("type") != ("integer" if name in {"limit", "start_line", "max_lines"} else "string")
+                or value.get("type")
+                != (
+                    "integer"
+                    if name in {"limit", "start_line", "max_lines", "todo_id"}
+                    else "array"
+                    if name == "declared"
+                    else "boolean"
+                    if name == "include_bodies"
+                    else "string"
+                )
                 for name, value in properties.items()
             )
             or not isinstance(output_schema, Mapping)
