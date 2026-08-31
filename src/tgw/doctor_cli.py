@@ -100,12 +100,14 @@ _ACTIVE_CODING_UNITS = (
     "tgw-coding-runtime-restart.path",
     "tgw-context-snapshot-promote.path",
     "tgw-coding-local-foreman.timer",
+    "tgw-doctor-auto-repair.timer",
 )
 _CODING_UNITS = (
     *_ACTIVE_CODING_UNITS,
     "tgw-coding-local-foreman.service",
     "tgw-coding-runtime-restart.service",
     "tgw-context-snapshot-promote.service",
+    "tgw-doctor-auto-repair.service",
 )
 _PLAN_RENDER_UNIT = "tgw-plan-render-local.service"
 _PLAN_RENDER_DIRECTORY_MODE = 0o2770
