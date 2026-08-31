@@ -141,22 +141,34 @@ release source. `/usr/local/sbin/tgw-coding-bootstrap` is root:root pinned.
   repair it before trusting `tgw-context` MCP, then start a fresh harness
   session (`context.clients` RESTART_REQUIRED).
 
-## 5. The `/tmp` pressure valve
+## 5. The `/tmp` hard limit — not a pressure valve
 
-`/tmp` is tmpfs: RAM-backed, `size=10G`, `nr_inodes=1M`, cleared on reboot.
-This is a deliberate protection against messy sessions — an agent that fills
-`/tmp` fills RAM, not disk; reboot clears it; disk inodes are never
-exhausted. It is also a **different filesystem** than the btrfs worktrees, so
-same-fs operations cannot use it.
+`/tmp` is tmpfs: RAM-backed, `size=10G`, `nr_inodes=1M`. It is a **hard
+limit, not a self-cleaning feature**:
+
+- Filling `/tmp` — 10G of bytes, or 1M inodes (inodes fill first: pytest and
+  build tools create thousands of tiny files) — stops every process that
+  writes temp data: workers, Postgres temp files, git, pip, builds. It is a
+  system-wide incident with no automatic recovery.
+- There is no reboot in the recovery loop. This host runs for months
+  (8+ days uptime at the 2026-08-30 writing); reboot is a deliberate
+  maintenance event, never a cleanup mechanism. "It clears on reboot" is
+  Windows-thinking and must not appear in any design rationale.
+- The bound protects only the disk from permanent fill. It does not protect
+  the running system from a full tmpfs.
 
 Consequences:
 
-- Never bind `/opt/TGW` (btrfs) over `/tmp` for agents: that would remove the
-  size/inode bound and a messy agent would fill the real disk permanently.
-- Never treat `/tmp`, `/var/tmp`, or `$HOME` as a durable or same-fs scratch.
-- Agents needing scratch use their per-actor same-fs root under `/opt/TGW/var/
-  tmp` (see 3.3); durable roots are the designed `/opt/TGW/w` and
-  `/opt/TGW/var/cache/tgw`.
+- `/tmp` is **not a safe scratch zone** for anything of size or quantity.
+  Code, tests, and agents use bounded per-actor same-fs scratch under
+  `/opt/TGW/var/tmp` (see 3.3), removed by the owning lifecycle (`rmtree` in
+  test teardown, attempt cleanup in workflows).
+- Never bind `/opt/TGW` (btrfs) over `/tmp`: that would move the fill from
+  tmpfs (RAM, bounded, incident-recoverable by clearing the files) to the
+  real disk (permanent, and 36G of history at `/opt/TGW/w` shows what
+  unbounded durable scratch accumulates).
+- `/tmp` remains a small emergency-only space for genuinely disposable
+  one-shot data; treat reaching it as an incident, not as expected behavior.
 
 ## 6. Reconciliation rules
 
