@@ -638,8 +638,6 @@ def _run_with_lease(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subproce
                     "-p",
                     "--output-format",
                     "json",
-                    "-C",
-                    str(cwd),
                     "--permission-mode",
                     "bypassPermissions",
                 ]
