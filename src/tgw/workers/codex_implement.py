@@ -282,9 +282,12 @@ def _claude_report(stdout: str) -> dict[str, Any] | None:
 
     Claude -p --output-format json emits JSONL; the prompt instructs the model
     to END its final result text with exactly one JSON report object matching
-    _FINAL_SCHEMA, so the last JSON object in the output is the report.
+    _FINAL_SCHEMA, so the last JSON object in the output is the report.  The
+    extraction tolerates markdown fences, trailing prose, and JSONL payloads
+    that carry the report object directly (instead of inside a text string).
     """
     text = None
+    direct: dict[str, Any] | None = None
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -294,18 +297,43 @@ def _claude_report(stdout: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             text = line
             continue
+        if not isinstance(value, dict):
+            continue
+        payload = value.get("result") or value.get("text") or value.get("content")
+        if isinstance(payload, str) and payload:
+            text = payload
+        elif isinstance(payload, dict):
+            # Some Claude JSONL variants place the final object in a payload
+            # field directly; keep the last one seen as a fallback.
+            direct = payload
+    if isinstance(text, str) and text:
+        return _last_json_object(text)
+    return direct
+
+
+def _last_json_object(text: str) -> dict[str, Any] | None:
+    """Return the last complete JSON object embedded in free text.
+
+    Claude's print-mode ``result`` text is a plain string; the model may wrap
+    the report in a markdown code fence or append closing prose.  Walk the
+    last ``{`` backward so any trailing fence/prose after the object is
+    tolerated, and accept only a dict-shaped parse.
+    """
+    decoder = json.JSONDecoder()
+    search = text
+    while True:
+        brace = search.rfind("{")
+        if brace < 0:
+            return None
+        candidate = search[brace:]
+        try:
+            value, _end = decoder.raw_decode(candidate)
+        except json.JSONDecodeError:
+            search = search[:brace]
+            continue
         if isinstance(value, dict):
-            text = value.get("result") or value.get("text") or value.get("content") or text
-    if not isinstance(text, str):
-        return None
-    brace = text.rfind("{")
-    if brace < 0:
-        return None
-    try:
-        candidate = json.loads(text[brace:])
-    except json.JSONDecodeError:
-        return None
-    return candidate if isinstance(candidate, dict) else None
+            return value
+        search = search[:brace]
 
 
 def _prompt(task: dict[str, Any], continuation: dict[str, Any] | None = None, *, treatment: str = "Codex") -> str:
@@ -354,7 +382,17 @@ Return the requested JSON report. Use status=blocked if the task cannot be
 implemented inside these boundaries. The wrapper independently determines
 whether source changed, closes an exact commit after a successful report, and
 does not accept your report as completion evidence.
+""" + (
+        f"""
+The final report object MUST be the very last thing you output, with no
+markdown fence, prose, or punctuation before or after it.  It MUST match this
+exact JSON schema:
+
+{json.dumps(_FINAL_SCHEMA, sort_keys=True)}
 """
+        if treatment == "Claude"
+        else ""
+    )
 
 
 _RECEIPT_FILES = frozenset(

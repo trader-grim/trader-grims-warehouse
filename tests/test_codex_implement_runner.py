@@ -795,6 +795,58 @@ def test_claude_report_returns_none_on_garbage():
     assert codex_implement._claude_report("") is None
 
 
+def test_claude_report_tolerates_markdown_fence_and_trailing_prose():
+    report = {"status": "implemented", "summary": "fenced", "tests": ["focused"]}
+    fenced = "```json\n" + json.dumps(report, indent=2) + "\n```\n"
+    stdout = (
+        '{"type":"system","subtype":"init"}\n'
+        + json.dumps({"type": "result", "result": fenced})
+        + "\n"
+    )
+    assert codex_implement._claude_report(stdout) == report
+    trailing = json.dumps(report) + "\n\nDone — all checks green."
+    stdout = json.dumps({"type": "result", "result": trailing}) + "\n"
+    assert codex_implement._claude_report(stdout) == report
+
+
+def test_claude_report_accepts_dict_payload_directly():
+    report = {"status": "implemented", "summary": "direct", "tests": ["focused"]}
+    stdout = json.dumps({"type": "result", "result": report}) + "\n"
+    assert codex_implement._claude_report(stdout) == report
+
+
+def test_claude_report_skips_non_string_payload_fields():
+    report = {"status": "implemented", "summary": "content-list", "tests": ["focused"]}
+    # Claude JSONL assistant lines carry message.content as a block list; the
+    # final result line carries the report as a text string.
+    stdout = (
+        json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "working"}]}}
+        )
+        + "\n"
+        + json.dumps({"type": "result", "result": json.dumps(report)})
+        + "\n"
+    )
+    assert codex_implement._claude_report(stdout) == report
+
+
+def test_claude_prompt_embeds_final_schema():
+    task = {
+        "todo_id": 1938,
+        "body": "Automated pipeline clean-run proof",
+        "plan_binding": {},
+    }
+    prompt = codex_implement._prompt(task, None, treatment="Claude")
+    assert '"status"' in prompt
+    assert '"implemented"' in prompt
+    assert "markdown fence" in prompt
+    # The codex treatment does not demand the schema textually (it gets the
+    # schema file via --output-schema), but must not error either.
+    codex_prompt = codex_implement._prompt(task, None, treatment="Codex")
+    assert "Todo #1938" in codex_prompt
+    assert "markdown fence" not in codex_prompt
+
+
 def test_claude_executor_satisfied_closes_candidate(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     baseline = subprocess.run(
