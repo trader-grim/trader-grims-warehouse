@@ -2834,7 +2834,6 @@ def test_context_cold_probe_keeps_stdin_open_until_eof_sensitive_fourth_response
                     "tgw_context_plan_graph": ["task"],
                     "tgw_context_plan_source": ["path"],
                     "tgw_context_onboarding": ["actor"],
-                    "tgw_context_bundle": ["task"],
                     "tgw_context_todo_exact": ["todo_id", "role"],
                     "tgw_context_todo_current": ["role"],
                     "tgw_context_todo_dependencies": ["todo_id", "role", "declared"],
@@ -2842,7 +2841,7 @@ def test_context_cold_probe_keeps_stdin_open_until_eof_sensitive_fourth_response
                 }[name]}
                 if name in {
                     "tgw_context_plan_graph", "tgw_context_plan_source",
-                    "tgw_context_onboarding", "tgw_context_bundle",
+                    "tgw_context_onboarding",
                     "tgw_context_todo_exact", "tgw_context_todo_current",
                     "tgw_context_todo_dependencies", "tgw_context_todo_inventory",
                 }
@@ -3642,7 +3641,6 @@ def test_context_staged_probe_executes_shebang_below_root_only_parent(
             "tgw_context_plan_graph",
             "tgw_context_plan_source",
             "tgw_context_onboarding",
-            "tgw_context_bundle",
             "tgw_context_todo_exact",
             "tgw_context_todo_current",
             "tgw_context_todo_dependencies",
@@ -3653,7 +3651,6 @@ def test_context_staged_probe_executes_shebang_below_root_only_parent(
                     "tgw_context_plan_graph": ["task"],
                     "tgw_context_plan_source": ["path"],
                     "tgw_context_onboarding": ["actor"],
-                    "tgw_context_bundle": ["task"],
                     "tgw_context_todo_exact": ["todo_id", "role"],
                     "tgw_context_todo_current": ["role"],
                     "tgw_context_todo_dependencies": ["todo_id", "role", "declared"],
@@ -3888,7 +3885,6 @@ def test_context_cold_probe_rejects_false_error_mismatch_and_output_schema(
             "tgw_context_plan_graph",
             "tgw_context_plan_source",
             "tgw_context_onboarding",
-            "tgw_context_bundle",
             "tgw_context_todo_exact",
             "tgw_context_todo_current",
             "tgw_context_todo_dependencies",
@@ -3899,7 +3895,6 @@ def test_context_cold_probe_rejects_false_error_mismatch_and_output_schema(
                     "tgw_context_plan_graph": ["task"],
                     "tgw_context_plan_source": ["path"],
                     "tgw_context_onboarding": ["actor"],
-                    "tgw_context_bundle": ["task"],
                     "tgw_context_todo_exact": ["todo_id", "role"],
                     "tgw_context_todo_current": ["role"],
                     "tgw_context_todo_dependencies": ["todo_id", "role", "declared"],

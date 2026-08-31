@@ -3128,7 +3128,6 @@ def _probe_context_stdio_process(
         "tgw_context_plan_graph": {"task"},
         "tgw_context_plan_source": {"path"},
         "tgw_context_onboarding": {"actor"},
-        "tgw_context_bundle": {"task"},
         "tgw_context_todo_exact": {"todo_id", "role"},
         "tgw_context_todo_current": {"role"},
         "tgw_context_todo_dependencies": {"todo_id", "role", "declared"},
