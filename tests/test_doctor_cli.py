@@ -2456,6 +2456,114 @@ def test_context_restart_report_never_makes_parent_identity_actionable(
     assert result["restart_detection_error"] is None
 
 
+def test_context_process_with_verified_reset_receipt_is_current(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A process that predates the files but recorded an in-place rebind
+    receipt bound to the current snapshot generation is current."""
+    import hashlib as _hashlib
+    import json as _json
+
+    snapshot = {
+        "snapshot_sha256": "sha256:" + "a" * 64,
+        "source_commit": "b" * 40,
+        "source_tree": "c" * 40,
+        "plan_commit": "d" * 40,
+    }
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot_path.write_text(_json.dumps(snapshot), encoding="utf-8")
+    paths = doctor_cli.DoctorPaths(context_snapshot=snapshot_path)
+    reset_root = tmp_path / "client-resets"
+    monkeypatch.setattr(doctor_cli, "_CONTEXT_CLIENT_RESET_ROOT", reset_root)
+    reset_root.mkdir()
+    unsigned = {
+        "schema": "tgw-context-client-reset/v1",
+        "pid": 41,
+        "actor": "codex",
+        "snapshot_sha256": snapshot["snapshot_sha256"],
+        "source_commit": snapshot["source_commit"],
+        "source_tree": snapshot["source_tree"],
+        "plan_commit": snapshot["plan_commit"],
+        "record_sha256": "sha256:" + "e" * 64,
+        "reset_at": "2026-08-31T00:00:00+00:00",
+    }
+    receipt = {
+        **unsigned,
+        "receipt_hash": "sha256:"
+        + _hashlib.sha256(
+            _json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    (reset_root / "41.json").write_text(
+        _json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    process = {
+        "pid": 41,
+        "process_identity": "boot:41:100",
+        "user": "codex",
+        "installed_entrypoint": True,
+        "predates_launcher": True,
+        "predates_generation": True,
+        "predates_snapshot": True,
+    }
+    assert (
+        doctor_cli._context_process_requires_restart(process, paths=paths)
+        is False
+    )
+
+
+def test_context_process_reset_receipt_wrong_snapshot_still_restarts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import hashlib as _hashlib
+    import json as _json
+
+    snapshot = {
+        "snapshot_sha256": "sha256:" + "a" * 64,
+        "source_commit": "b" * 40,
+    }
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot_path.write_text(_json.dumps(snapshot), encoding="utf-8")
+    paths = doctor_cli.DoctorPaths(context_snapshot=snapshot_path)
+    reset_root = tmp_path / "client-resets"
+    monkeypatch.setattr(doctor_cli, "_CONTEXT_CLIENT_RESET_ROOT", reset_root)
+    reset_root.mkdir()
+    unsigned = {
+        "schema": "tgw-context-client-reset/v1",
+        "pid": 41,
+        "actor": "codex",
+        "snapshot_sha256": "sha256:" + "f" * 64,
+        "source_commit": "b" * 40,
+        "source_tree": "c" * 40,
+        "plan_commit": "d" * 40,
+        "record_sha256": "sha256:" + "e" * 64,
+        "reset_at": "2026-08-31T00:00:00+00:00",
+    }
+    receipt = {
+        **unsigned,
+        "receipt_hash": "sha256:"
+        + _hashlib.sha256(
+            _json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    (reset_root / "41.json").write_text(
+        _json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+    process = {
+        "pid": 41,
+        "process_identity": "boot:41:100",
+        "user": "codex",
+        "installed_entrypoint": True,
+        "predates_launcher": True,
+        "predates_generation": False,
+        "predates_snapshot": False,
+    }
+    assert (
+        doctor_cli._context_process_requires_restart(process, paths=paths)
+        is True
+    )
+
+
 def _full_current_task_projection(commit: str, tree: str) -> tuple[dict, dict]:
     evidence_commit = "e" * 40
     evidence_tree = "f" * 40

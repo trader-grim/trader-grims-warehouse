@@ -22,6 +22,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ RUNTIME_RELEASES = Path("/opt/TGW/tgw-lib/coding-runtime/releases")
 CONTEXT_SOURCE = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
 CATALOG = Path("/opt/TGW/tgw-lib/config/tgw-context-debian-v1.json")
 CURRENT_CONTEXT = Path("/opt/TGW/tgw-lib/config/tgw-context-current.json")
+CONTEXT_RESET_ROOT = Path("/opt/TGW/tgw-lib/var/context/client-resets")
 HARNESS_ACTORS = frozenset({"codex", "claude", "deepseek"})
 RETIRED_TOOLS = ("tgw_context_bundle", "tgw_context_confirm_rebind")
 RUNTIME_OWNER_UID = 0
@@ -256,10 +258,17 @@ def _verify_bound_release(
 
 
 def _bootstrap_runtime() -> tuple[Path, Path, int, bytes, str, str]:
-    raw = _protected_snapshot_raw()
+    return _resolve_runtime(_protected_snapshot_raw())
+
+
+def _resolve_runtime(raw: bytes) -> tuple[Path, Path, int, bytes, str, str]:
+    """Resolve the immutable release for one exact protected snapshot.
+
+    Shared by cold startup and in-place generation rebind so both enforce the
+    same root:root immutability and exact-tree verification.  Reads only the
+    snapshot's source identity; the selected runtime owns all parsing.
+    """
     try:
-        # Bootstrap reads only the immutable source identity.  The selected
-        # runtime owns all schema, hash, canonical and projection parsing.
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("current TGW context snapshot is invalid") from exc
@@ -308,6 +317,21 @@ _snapshot_spec.loader.exec_module(_snapshot_runtime)
 CurrentContextError = _snapshot_runtime.CurrentContextError
 
 
+def _reload_snapshot_runtime(server_source: Path) -> None:
+    """Reload the snapshot parser module from a newly bound release."""
+    global _snapshot_runtime, CurrentContextError
+    spec = importlib.util.spec_from_file_location(
+        "_tgw_selected_current_context_snapshot",
+        server_source / "tgw/current_context_snapshot.py",
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError("selected Context runtime parser cannot be reloaded")
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    _snapshot_runtime = runtime
+    CurrentContextError = runtime.CurrentContextError
+
+
 def _selected_snapshot_parser(raw: bytes) -> dict[str, Any]:
     """Validate with either the modern API or the one verified legacy API."""
     has_parse_bytes = hasattr(_snapshot_runtime, "parse_bytes")
@@ -351,10 +375,81 @@ def _harness_actor() -> str:
     return actor
 
 
+def _rebind_generation(raw: bytes) -> None:
+    """Rebind this process to a newly published context generation in place.
+
+    The continual harness owns running state; the MCP is a rebuildable
+    projection.  When the protected snapshot advances, re-resolve and re-verify
+    the immutable release, reload its snapshot parser, swap the module globals,
+    and record a context-reset receipt the Doctor can verify.  The stdio MCP
+    session and tool surface stay live, so no harness session restart is needed.
+    """
+    global RUNTIME_RELEASE, SERVER_SOURCE, _RUNTIME_RELEASE_DESCRIPTOR
+    global _STARTUP_CONTEXT_RAW, _STARTUP_SNAPSHOT_SHA256, _STARTUP_RECORD_SHA256
+    release, server_source, descriptor, verified_raw, _sha, record_sha256 = (
+        _resolve_runtime(raw)
+    )
+    _reload_snapshot_runtime(server_source)
+    _RUNTIME_RELEASE_DESCRIPTOR = descriptor
+    RUNTIME_RELEASE = release
+    SERVER_SOURCE = server_source
+    _STARTUP_CONTEXT_RAW = verified_raw
+    _STARTUP_RECORD_SHA256 = record_sha256
+    _STARTUP_SNAPSHOT_SHA256 = _selected_snapshot_parser(verified_raw)[
+        "snapshot_sha256"
+    ]
+    sys.path[0] = str(server_source)
+    _write_context_reset_receipt(verified_raw, record_sha256)
+
+
+def _write_context_reset_receipt(raw: bytes, record_sha256: str) -> None:
+    """Record a durable, Doctor-verifiable in-place context reset."""
+    try:
+        value = _selected_snapshot_parser(raw)
+    except CurrentContextError as exc:
+        raise ValueError("current TGW context snapshot is invalid") from exc
+    unsigned = {
+        "schema": "tgw-context-client-reset/v1",
+        "pid": os.getpid(),
+        "actor": _harness_actor(),
+        "snapshot_sha256": value["snapshot_sha256"],
+        "source_commit": value["source_commit"],
+        "source_tree": value["source_tree"],
+        "plan_commit": value["plan_commit"],
+        "record_sha256": record_sha256,
+        "reset_at": _utc_now(),
+    }
+    receipt = {
+        **unsigned,
+        "receipt_hash": "sha256:"
+        + hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    CONTEXT_RESET_ROOT.mkdir(mode=0o2770, parents=True, exist_ok=True)
+    target = CONTEXT_RESET_ROOT / f"{os.getpid()}.json"
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    temporary.chmod(0o660)
+    os.replace(temporary, target)
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
 def _current_context() -> dict[str, Any]:
-    """Return the immutable startup snapshot and reject a later generation."""
-    if _protected_snapshot_raw() != _STARTUP_CONTEXT_RAW:
-        raise ValueError("TGW Context generation changed; restart this harness session")
+    """Return the current protected snapshot, rebinding on generation change.
+
+    This is the continual-harness path: a later generation rebinds the MCP
+    projection in place instead of demanding a fresh harness session.
+    """
+    raw = _protected_snapshot_raw()
+    if raw != _STARTUP_CONTEXT_RAW:
+        _rebind_generation(raw)
     try:
         value = _selected_snapshot_parser(_STARTUP_CONTEXT_RAW)
     except CurrentContextError as exc:

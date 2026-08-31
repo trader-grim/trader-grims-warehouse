@@ -63,6 +63,7 @@ _INVOCATION_ID = re.compile(r"[0-9a-f]{32}\Z")
 _LOOSE_OBJECT_DIRECTORY = re.compile(r"[0-9a-f]{2}\Z")
 _LOOSE_OBJECT_NAME = re.compile(r"[0-9a-f]{38}\Z")
 _STATES = {"PASS", "WARN", "FAIL", "UNKNOWN", "RESTART_REQUIRED"}
+_CONTEXT_CLIENT_RESET_ROOT = Path("/opt/TGW/tgw-lib/var/context/client-resets")
 _CONTEXT_COLD_PROBE_BUDGET_SECONDS = 30.0
 _CONTEXT_COLD_PROBE_STREAM_LIMIT = 1_048_576
 _CONTEXT_COLD_PROBE_TERMINATE_GRACE_SECONDS = 0.25
@@ -3280,12 +3281,64 @@ def _context_process_entrypoint(
     }
 
 
-def _context_process_requires_restart(process: Mapping[str, Any]) -> bool:
-    return (
+def _context_process_requires_restart(
+    process: Mapping[str, Any], *, paths: DoctorPaths | None = None
+) -> bool:
+    if not (
         process.get("installed_entrypoint") is not True
         or process.get("predates_launcher") is True
         or process.get("predates_generation") is True
         or process.get("predates_snapshot") is True
+    ):
+        return False
+    # A process may rebind to a newly published generation in place (the
+    # continual-harness context reset).  A valid reset receipt bound to the
+    # current snapshot generation makes the process current without a restart.
+    if paths is None:
+        return True
+    return not _context_process_rebound_current(process, paths)
+
+
+def _context_process_rebound_current(
+    process: Mapping[str, Any], paths: DoctorPaths
+) -> bool:
+    """Return True when the process has a verified in-place reset receipt.
+
+    The launcher writes a context-reset receipt when it rebinds to a new
+    generation.  The Doctor reads it, verifies the receipt hash, and only then
+    treats the process as current — a process that merely predates the files
+    with no verified rebind still requires a fresh session.
+    """
+    pid = process.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    receipt_path = _CONTEXT_CLIENT_RESET_ROOT / f"{pid}.json"
+    try:
+        raw = receipt_path.read_bytes()
+    except OSError:
+        return False
+    try:
+        receipt = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(receipt, dict) or receipt.get("schema") != "tgw-context-client-reset/v1":
+        return False
+    if receipt.get("pid") != pid or receipt.get("actor") != process.get("user"):
+        return False
+    claimed = receipt.get("receipt_hash")
+    unsigned = {key: item for key, item in receipt.items() if key != "receipt_hash"}
+    if claimed != "sha256:" + hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest():
+        return False
+    try:
+        snapshot_surface = _surface_snapshot(paths.context_snapshot)
+        snapshot = _json_from_surface(paths.context_snapshot, snapshot_surface)
+    except (DoctorError, OSError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        receipt.get("snapshot_sha256") == snapshot.get("snapshot_sha256")
+        and receipt.get("source_commit") == snapshot.get("source_commit")
     )
 
 
@@ -3572,7 +3625,11 @@ def _context_processes(paths: DoctorPaths) -> list[dict[str, Any]]:
 def check_context_processes(paths: DoctorPaths) -> dict[str, Any]:
     try:
         processes = _context_processes(paths)
-        stale = [item for item in processes if _context_process_requires_restart(item)]
+        stale = [
+            item
+            for item in processes
+            if _context_process_requires_restart(item, paths=paths)
+        ]
         state = "RESTART_REQUIRED" if stale else "WARN"
         detail = (
             f"{len(stale)} visible Context MCP process(es) appear older than the "
@@ -3629,7 +3686,7 @@ def _context_restart_report(paths: DoctorPaths) -> dict[str, Any]:
         observed_stale = [
             item["process_identity"]
             for item in clients
-            if _context_process_requires_restart(item)
+            if _context_process_requires_restart(item, paths=paths)
         ]
         error = None
     except Exception as exc:
