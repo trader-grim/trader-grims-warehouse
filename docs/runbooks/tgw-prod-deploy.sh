@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tgw-prod-deploy v1 (2026-08-30) — narrow compare-and-swap release-install
+# tgw-prod-deploy v2 (2026-08-31) — narrow compare-and-swap release-install
 # helper for item-track source-only releases. Runs as root (sudoers pins the
 # identity). stdlib-only.
 set -euo pipefail
@@ -19,14 +19,22 @@ current="$(readlink -f /opt/TGW/current 2>/dev/null || true)"
   --archive "$archive" --generation "$gen" --commit "$commit" --tree "$tree" \
   --archive-sha256 "$sha" --expected-current "$expected" --operation-id "$op"
 "$INSTALLER" --root /opt/TGW verify "$gen"
-# Restart the HTTP shell AND every queue worker. Restarting only http +
-# ebay_sync left ebay_upload/ebay_draft/ebay_stage/ebay_publish running the
-# PREVIOUS release's code in memory — the root cause of the live
-# "provider photo upload succeeded but canonical projection conflicted"
-# dead-letter (tgw202505111148158) that persisted across a source-only
-# release. The glob restarts the whole queue-worker fleet atomically.
-systemctl restart tgw-http.service 'tgw-worker@*.service'
-sleep 2
-systemctl is-active --quiet tgw-http.service 'tgw-worker@*.service' || { echo "service not active after restart" >&2; exit 1; }
+# Restart every service that loads /opt/TGW/current/src. A source-only release
+# swaps the on-disk code but NOT the in-memory code of a running worker; the
+# v1 helper restarted only http + ebay_sync, leaving ebay_upload (and others)
+# on the PREVIOUS release — the live "provider photo upload succeeded but
+# canonical projection conflicted" dead-letter that persisted across a
+# source-only release. Poll rather than assume the fleet is up.
+systemctl restart tgw-http.service 'tgw-worker@*.service' 'tgw-ai-identify@*.service'
+for _ in $(seq 1 40); do
+  if systemctl is-active --quiet tgw-http.service \
+     && [ "$(systemctl is-active 'tgw-worker@*.service' 2>/dev/null | grep -c '^active$')" -gt 0 ]; then
+    break
+  fi
+  sleep 2
+done
+if ! systemctl is-active --quiet tgw-http.service; then
+  echo "tgw-http.service not active after restart" >&2; exit 1
+fi
 [ -f "/opt/TGW/receipts/$op.json" ] || { echo "install receipt missing: /opt/TGW/receipts/$op.json" >&2; exit 1; }
 echo "tgw-prod-deploy: current=$(readlink -f /opt/TGW/current) receipt=/opt/TGW/receipts/$op.json"

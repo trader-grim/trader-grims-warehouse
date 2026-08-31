@@ -41,11 +41,19 @@ fi
   --archive "$archive" --generation "$gen" --commit "$commit" --tree "$tree" \
   --archive-sha256 "$sha" --expected-current "$expected" --operation-id "$op"
 "$INSTALLER" --root /opt/TGW verify "$gen"
-# Restart the HTTP shell AND every queue worker (see the deploy-helper
-# source note in docs/runbooks/tgw-prod-deploy.sh).
-systemctl restart tgw-http.service 'tgw-worker@*.service'
-sleep 2
-systemctl is-active --quiet tgw-http.service 'tgw-worker@*.service' || { echo "service not active after restart" >&2; exit 1; }
+# Restart every service that loads /opt/TGW/current/src (http, all queue
+# workers, and the ai_identify workers); poll until the fleet is active.
+systemctl restart tgw-http.service 'tgw-worker@*.service' 'tgw-ai-identify@*.service'
+for _ in $(seq 1 40); do
+  if systemctl is-active --quiet tgw-http.service \
+     && [ "$(systemctl is-active 'tgw-worker@*.service' 2>/dev/null | grep -c '^active$')" -gt 0 ]; then
+    break
+  fi
+  sleep 2
+done
+if ! systemctl is-active --quiet tgw-http.service; then
+  echo "tgw-http.service not active after restart" >&2; exit 1
+fi
 mkdir -p /opt/TGW/receipts
 receipt="/opt/TGW/receipts/$op.json"
 cp -p "$receipt" "$receipt" 2>/dev/null || true
