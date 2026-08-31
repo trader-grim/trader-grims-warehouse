@@ -16,11 +16,19 @@ def durable_path():
     W18 receipts, leases, watched inputs, and refresh state are deliberately
     required to live on durable storage.  Pytest's built-in ``tmp_path`` is
     therefore the wrong fixture for those boundaries.  CI may select an exact
-    durable test filesystem with ``TGW_TEST_DURABLE_ROOT``; ``/var/tmp`` is the
-    portable fallback and every per-test directory is removed afterward.
+    durable test filesystem with ``TGW_TEST_DURABLE_ROOT``; the default is a
+    per-actor root under the actor's home (``~/.cache/tgw-pytest``, the same
+    location pytest itself uses for its cache).  The root is deliberately NOT
+    a shared directory: a shared root would be created by whichever actor ran
+    the suite first, under that actor's ownership, and would then fail for
+    every other actor (2026-08-30).  Every per-test directory is removed
+    afterward.
     """
 
-    base = Path(os.environ.get("TGW_TEST_DURABLE_ROOT", "/var/tmp/tgw-pytest"))
+    base = Path(
+        os.environ.get("TGW_TEST_DURABLE_ROOT")
+        or (Path.home() / ".cache" / "tgw-pytest")
+    )
     if not base.is_absolute() or base == Path("/tmp") or Path("/tmp") in base.parents:
         raise RuntimeError("TGW_TEST_DURABLE_ROOT must be absolute and outside /tmp")
     base.mkdir(parents=True, exist_ok=True)

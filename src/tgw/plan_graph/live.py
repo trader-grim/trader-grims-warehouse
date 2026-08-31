@@ -15,6 +15,14 @@ from typing import Any
 from .core import SourcePreconditionError, brief, build, coverage, query
 
 DEFAULT_PLAN_ROOT = Path("/opt/TGW/library/plans")
+# Per-actor runtime root, mirroring pytest's per-actor cache_dir
+# (pyproject.toml): a shared default (e.g. tempfile.gettempdir()) is created
+# by whichever actor ran first and then fails for every other actor
+# (2026-08-30). TGW_PLAN_GRAPH_RUNTIME still overrides for CI.
+_DEFAULT_RUNTIME_ROOT = Path(os.environ.get(
+    "TGW_PLAN_GRAPH_RUNTIME",
+    str(Path.home() / ".cache" / "tgw-plan-graph"),
+))
 _FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SOLUTION_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 RECEIVER_PROFILES = {
@@ -165,7 +173,7 @@ def live_plan_graph(
     runtime_base = (
         Path(runtime_root)
         if runtime_root is not None
-        else Path(os.environ.get("TGW_PLAN_GRAPH_RUNTIME", tempfile.gettempdir()))
+        else _DEFAULT_RUNTIME_ROOT
     )
     runtime = runtime_base / "tgw-plan-graph"
     runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
