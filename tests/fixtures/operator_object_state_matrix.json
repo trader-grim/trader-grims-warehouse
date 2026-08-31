@@ -127,6 +127,10 @@
                   "store_category_id": {
                     "type": "string"
                   },
+                  "store_category_name": {
+                    "nullable": true,
+                    "type": "string"
+                  },
                   "title": {
                     "type": "string"
                   }
@@ -343,6 +347,12 @@
             "type": "string",
             "value": ""
           },
+          "store_category_name": {
+            "label": "Store category name",
+            "nullable": true,
+            "type": "string",
+            "value": ""
+          },
           "title": {
             "label": "Listing title",
             "type": "string",
@@ -549,6 +559,10 @@
                     "type": "string"
                   },
                   "store_category_id": {
+                    "type": "string"
+                  },
+                  "store_category_name": {
+                    "nullable": true,
                     "type": "string"
                   },
                   "title": {
@@ -767,6 +781,12 @@
             "type": "string",
             "value": ""
           },
+          "store_category_name": {
+            "label": "Store category name",
+            "nullable": true,
+            "type": "string",
+            "value": ""
+          },
           "title": {
             "label": "Listing title",
             "type": "string",
@@ -979,6 +999,10 @@
                     "type": "string"
                   },
                   "store_category_id": {
+                    "type": "string"
+                  },
+                  "store_category_name": {
+                    "nullable": true,
                     "type": "string"
                   },
                   "title": {
@@ -1197,6 +1221,12 @@
             "type": "string",
             "value": ""
           },
+          "store_category_name": {
+            "label": "Store category name",
+            "nullable": true,
+            "type": "string",
+            "value": ""
+          },
           "title": {
             "label": "Listing title",
             "type": "string",
@@ -1409,6 +1439,10 @@
                     "type": "string"
                   },
                   "store_category_id": {
+                    "type": "string"
+                  },
+                  "store_category_name": {
+                    "nullable": true,
                     "type": "string"
                   },
                   "title": {
@@ -1625,6 +1659,12 @@
             "type": "string",
             "value": ""
           },
+          "store_category_name": {
+            "label": "Store category name",
+            "nullable": true,
+            "type": "string",
+            "value": ""
+          },
           "title": {
             "label": "Listing title",
             "type": "string",
@@ -1818,6 +1858,10 @@
                     "type": "string"
                   },
                   "store_category_id": {
+                    "type": "string"
+                  },
+                  "store_category_name": {
+                    "nullable": true,
                     "type": "string"
                   },
                   "title": {
@@ -2036,6 +2080,12 @@
             "type": "string",
             "value": ""
           },
+          "store_category_name": {
+            "label": "Store category name",
+            "nullable": true,
+            "type": "string",
+            "value": ""
+          },
           "title": {
             "label": "Listing title",
             "type": "string",
@@ -2236,6 +2286,10 @@
                     "type": "string"
                   },
                   "store_category_id": {
+                    "type": "string"
+                  },
+                  "store_category_name": {
+                    "nullable": true,
                     "type": "string"
                   },
                   "title": {
@@ -2451,6 +2505,12 @@
           "store_category_id": {
             "label": "Store category",
             "options": [],
+            "type": "string",
+            "value": ""
+          },
+          "store_category_name": {
+            "label": "Store category name",
+            "nullable": true,
             "type": "string",
             "value": ""
           },

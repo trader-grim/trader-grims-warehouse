@@ -516,6 +516,7 @@ def build_item_operator_object(
             "shipping_profile": {"type": "string", "label": "Shipping policy", "value": draft.get("shipping_profile") or "", "options": deepcopy(context.get("fulfillment_policies") or [])},
             "return_policy_id": {"type": "string", "label": "Return policy", "value": draft.get("return_policy_id") or "", "options": deepcopy(context.get("return_policies") or [])},
             "store_category_id": {"type": "string", "label": "Store category", "value": draft.get("store_category_id") or "", "options": deepcopy(context.get("store_categories") or [])},
+            "store_category_name": {"type": "string", "nullable": True, "label": "Store category name", "value": draft.get("store_category_name") or ""},
             "secondary_store_category_id": {
                 "type": "string",
                 "nullable": True,
