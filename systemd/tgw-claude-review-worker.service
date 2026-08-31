@@ -13,6 +13,7 @@ SupplementaryGroups=tgw-coders
 UMask=0002
 WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current
 Environment=HOME=/home/codex
+Environment=TGW_REVIEW_EXECUTOR=manual
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=GIT_OPTIONAL_LOCKS=0
 Environment=TGW_REVIEW_REQUIRE_ACTOR=codex
