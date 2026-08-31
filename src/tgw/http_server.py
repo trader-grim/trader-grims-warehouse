@@ -3079,8 +3079,8 @@ def item_action(
             if migration is None and isinstance(_cfg.get("raw"), dict):
                 migration = _cfg["raw"].get("workflow_migration")
             migration = migration if isinstance(migration, dict) else {}
-            mode = migration.get("item_ai_identify_fanout", "workflow")
-            if mode != "workflow":
+            mode = migration.get("item_ai_identify_fanout", "legacy")
+            if mode not in {"legacy", "workflow"}:
                 raise HTTPException(
                     status_code=503,
                     detail=f"invalid item_ai_identify_fanout mode {mode!r}",
@@ -3118,6 +3118,19 @@ def item_action(
                         "reconciliation_gates": list(result.graph.reconciliation_gates),
                     }
                 job_id = result.dispatched.job_id
+            else:
+                # legacy fanout: a plain ai_identify queue job, exactly as the
+                # pre-governed-graph path enqueued it before commit 0587ca26c
+                # dropped the branch while prod config still selected it.
+                _apply_patch(json_path, {"ai_reidentify": True})
+                job_id = state_machine.enqueue_job(
+                    queue_name="ai_identify",
+                    payload={"sku": sku, "origin": "operator"},
+                    entity_type="item",
+                    entity_id=sku,
+                    dedupe_key=f"ai_identify:{sku}",
+                    max_attempts=3,
+                )
 
         else:
             job_id = state_machine.enqueue_job(
@@ -8038,17 +8051,28 @@ def _render_item_detail_html(
     elif _needs_photo_resync:
         # Photo repair belongs beside the photo evidence, where the dedicated
         # Resync Photos control already exists.  The action line remains the
-        # operator command surface: List issues the publish-capable grant and
-        # the server graph runs upload, stage, and publish in order.
+        # operator command surface.  A live listing is authoritative — pushing
+        # the synchronized photos must UPDATE it in place, never attempt a
+        # fresh list (which would collide with the existing listing).
         if _has_draft:
-            _line.append(
-                _abtn(
-                    "List on eBay",
-                    "listOnEbay()",
-                    "green",
-                    title=("Start the full listing workflow; it will synchronize photos before staging and publishing"),
+            if is_active:
+                _line.append(
+                    _abtn(
+                        "Update Item",
+                        "updateItem()",
+                        "yellow",
+                        title=("Synchronize photos and push the draft to the live listing in place"),
+                    )
                 )
-            )
+            else:
+                _line.append(
+                    _abtn(
+                        "List on eBay",
+                        "listOnEbay()",
+                        "green",
+                        title=("Start the full listing workflow; it will synchronize photos before staging and publishing"),
+                    )
+                )
     elif _has_error and not is_active:
 
         def _job_reason_code(job: Dict[str, Any]) -> str:
