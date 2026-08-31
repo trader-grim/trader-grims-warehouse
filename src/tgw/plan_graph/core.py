@@ -2,6 +2,8 @@
 
 This module deliberately performs only deterministic textual extraction.  Its
 outputs are navigation aids; the Markdown files remain authoritative.
+
+Todo #1938: automated pipeline clean-run proof docstring line.
 """
 from __future__ import annotations
 
