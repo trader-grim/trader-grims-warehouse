@@ -6994,7 +6994,15 @@ def _render_item_detail_html(
     listing_status = (eb.get("status") or "").strip()
     offer_status = (eo.get("status") or "").strip()
     offer_price = eo.get("price")
-    is_active = listing_status.lower() in ("active",) or offer_status.upper() in ("PUBLISHED",)
+    # A live listing is authoritative whether eBay reports it ACTIVE or
+    # PUBLISHED (inventory API lists PUBLISHED for already-live offers). The
+    # offer status alone is not sufficient: an ebay_listing.status=PUBLISHED
+    # item whose local ebay_offer is stale/UNPUBLISHED must still surface the
+    # Update Item affordance, never List on eBay.
+    is_active = (
+        listing_status.upper() in ("ACTIVE", "PUBLISHED")
+        or offer_status.upper() in ("PUBLISHED",)
+    )
     _is_staged = offer_status.upper() in ("UNPUBLISHED", "PUBLISHED")
     is_ready = bool(eo.get("ready_at")) and offer_status.upper() == "UNPUBLISHED"
 
