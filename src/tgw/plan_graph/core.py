@@ -4,6 +4,7 @@ This module deliberately performs only deterministic textual extraction.  Its
 outputs are navigation aids; the Markdown files remain authoritative.
 
 Todo #1938: automated pipeline clean-run proof docstring line.
+Remediation generation 1 pairs this note with a source-bound regression test.
 """
 from __future__ import annotations
 

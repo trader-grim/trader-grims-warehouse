@@ -155,3 +155,10 @@ def test_live_plan_graph_uses_configured_git_executable(tmp_path):
 def test_live_graph_refuses_unpinned_clean_head(tmp_path):
     with pytest.raises(SourcePreconditionError, match='approved_plan_commit_required'):
         live_plan_graph(_plan_repo(tmp_path), 'PP-ALPHA-001')
+
+
+def test_core_module_docstring_records_todo_1938_clean_run_proof():
+    from tgw.plan_graph import core
+
+    assert 'Todo #1938: automated pipeline clean-run proof docstring line.' in core.__doc__
+    assert 'Remediation generation 1 pairs this note with a source-bound regression test.' in core.__doc__
