@@ -49,12 +49,29 @@ def _repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
+_PLAN_LEAF = {
+    "schema": "tgw-plan-leaf-citation/v1",
+    "plan_commit": "058e2f980201cc78245358e4901cf007063f2c29",
+    "solution_hash": "sha256:ecce15aad2699492c0c5577bff1af7005ffbbec6ae6166b325b34c1cc7e70e9f",
+    "closure_hash": "sha256:16db00efe71a3c84d27faf012e58e5e664abe47e7eece40f2436dd125943f7bb",
+    "capability": "workflow.condition-derived-convergence@1",
+    "treatment_id": "codex-implement",
+    "source_commit": "8ea8f75aeddafa62899963a40e81e95ca596eed4",
+}
+
+
 def _job(**overrides):
     value = {
         "todo_id": 1745,
         "treatment_id": "codex-implement",
         "treatment_version": "1",
-        "task_spec": {"schema": "coding-task/v1", "todo_id": 1745, "agent": "codex", "body": "implement the bounded feature"},
+        "task_spec": {
+            "schema": "coding-task/v1",
+            "todo_id": 1745,
+            "agent": "codex",
+            "body": "implement the bounded feature",
+            "plan_leaf": dict(_PLAN_LEAF),
+        },
     }
     value.update(overrides)
     return value
@@ -612,6 +629,28 @@ def test_prompt_forbids_deploy_commit_config_secrets_and_satellites():
     for word in ("commit", "deploy", "configuration", "secrets", "satellite"):
         assert word in prompt
     assert "CLAUDE.md does not govern Codex" in prompt
+
+
+def test_prompt_requires_reading_the_bound_plan_leaf():
+    prompt = codex_implement._prompt(_job()["task_spec"])
+    assert "BOUND PLAN LEAF" in prompt
+    assert "do not replan" in prompt
+    assert "workflow.condition-derived-convergence@1" in prompt
+    assert "058e2f980201cc78245358e4901cf007063f2c29" in prompt
+
+
+def test_prompt_without_plan_leaf_omits_the_citation():
+    spec = dict(_job()["task_spec"])
+    spec.pop("plan_leaf")
+    prompt = codex_implement._prompt(spec)
+    assert "BOUND PLAN LEAF" not in prompt
+
+
+def test_validated_task_requires_plan_leaf():
+    spec = dict(_job()["task_spec"])
+    spec.pop("plan_leaf")
+    with pytest.raises(codex_implement.HardFailure, match="Plan leaf"):
+        codex_implement._validated_task(_job(task_spec=spec))
 
 
 def test_manual_executor_waits_writes_card_and_closes_candidate(tmp_path, monkeypatch):

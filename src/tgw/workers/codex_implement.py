@@ -118,6 +118,11 @@ def _manual_task_payload(job: dict[str, Any], task: dict[str, Any], cwd: Path) -
         "plan_commit": binding.get("plan_commit") if isinstance(binding, Mapping) else None,
         "solution_hash": binding.get("solution_hash") if isinstance(binding, Mapping) else None,
         "source_commit": binding.get("source_commit") if isinstance(binding, Mapping) else None,
+        **(
+            {"plan_leaf": task["plan_leaf"]}
+            if isinstance(task.get("plan_leaf"), Mapping)
+            else {}
+        ),
         "done_marker": str((cwd / _MANUAL_REL / _MANUAL_DONE_NAME).resolve()),
         "report_schema": _FINAL_SCHEMA,
         "boundaries": (
@@ -247,7 +252,31 @@ def _validated_task(job: dict[str, Any]) -> dict[str, Any]:
         or not task["body"].strip()
     ):
         raise HardFailure("Codex implementation task specification is invalid")
+    _validate_plan_leaf(task)
     return task
+
+
+def _validate_plan_leaf(task: Mapping[str, Any]) -> None:
+    """Require the exact approved-Plan leaf citation on every coding task.
+
+    The Luet Plan-to-Todo bridge is the only producer of executable coding
+    tasks; every such task must carry the Plan leaf it is bound to so the
+    actor reads the approved leaf instead of replanning from the request.
+    """
+    leaf = task.get("plan_leaf")
+    if not isinstance(leaf, Mapping) or leaf.get("schema") != "tgw-plan-leaf-citation/v1":
+        raise HardFailure("Codex implementation task lacks an exact Plan leaf citation")
+    for field in (
+        "plan_commit",
+        "solution_hash",
+        "closure_hash",
+        "capability",
+        "treatment_id",
+        "source_commit",
+    ):
+        value = leaf.get(field)
+        if not isinstance(value, str) or not value:
+            raise HardFailure(f"Codex implementation Plan leaf citation lacks {field}")
 
 
 def _codex_binary() -> str:
@@ -336,6 +365,32 @@ def _last_json_object(text: str) -> dict[str, Any] | None:
         search = search[:brace]
 
 
+def _plan_leaf_brief(task: Mapping[str, Any]) -> str:
+    """Render the exact approved-Plan leaf citation for the actor.
+
+    The actor must read the bound Plan leaf and implement only it; it must
+    never replan, re-derive, or broaden the task from the request text.  A
+    request that does not map onto the bound leaf is reported blocked, never
+    silently redirected into a new plan.
+    """
+    leaf = task.get("plan_leaf")
+    if not isinstance(leaf, Mapping):
+        return ""
+    return f"""BOUND PLAN LEAF (read this exact leaf before implementing; do not replan):
+  plan_commit: {leaf.get("plan_commit")}
+  capability: {leaf.get("capability")}
+  treatment_id: {leaf.get("treatment_id")}
+  source_commit: {leaf.get("source_commit")}
+  solution_hash: {leaf.get("solution_hash")}
+  closure_hash: {leaf.get("closure_hash")}
+
+This task is the bounded execution of the approved Plan leaf cited above.
+Implement exactly that leaf. If the request or body appears to require a
+different capability, treatment, or plan change, do NOT replan or improvise a
+new scope: return status=blocked and name the exact gap in the summary.
+"""
+
+
 def _prompt(task: dict[str, Any], continuation: dict[str, Any] | None = None, *, treatment: str = "Codex") -> str:
     continuation_brief = ""
     if continuation:
@@ -375,6 +430,8 @@ memory, or create workflow receipt files. Implement only this bounded task and
 run proportionate offline tests:
 {continuation_brief}
 {remediation_brief}
+
+{_plan_leaf_brief(task)}
 
 {task["body"]}
 

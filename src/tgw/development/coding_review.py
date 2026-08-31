@@ -76,6 +76,39 @@ def _canonical(value: Any) -> bytes:
     ).encode()
 
 
+def _validate_plan_leaf_citation(
+    task: Mapping[str, Any], plan: Mapping[str, Any]
+) -> None:
+    """Require the task's Plan leaf citation to match the job's Plan binding.
+
+    Independent review must check the candidate against the same approved Plan
+    leaf the implementer was bound to, so a drift between the citation and the
+    job binding is a hard binding failure, not a review finding.
+    """
+    leaf = task.get("plan_leaf")
+    if leaf is None:
+        # Pre-plan-citation tasks are legacy; their job binding still governs.
+        return
+    if not isinstance(leaf, Mapping) or leaf.get("schema") != "tgw-plan-leaf-citation/v1":
+        raise ReviewRunnerError("review task Plan leaf citation schema is invalid")
+    for field in (
+        "plan_commit",
+        "solution_hash",
+        "closure_hash",
+        "capability",
+        "treatment_id",
+        "source_commit",
+    ):
+        observed = leaf.get(field)
+        expected = plan.get(field)
+        if not isinstance(observed, str) or not observed:
+            raise ReviewRunnerError(f"review task Plan leaf citation lacks {field}")
+        if observed != expected:
+            raise ReviewRunnerError(
+                f"review task Plan leaf {field} differs from the job Plan binding"
+            )
+
+
 def _hash(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_canonical(value)).hexdigest()
 
@@ -220,13 +253,17 @@ def run_local_review(
     ):
         raise ReviewRunnerError("independent review bindings are incomplete")
     if (
-        set(task) != {"schema", "todo_id", "agent", "body"}
+        set(task) not in (
+            {"schema", "todo_id", "agent", "body"},
+            {"schema", "todo_id", "agent", "body", "plan_leaf"},
+        )
         or task.get("schema") != "coding-task/v1"
         or task.get("todo_id") != payload.get("todo_id")
         or not isinstance(task.get("body"), str)
         or not task["body"].strip()
     ):
         raise ReviewRunnerError("independent review task binding is invalid")
+    _validate_plan_leaf_citation(task, plan)
     task_hash = _hash(task)
     commit = str(candidate.get("commit", ""))
     tree = str(candidate.get("tree", ""))

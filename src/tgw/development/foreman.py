@@ -180,6 +180,39 @@ class _EligibleTreatment:
     implementation_attempt_hash: str | None = None
 
 
+def _plan_leaf_citation(binding: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Cite the exact approved Plan leaf the actor must read before coding.
+
+    Every dispatched coding task carries the typed Plan/Todo binding that the
+    Luet Plan-to-Todo bridge emitted.  The actor receives this citation so it
+    can read the authoritative leaf from the Plan (capability, treatment,
+    source commit, closure) instead of replanning from the request text.
+    """
+    if not isinstance(binding, Mapping):
+        raise ValueError("coding dispatch requires an exact Plan/Todo binding")
+    required = {
+        "plan_commit": str,
+        "solution_hash": str,
+        "closure_hash": str,
+        "capability": str,
+        "treatment_id": str,
+        "source_commit": str,
+    }
+    for field, expected in required.items():
+        if not isinstance(binding.get(field), expected) or not binding[field]:
+            raise ValueError(f"coding dispatch Plan binding lacks {field}")
+    citation = {
+        "schema": "tgw-plan-leaf-citation/v1",
+        "plan_commit": binding["plan_commit"],
+        "solution_hash": binding["solution_hash"],
+        "closure_hash": binding["closure_hash"],
+        "capability": binding["capability"],
+        "treatment_id": binding["treatment_id"],
+        "source_commit": binding["source_commit"],
+    }
+    return citation
+
+
 # ---------------------------------------------------------------------------
 # Active-job check
 # ---------------------------------------------------------------------------
@@ -867,6 +900,11 @@ def tick(
                     "todo_id": chosen.todo.todo_id,
                     "agent": chosen.todo.agent,
                     "body": chosen.todo.body,
+                    **(
+                        {"plan_leaf": _plan_leaf_citation(chosen.todo.plan_binding)}
+                        if chosen.todo.plan_binding is not None
+                        else {}
+                    ),
                 }
             disposition = chosen.disposition
             if disposition.treatment_id == "codex-implement":
@@ -883,6 +921,11 @@ def tick(
                             "todo_id": chosen.todo.todo_id,
                             "agent": "codex",
                             "body": chosen.todo.body,
+                            **(
+                                {"plan_leaf": _plan_leaf_citation(chosen.todo.plan_binding)}
+                                if chosen.todo.plan_binding is not None
+                                else {}
+                            ),
                         },
                     }
                 )

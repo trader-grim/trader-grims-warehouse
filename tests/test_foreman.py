@@ -23,6 +23,7 @@ from tgw.development.foreman import (
     _has_explicit_succeeded_implementation,
     _has_terminal_job,
     _implementation_attempt_hash,
+    _plan_leaf_citation,
     tick,
 )
 from tgw.development.plan_binding import execution_root_hash
@@ -325,6 +326,25 @@ def _todo(
         worktree=worktree,
         plan_binding=_plan_binding(todo_id, worktree),
     )
+
+
+def test_plan_leaf_citation_carries_exact_plan_binding():
+    binding = _plan_binding(17, "/tmp/worktree-1")
+    citation = _plan_leaf_citation(binding)
+    assert citation["schema"] == "tgw-plan-leaf-citation/v1"
+    assert citation["plan_commit"] == binding["plan_commit"]
+    assert citation["solution_hash"] == binding["solution_hash"]
+    assert citation["closure_hash"] == binding["closure_hash"]
+    assert citation["capability"] == binding["capability"]
+    assert citation["treatment_id"] == binding["treatment_id"]
+    assert citation["source_commit"] == binding["source_commit"]
+
+
+def test_plan_leaf_citation_rejects_missing_binding_field():
+    binding = _plan_binding(17, "/tmp/worktree-1")
+    binding.pop("capability")
+    with pytest.raises(ValueError, match="capability"):
+        _plan_leaf_citation(binding)
 
 
 def test_tick_refuses_unbound_todo_before_snapshot_or_dispatch():
