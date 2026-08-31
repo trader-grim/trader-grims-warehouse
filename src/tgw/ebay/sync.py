@@ -612,10 +612,10 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
     if price is None:
         raise ValueError(f'{sku}: no price set — run ebay_price or set draft_listing.price')
 
-    image_urls: List[str] = (
-        draft.get('imageUrls')
-        or [e['url'] for e in item.get('ebay_photos', [])]
-    )[:24]  # eBay max is 24 images per listing
+    # ebay_photos is the authoritative source (written in ordered_photos
+    # order); the draft's imageUrls is a stale redundant copy ebay_upload no
+    # longer maintains (operator-object command gate, todo #1931).
+    image_urls: List[str] = [e['url'] for e in item.get('ebay_photos', [])][:24]  # eBay max is 24 images per listing
     if not image_urls:
         raise ValueError(f'{sku}: no eBay photo URLs — run ebay_upload first')
 

@@ -170,22 +170,17 @@ def _photo_sync_state(
     draft_urls = draft_urls if isinstance(draft_urls, list) else []
     valid_draft_urls = [value for value in draft_urls if isinstance(value, str) and value]
     # ebay_upload no longer persists draft_listing.imageUrls through the
-    # machine fence (operator-object command gate, todo #1931): the draft
-    # image order is operator-owned state. An EMPTY draft list is therefore
-    # not a conflict — ebay_stage and ebay_sync already fall back to
-    # ebay_photos in that case — so the photo-sync fingerprint must too.
-    # Only a NON-empty draft list that diverges from the ordered EPS order is
-    # a real synchronization gap.
-    draft_order_mismatch = bool(draft_urls) and (
-        valid_draft_urls != ordered_urls or len(valid_draft_urls) != len(draft_urls)
-    )
+    # machine fence (operator-object command gate, todo #1931), so the draft
+    # image order is a stale redundant copy the machine can no longer keep in
+    # sync. Photo-sync completeness is therefore judged on ebay_photos alone,
+    # which ebay_upload writes in ordered_photos order; ebay_stage and
+    # ebay_sync already use ebay_photos as the authoritative source.
     missing = [Path(key).name for key in expected_keys if key not in by_local]
     extras = sorted(Path(key).name for key in set(by_local).difference(expected_keys))
     exact = bool(expected_keys) and not any((
         missing,
         extras,
         invalid_or_duplicate,
-        draft_order_mismatch,
     ))
     state = {
         "local": [Path(key).name for key in expected_keys],
@@ -215,8 +210,6 @@ def _photo_sync_state(
             detail.append(f"{len(extras)} stale hosted photo(s)")
         if invalid_or_duplicate:
             detail.append(f"{invalid_or_duplicate} invalid/duplicate mapping(s)")
-        if draft_order_mismatch:
-            detail.append("draft image order is not synchronized")
         reason = (
             f"photo sync waiting: {len(ordered_urls)}/{len(expected_keys)} local photos; "
             + "; ".join(detail)

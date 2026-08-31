@@ -568,8 +568,11 @@ class EbayStageWorker(QueueWorker):
                 'price_history': item['price_history'],
             })
 
-        # Photos must be uploaded — retryable if ebay_upload hasn't finished yet
-        image_urls = draft.get('imageUrls') or [e['url'] for e in item.get('ebay_photos', [])]
+        # Photos must be uploaded — retryable if ebay_upload hasn't finished yet.
+        # ebay_photos is the authoritative source (written in ordered_photos
+        # order); the draft's imageUrls is a stale redundant copy ebay_upload
+        # no longer maintains (operator-object command gate, todo #1931).
+        image_urls = [e['url'] for e in item.get('ebay_photos', [])]
         if not image_urls:
             raise RuntimeError(
                 f'{sku}: no eBay photo URLs yet — waiting for ebay_upload (will retry)'
