@@ -124,9 +124,15 @@ class EbayUploadWorker(QueueWorker):
                 reordered.append(path_to_entry[key])
         resulting_generation = None
         if reordered:
+            # Never write draft_listing through the generic item PATCH fence:
+            # since the operator-object command gate (todo #1931), draft_listing
+            # is a workflow-evidence field that the fence rejects with
+            # 409 operator_object_command_required.  ebay_stage and ebay_sync
+            # already derive imageUrls from ebay_photos when the draft's own
+            # imageUrls are empty, so persisting only ebay_photos is sufficient
+            # and keeps the machine fence out of operator-owned draft state.
             fields: Dict[str, Any] = {
                 'ebay_photos': reordered,
-                'draft_listing': {'imageUrls': [e['url'] for e in reordered]},
             }
             if clear_upload_blocked:
                 fields['ebay_upload_blocked'] = None
