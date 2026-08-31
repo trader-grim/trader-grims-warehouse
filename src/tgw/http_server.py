@@ -3122,7 +3122,10 @@ def item_action(
                 # legacy fanout: a plain ai_identify queue job, exactly as the
                 # pre-governed-graph path enqueued it before commit 0587ca26c
                 # dropped the branch while prod config still selected it.
-                _apply_patch(json_path, {"ai_reidentify": True})
+                # ai_redraft_requested marks the existing draft stale so the
+                # workflow re-runs ebay_draft after identification and the new
+                # attributes (title/author/...) reach the eBay draft (Set B).
+                _apply_patch(json_path, {"ai_reidentify": True, "ai_redraft_requested": True})
                 job_id = state_machine.enqueue_job(
                     queue_name="ai_identify",
                     payload={"sku": sku, "origin": "operator"},
