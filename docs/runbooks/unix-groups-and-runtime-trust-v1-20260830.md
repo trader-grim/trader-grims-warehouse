@@ -93,6 +93,30 @@ symlink), contain no writable files (`mode & 0o022 == 0`), no hard links
 (`st_nlink == 1`), and no files owned outside the trusted set. `current` must
 resolve inside `releases/`.
 
+### 3.3 Same-filesystem rule (scratch and durable roots)
+
+The repository worktrees live on the btrfs filesystem under `/opt/TGW`
+(device 39 on the current host). Everything that interacts with Git
+metadata, leases, reflinks, hard-linked pack components, or Doctor `st_dev`
+trust checks must be on that same device:
+
+- `/tmp` is **tmpfs** — RAM-backed, bounded, cleared on reboot. It is a
+  deliberate pressure valve (see section 5) and is a **different filesystem**:
+  never a workspace, cache, or durable root.
+- `/var/tmp` and `$HOME` (ext2/3) are **different filesystems** from the
+  btrfs worktrees — same-fs operations (hardlink, reflink, `os.link`,
+  leases) fail across the boundary.
+- The only same-filesystem scratch is under `/opt/TGW` — e.g.
+  `/opt/TGW/var/tmp` (setgid `tgw-coders`, mode `0o2770`) and the designed
+  durable roots `/opt/TGW/w` and `/opt/TGW/var/cache/tgw`.
+- **Per-actor, never shared:** a shared scratch root is created by whichever
+  actor ran first and fails for every other actor (2026-08-30, `/var/tmp/
+  tgw-pytest` and `/tmp/tgw-plan-graph` both hit this). Test defaults are
+  per-actor on the same filesystem: `TGW_TEST_DURABLE_ROOT` default
+  `/opt/TGW/var/tmp/tgw-pytest-<actor>`, `TGW_PLAN_GRAPH_RUNTIME` default
+  `/opt/TGW/var/tmp/tgw-plan-graph-<actor>`; both env vars still override for
+  CI.
+
 ### 3.3 Launcher surface
 
 `/usr/local/bin/tgw` and `/usr/local/sbin/tgw-operator` are fixed launchers:
@@ -117,10 +141,31 @@ release source. `/usr/local/sbin/tgw-coding-bootstrap` is root:root pinned.
   repair it before trusting `tgw-context` MCP, then start a fresh harness
   session (`context.clients` RESTART_REQUIRED).
 
-## 5. Reconciliation rules
+## 5. The `/tmp` pressure valve
+
+`/tmp` is tmpfs: RAM-backed, `size=10G`, `nr_inodes=1M`, cleared on reboot.
+This is a deliberate protection against messy sessions — an agent that fills
+`/tmp` fills RAM, not disk; reboot clears it; disk inodes are never
+exhausted. It is also a **different filesystem** than the btrfs worktrees, so
+same-fs operations cannot use it.
+
+Consequences:
+
+- Never bind `/opt/TGW` (btrfs) over `/tmp` for agents: that would remove the
+  size/inode bound and a messy agent would fill the real disk permanently.
+- Never treat `/tmp`, `/var/tmp`, or `$HOME` as a durable or same-fs scratch.
+- Agents needing scratch use their per-actor same-fs root under `/opt/TGW/var/
+  tmp` (see 3.3); durable roots are the designed `/opt/TGW/w` and
+  `/opt/TGW/var/cache/tgw`.
+
+## 6. Reconciliation rules
 
 - After any permission/ownership sweep, run `tgw doctor check` and confirm the
   lock, runtime, launcher, and unix-group checks PASS before starting work.
 - A missing repair verb is a backlog item (add the declared repair to the
   bootstrap `--repair` choices); never hand-repair records or queues outside
   the Doctor's declared surface.
+- After any chmod/chgrp of shared roots, verify the same-filesystem rule:
+  scratch used by Git/lease/reflink paths must stay on the worktree device
+  (btrfs `/opt/TGW`), and named-user ACLs must not appear on group-shared
+  roots (`setfacl -b` them; plain group permissions only).
