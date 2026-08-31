@@ -13431,7 +13431,7 @@ def _parser() -> argparse.ArgumentParser:
     auto_repair_parser.add_argument(
         "--receipt-root",
         type=Path,
-        default=Path("/opt/TGW/tgw-lib/doctor-receipts/auto"),
+        default=Path("/opt/TGW/var/tgw-coders/doctor-auto-repair"),
     )
     return parser
 
