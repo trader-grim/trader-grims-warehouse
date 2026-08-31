@@ -13028,9 +13028,10 @@ def auto_repair(
                 target.chmod(0o444)
     return {
         "schema": "tgw-local-doctor-auto-repair/v1",
-        "ok": decision["repair_allowed"] and all(
-            item.get("ok") is True for item in results
-        ),
+        "ok": not any(
+            item["state"] == "FAIL" for item in decision["operator_notices"]
+        )
+        and all(item.get("ok") is True for item in results),
         "decision": decision,
         "applied": apply,
         "results": results,
