@@ -2,6 +2,7 @@
 
 import json
 import os
+import pwd
 import shutil
 import tempfile
 from pathlib import Path
@@ -17,18 +18,18 @@ def durable_path():
     required to live on durable storage.  Pytest's built-in ``tmp_path`` is
     therefore the wrong fixture for those boundaries.  CI may select an exact
     durable test filesystem with ``TGW_TEST_DURABLE_ROOT``; the default is a
-    per-actor root under the actor's home (``~/.cache/tgw-pytest``, the same
-    location pytest itself uses for its cache).  The root is deliberately NOT
-    a shared directory: a shared root would be created by whichever actor ran
-    the suite first, under that actor's ownership, and would then fail for
-    every other actor (2026-08-30).  Every per-test directory is removed
-    afterward.
+    per-actor root on the same filesystem as the repository worktrees
+    (``/opt/TGW/var/tmp/tgw-pytest-<actor>``, the same btrfs as
+    ``/opt/TGW/var/worktrees``).  Same-filesystem matters: leases, reflinks,
+    hard-linked pack components, and the Doctor's ``st_dev`` trust checks all
+    require the worktree device.  A shared root is also wrong: it would be
+    created by whichever actor ran the suite first, under that actor's
+    ownership, and would then fail for every other actor (2026-08-30).  Every
+    per-test directory is removed afterward.
     """
 
-    base = Path(
-        os.environ.get("TGW_TEST_DURABLE_ROOT")
-        or (Path.home() / ".cache" / "tgw-pytest")
-    )
+    default = "/opt/TGW/var/tmp/tgw-pytest-" + (os.environ.get("USER") or pwd.getpwuid(os.geteuid()).pw_name)
+    base = Path(os.environ.get("TGW_TEST_DURABLE_ROOT") or default)
     if not base.is_absolute() or base == Path("/tmp") or Path("/tmp") in base.parents:
         raise RuntimeError("TGW_TEST_DURABLE_ROOT must be absolute and outside /tmp")
     base.mkdir(parents=True, exist_ok=True)
