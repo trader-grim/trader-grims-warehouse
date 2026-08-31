@@ -1580,7 +1580,6 @@ def patch_item(
         "ebay_listing",
         "ebay_submitted",
         "ebay_live",
-        "draft_listing_state",
         "status",
     }
     forbidden_evidence = sorted(workflow_evidence_fields.intersection(fields))
@@ -1596,7 +1595,11 @@ def patch_item(
                 ),
             },
         )
-    if "draft_listing" in fields and not operator_object_write:
+    # draft_listing is operator-owned for the *operator* surface, but the
+    # trusted machine fence (machine_api_key) legitimately re-baselines it
+    # after publish/price-reduce and after identification. Only the operator
+    # (non-machine) path is forced through the operator-object command.
+    if "draft_listing" in fields and not (operator_object_write or _is_machine_caller):
         raise HTTPException(
             status_code=409,
             detail={
