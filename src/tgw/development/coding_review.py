@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from tgw.claude_review_backend import ClaudeReviewBackendError
+from tgw.claude_review_backend import run as run_claude_review
 from tgw.codex_review_backend import CodexReviewBackendError
 from tgw.codex_review_backend import run as run_codex_review
 from tgw.development.partial_resume import HISTORY, PRESERVATION
@@ -344,11 +346,14 @@ def run_local_review(
         "context_hash": _hash(review_context_unsigned),
     }
     backend = semantic_backend
-    if os.environ.get("TGW_REVIEW_EXECUTOR", "codex") == "manual":
+    executor = os.environ.get("TGW_REVIEW_EXECUTOR", "codex")
+    if executor == "manual":
         backend = _manual_review_executor
+    elif executor == "claude":
+        backend = run_claude_review
     try:
         semantic_report = dict(backend(request, worktree))
-    except (CodexReviewBackendError, OSError, ValueError) as exc:
+    except (CodexReviewBackendError, ClaudeReviewBackendError, OSError, ValueError) as exc:
         raise ReviewRunnerError(
             f"independent semantic review backend failed: {exc}"
         ) from exc

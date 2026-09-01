@@ -7,17 +7,17 @@ ConditionPathExists=/opt/TGW/tgw-lib/coding-runtime/current/src/tgw/development/
 
 [Service]
 Type=simple
-User=codex
+User=claude
 Group=tgw-coders
 SupplementaryGroups=tgw-coders
 UMask=0002
 WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current
-Environment=HOME=/home/codex
+Environment=HOME=/home/claude
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=GIT_OPTIONAL_LOCKS=0
-Environment=TGW_REVIEW_REQUIRE_ACTOR=codex
-Environment=TGW_CODEX_REVIEW_BIN=/home/codex/.local/bin/codex
-Environment=TGW_CODEX_REVIEW_AUTH=/home/codex/.codex/auth.json
+Environment=TGW_REVIEW_EXECUTOR=claude
+Environment=TGW_REVIEW_REQUIRE_ACTOR=claude
+Environment=TGW_CLAUDE_REVIEW_BIN=/home/claude/.local/bin/claude
 Environment=PYTHONPATH=src
 ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.development.local_workflow --config /opt/TGW/tgw-lib/config/tgw-coding-local.json worker --queue claude-review
 Restart=on-failure

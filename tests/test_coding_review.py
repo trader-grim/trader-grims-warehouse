@@ -166,3 +166,40 @@ def test_manual_review_executor_times_out(tmp_path, monkeypatch):
     monkeypatch.setattr(coding_review, "_review_timeout_seconds", lambda: 0.3)
     with pytest.raises(coding_review.ReviewRunnerError, match="timed out"):
         coding_review.run_local_review(_payload(base, commit, tree), repo)
+
+
+def test_claude_review_executor_routes_to_claude_backend(tmp_path, monkeypatch):
+    repo, base, commit, tree = _repo(tmp_path)
+    monkeypatch.setenv("TGW_REVIEW_EXECUTOR", "claude")
+    calls = []
+
+    def fake(request, worktree):
+        calls.append(request)
+        return {
+            "schema": "tgw-code-review/v1",
+            "verdict": "PASS",
+            "snapshot_hash": request["snapshot_hash"],
+            "summary": "clean",
+            "findings": [],
+        }
+
+    monkeypatch.setattr(coding_review, "run_claude_review", fake)
+
+    result = coding_review.run_local_review(_payload(base, commit, tree), repo)
+
+    assert result["outcome"] == "satisfied"
+    assert result["established_conditions"] == ["reviewed"]
+    assert calls and calls[0]["snapshot_hash"] == coding_review._candidate_snapshot_hash(commit, tree)
+
+
+def test_claude_review_executor_backend_failure_raises_review_runner_error(tmp_path, monkeypatch):
+    repo, base, commit, tree = _repo(tmp_path)
+    monkeypatch.setenv("TGW_REVIEW_EXECUTOR", "claude")
+
+    def fake(request, worktree):
+        raise coding_review.ClaudeReviewBackendError("claude review executable is unavailable")
+
+    monkeypatch.setattr(coding_review, "run_claude_review", fake)
+
+    with pytest.raises(coding_review.ReviewRunnerError, match="backend failed"):
+        coding_review.run_local_review(_payload(base, commit, tree), repo)
