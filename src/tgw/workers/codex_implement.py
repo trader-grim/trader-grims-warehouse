@@ -341,28 +341,31 @@ def _claude_report(stdout: str) -> dict[str, Any] | None:
 
 
 def _last_json_object(text: str) -> dict[str, Any] | None:
-    """Return the last complete JSON object embedded in free text.
+    """Return the last complete top-level JSON object embedded in free text.
 
     Claude's print-mode ``result`` text is a plain string; the model may wrap
-    the report in a markdown code fence or append closing prose.  Walk the
-    last ``{`` backward so any trailing fence/prose after the object is
-    tolerated, and accept only a dict-shaped parse.
+    the report in a markdown code fence or append closing prose.  Scan left
+    to right for ``{`` and decode one full JSON value at a time (each decode
+    consumes its own nested braces/brackets, so a report whose last field is
+    a non-empty ``findings`` list of objects is never mistaken for one of its
+    own nested finding objects); keep the last dict-shaped value seen so a
+    trailing report still wins over any earlier JSON snippet.
     """
     decoder = json.JSONDecoder()
-    search = text
+    last: dict[str, Any] | None = None
+    index = 0
     while True:
-        brace = search.rfind("{")
+        brace = text.find("{", index)
         if brace < 0:
-            return None
-        candidate = search[brace:]
+            return last
         try:
-            value, _end = decoder.raw_decode(candidate)
+            value, end = decoder.raw_decode(text, brace)
         except json.JSONDecodeError:
-            search = search[:brace]
+            index = brace + 1
             continue
         if isinstance(value, dict):
-            return value
-        search = search[:brace]
+            last = value
+        index = end
 
 
 def _plan_leaf_brief(task: Mapping[str, Any]) -> str:

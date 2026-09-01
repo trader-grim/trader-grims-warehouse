@@ -105,7 +105,7 @@ def test_run_rejects_unparseable_report(tmp_path):
         run(request, tmp_path, claude_bin=claude, invoke=invoke)
 
 
-def test_run_rejects_snapshot_hash_mismatch(tmp_path):
+def test_run_stamps_request_snapshot_hash_over_model_echo(tmp_path, caplog):
     claude = executable(tmp_path / "claude")
     request = _request(tmp_path)
     report = {
@@ -120,8 +120,12 @@ def test_run_rejects_snapshot_hash_mismatch(tmp_path):
         out = json.dumps({"type": "result", "result": json.dumps(report)}) + "\n"
         return subprocess.CompletedProcess(command, 0, out, "")
 
-    with pytest.raises(ClaudeReviewBackendError, match="snapshot hash mismatch"):
-        run(request, tmp_path, claude_bin=claude, invoke=invoke)
+    with caplog.at_level("WARNING"):
+        result = run(request, tmp_path, claude_bin=claude, invoke=invoke)
+
+    assert result["snapshot_hash"] == request["snapshot_hash"]
+    assert result["verdict"] == "PASS"
+    assert any("snapshot_hash" in message for message in caplog.messages)
 
 
 def test_run_rejects_snapshot_root_mismatch(tmp_path):

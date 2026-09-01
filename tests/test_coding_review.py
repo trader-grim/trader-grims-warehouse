@@ -203,3 +203,62 @@ def test_claude_review_executor_backend_failure_raises_review_runner_error(tmp_p
 
     with pytest.raises(coding_review.ReviewRunnerError, match="backend failed"):
         coding_review.run_local_review(_payload(base, commit, tree), repo)
+
+
+def test_claude_review_fail_verdict_survives_mismatched_echoed_hash(tmp_path, monkeypatch):
+    """A FAIL-verdict review must still yield a valid receipt even when the
+    model echoes a snapshot_hash that differs from the bound request hash.
+
+    Previously ``claude_review_backend.run`` raised on a mismatched echo, so
+    the review job crashed before producing a ``tgw_review_report`` artifact;
+    the supervisor's stage validation then rejected the malformed
+    ``independent_review_failure`` artifact as "review report is empty,
+    stale, or contradictory" instead of routing a real FAIL to remediation.
+    """
+    repo, base, commit, tree = _repo(tmp_path)
+    monkeypatch.setenv("TGW_REVIEW_EXECUTOR", "claude")
+    claude_bin = tmp_path / "claude"
+    claude_bin.write_text("#!/bin/sh\nexit 0\n")
+    claude_bin.chmod(0o755)
+
+    def invoke(command, *, cwd, input, **kwargs):
+        report = {
+            "schema": "tgw-code-review/v1",
+            "verdict": "FAIL",
+            "snapshot_hash": "sha256:" + "0" * 64,
+            "summary": "ruff findings remain",
+            "findings": [
+                {
+                    "severity": "high",
+                    "path": "feature.py",
+                    "line": 1,
+                    "message": "ruff: unused import",
+                }
+            ],
+        }
+        out = json.dumps({"type": "result", "result": json.dumps(report)}) + "\n"
+        return subprocess.CompletedProcess(command, 0, out, "")
+
+    def backend(request, worktree):
+        from tgw.claude_review_backend import run as claude_run
+
+        return claude_run(request, worktree, claude_bin=claude_bin, invoke=invoke)
+
+    monkeypatch.setattr(coding_review, "run_claude_review", backend)
+
+    payload = _payload(base, commit, tree)
+    result = coding_review.run_local_review(payload, repo)
+
+    assert result["outcome"] == "failed"
+    assert result["established_conditions"] == []
+    artifact = result["artifacts"][0]
+    assert artifact["kind"] == "tgw_review_report"
+    assert artifact["diagnostic_verdict"] == "FAIL"
+
+    validated = coding_review.validate_failed_review_artifact(
+        result,
+        payload=payload,
+        worktree=repo,
+        expected_job_id="job-1",
+    )
+    assert validated["report"]["findings"][0]["message"] == "ruff: unused import"

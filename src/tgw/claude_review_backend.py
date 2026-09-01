@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -16,6 +17,8 @@ from tgw.codex_review_backend import REPORT_SCHEMA
 from tgw.workers.codex_implement import _claude_report
 
 Invoke = Callable[..., subprocess.CompletedProcess[str]]
+
+log = logging.getLogger(__name__)
 
 
 class ClaudeReviewBackendError(ValueError):
@@ -132,7 +135,14 @@ def run(
     if report is None:
         raise ClaudeReviewBackendError("Claude review returned invalid report JSON")
     if report.get("snapshot_hash") != request["snapshot_hash"]:
-        raise ClaudeReviewBackendError("Claude review report snapshot hash mismatch")
+        log.warning(
+            "Claude review echoed snapshot_hash %r instead of the bound request "
+            "snapshot_hash %r; stamping the request's snapshot_hash since it is "
+            "request identity, not model output",
+            report.get("snapshot_hash"),
+            request["snapshot_hash"],
+        )
+    report = {**report, "snapshot_hash": request["snapshot_hash"]}
     return report
 
 
