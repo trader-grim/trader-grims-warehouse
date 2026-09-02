@@ -1564,6 +1564,44 @@ def test_unix_access_probes_support_roots_and_inflight_worktrees(
     ) in support_calls
 
 
+def test_actor_path_access_flags_enforces_tgw_coders_membership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "shared"
+    target.mkdir()
+    target.chmod(0o750)
+    monkeypatch.setattr(
+        doctor_cli.pwd,
+        "getpwuid",
+        lambda _uid: SimpleNamespace(pw_name="db"),
+    )
+    monkeypatch.setattr(
+        doctor_cli.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=4242, pw_gid=77),
+    )
+    monkeypatch.setattr(
+        doctor_cli.grp,
+        "getgrnam",
+        lambda _name: SimpleNamespace(gr_gid=77),
+    )
+
+    # Actor carries the shared coding group -> group bits are consulted.
+    monkeypatch.setattr(doctor_cli.os, "getgrouplist", lambda _name, _gid: [77])
+    assert (
+        doctor_cli._actor_path_access_flags("codex", target, ("-r", "-x")) is True
+    )
+    assert (
+        doctor_cli._actor_path_access_flags("codex", target, ("-w",)) is False
+    )
+
+    # Actor outside the shared coding group has no path to the surface.
+    monkeypatch.setattr(doctor_cli.os, "getgrouplist", lambda _name, _gid: [9999])
+    assert (
+        doctor_cli._actor_path_access_flags("codex", target, ("-r",)) is False
+    )
+
+
 def test_active_worktree_rows_require_matching_managed_absolute_paths(
     tmp_path: Path,
 ) -> None:

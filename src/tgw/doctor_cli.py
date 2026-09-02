@@ -3803,12 +3803,17 @@ def _actor_path_access_flags(
     # tgw-coders group (no symlink; group bits as asked).
     try:
         record = pwd.getpwnam(actor)
-        group = grp.getgrnam(_CODING_RUNTIME_GROUP)
-    except KeyError as exc:
+        coding_group = grp.getgrnam(_CODING_RUNTIME_GROUP)
+        actor_groups = os.getgrouplist(actor, record.pw_gid)
+    except (KeyError, OSError) as exc:
         raise DoctorError(f"Unix access probe actor is unavailable: {actor}") from exc
+    if coding_group.gr_gid not in actor_groups:
+        # The any-actor model only grants access via the shared tgw-coders
+        # group; a principal outside the group has no path to the surface.
+        return False
     try:
         observed = path.stat(follow_symlinks=False)
-    except OSError as exc:
+    except OSError:
         return False
     if stat.S_ISLNK(observed.st_mode):
         return False
