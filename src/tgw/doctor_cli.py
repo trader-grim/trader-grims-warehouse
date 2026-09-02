@@ -8912,6 +8912,75 @@ def repair_runtime(
     return {"ok": True, "operation": "runtime", "changed": changed, "receipt": receipt}
 
 
+def repair_release_ownership(
+    paths: DoctorPaths, *, desired_commit: str | None = None
+) -> dict[str, Any]:
+    """Promote a materialized-but-unpromoted selected release to root:root.
+
+    An unprivileged lifecycle materialization lands the immutable release owned
+    by ``db:tgw-coders``; the exact-tree and manifest invariants already hold,
+    but the cold Context launcher's root:root check rejects it and the operator
+    would otherwise have to re-run bootstrap.  This bounded repair re-verifies
+    the exact Git tree, re-owns every inode to
+    ``context_install_uid:context_install_gid`` without widening any mode, and
+    re-verifies — it never bypasses the immutability check.
+    """
+    _require_root()
+    if desired_commit is None:
+        desired, release, _task = _desired_runtime(paths)
+    else:
+        if _COMMIT.fullmatch(desired_commit) is None:
+            raise DoctorError("release ownership repair commit is invalid")
+        desired = desired_commit
+        release = paths.runtime_root / "releases" / desired
+    head, _tree, status = _source_identity(paths)
+    if status or head != desired:
+        raise DoctorError(
+            "release ownership repair requires clean canonical source at the declared commit"
+        )
+    before = _verify_release_tree(paths, desired, release)
+    already_owned = all(
+        not path.is_symlink()
+        and (state := path.stat(follow_symlinks=False)).st_uid
+        == paths.context_install_uid
+        and state.st_gid == paths.context_install_gid
+        for path in (release, *release.rglob("*"))
+    )
+    if not already_owned:
+        # The ordinary db:tgw-coders materializer cannot mint root-owned bytes.
+        # Root re-verifies the exact Git tree, performs the same narrow
+        # descriptor-bound ownership promotion the bootstrap uses, then
+        # re-verifies — the root:root immutability check is never bypassed.
+        _promote_bootstrap_release_ownership(
+            release,
+            uid=paths.context_install_uid,
+            gid=paths.context_install_gid,
+        )
+    after = _verify_release_tree(paths, desired, release)
+    for runtime_path in (release, *release.rglob("*")):
+        observed = runtime_path.stat(follow_symlinks=False)
+        if runtime_path.is_symlink():
+            raise DoctorError("promoted release contains a symlink")
+        if (
+            observed.st_uid != paths.context_install_uid
+            or observed.st_gid != paths.context_install_gid
+            or observed.st_mode & 0o022
+        ):
+            raise DoctorError("release ownership promotion did not reach root:root immutable")
+    receipt = _receipt(
+        paths,
+        "release-ownership",
+        {"release_tree": before, "already_owned": already_owned},
+        {"release_tree": after},
+    )
+    return {
+        "ok": True,
+        "operation": "release-ownership",
+        "changed": not already_owned,
+        "receipt": receipt,
+    }
+
+
 def repair_database(
     paths: DoctorPaths, *, desired_commit: str | None = None
 ) -> dict[str, Any]:
@@ -12756,6 +12825,7 @@ _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
     "context": repair_context,
     "context-launcher": repair_context_launcher,
     "runtime": repair_runtime,
+    "release-ownership": repair_release_ownership,
     "database": repair_database,
     "unix-git-access": repair_unix_git_access,
     "workers": repair_workers,
@@ -12767,6 +12837,7 @@ _REPAIR_POSTCONDITIONS: dict[str, tuple[str, ...]] = {
     "context": ("context.snapshot",),
     "context-launcher": ("context.launcher",),
     "runtime": ("runtime.local-coding",),
+    "release-ownership": ("context.snapshot",),
     "database": ("database.local-coding",),
     "unix-git-access": ("access.unix-group",),
     "workers": ("services.local-coding",),
@@ -12849,6 +12920,7 @@ def repair(
             "context",
             "context-launcher",
             "runtime",
+            "release-ownership",
             "database",
             "workers",
             "plan-render-worker",
@@ -12864,6 +12936,7 @@ def repair(
             if operation in {
                 "context",
                 "context-launcher",
+                "release-ownership",
                 "database",
                 "workers",
                 "plan-render-worker",
@@ -12897,6 +12970,7 @@ def repair(
                 result = function(paths, **context_arguments)
             elif operation in {
                 "runtime",
+                "release-ownership",
                 "database",
                 "workers",
                 "plan-render-worker",

@@ -1761,6 +1761,11 @@ def test_root_request_rejects_forbidden_fields_and_is_idempotent_after_recovery(
         "_restart_acknowledged",
         lambda _paths, _trigger, **_kwargs: restart_evidence,
     )
+    monkeypatch.setattr(
+        coding_root_effect,
+        "_apply_release_ownership_via_bootstrap",
+        lambda _paths, _commit: {"status": "stubbed"},
+    )
     first_effects = coding_root_effect._default_effects(paths, request)
     assert first_effects["selection"]["state"] == "completed"
     assert first_effects["workers"] == restart_evidence
@@ -1935,6 +1940,11 @@ def test_lifecycle_selection_converges_after_bootstrap_selection(
         coding_root_effect,
         "_runtime_canary",
         lambda _paths, _root_id: {"schema": "canary", "status": "PASS"},
+    )
+    monkeypatch.setattr(
+        coding_root_effect,
+        "_apply_release_ownership_via_bootstrap",
+        lambda _paths, _commit: {"status": "stubbed"},
     )
 
     effects = coding_root_effect._default_effects(paths, request)
@@ -2399,3 +2409,149 @@ def test_worker_effect_fence_requires_exact_typed_implementation_intent(
     assert validate_implementation_intent_payload(
         resume, claimed_hash=resume_hash, lifecycle_binding=lifecycle
     ) == resume
+
+
+def _bootstrapped_release(tmp_path: Path):
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "-q", repository], check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "ownership@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Ownership Test"], cwd=repository, check=True
+    )
+    (repository / "source.py").write_text("READY = True\n")
+    (repository / "pkg").mkdir()
+    (repository / "pkg" / "mod.py").write_text("NESTED = True\n")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "candidate"], cwd=repository, check=True)
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True
+    ).strip()
+    store = store_at(tmp_path / "journal")
+    paths = root_paths(tmp_path, store, repository)
+    coding_root_effect.bootstrap_candidate(paths, commit=commit, tree=tree)
+    return paths, commit
+
+
+def test_selected_release_ownership_flags_a_materializer_owned_tree(tmp_path: Path):
+    paths, commit = _bootstrapped_release(tmp_path)
+
+    # Default context_install_uid is 0 (root:root); an ordinary db materialization
+    # leaves the tree owned by the running account, so it is flagged.
+    observed = coding_root_effect._selected_release_ownership(paths, commit)
+    assert observed["root_owned_immutable"] is False
+    assert any(entry.endswith(":owner") for entry in observed["unsafe"])
+
+    # When the promotion target is the running account the same tree is accepted.
+    local = replace(
+        paths,
+        context_install_uid=os.geteuid(),
+        context_install_gid=os.getegid(),
+    )
+    accepted = coding_root_effect._selected_release_ownership(local, commit)
+    assert accepted["root_owned_immutable"] is True
+    assert accepted["unsafe"] == []
+
+
+def test_ensure_selected_release_root_owned_promotes_inline_when_privileged(
+    tmp_path: Path,
+):
+    paths, commit = _bootstrapped_release(tmp_path)
+    local = replace(
+        paths,
+        context_install_uid=os.geteuid(),
+        context_install_gid=os.getegid(),
+    )
+    request = {"candidate_commit": commit}
+    result = coding_root_effect._ensure_selected_release_root_owned(local, request)
+    assert result["status"] == "already-root-owned"
+    assert result["ownership"]["root_owned_immutable"] is True
+
+
+def test_ensure_selected_release_root_owned_delegates_bounded_root_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    paths, commit = _bootstrapped_release(tmp_path)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        coding_root_effect,
+        "_apply_release_ownership_via_bootstrap",
+        lambda _paths, candidate: seen.append(candidate) or {"status": "invoked"},
+    )
+    result = coding_root_effect._ensure_selected_release_root_owned(
+        paths, {"candidate_commit": commit}
+    )
+    assert seen == [commit]
+    assert result["status"] == "delegated-to-pinned-bootstrap"
+    assert result["bootstrap"] == {"status": "invoked"}
+
+
+def test_apply_release_ownership_via_bootstrap_reports_missing_pin(tmp_path: Path):
+    paths, commit = _bootstrapped_release(tmp_path)
+    absent = replace(paths, coding_bootstrap=tmp_path / "no-such-bootstrap")
+    outcome = coding_root_effect._apply_release_ownership_via_bootstrap(absent, commit)
+    assert outcome["status"] == "pinned-bootstrap-unavailable"
+
+
+def test_default_effects_gates_workers_ack_on_root_owned_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository = tmp_path / "repository"
+    subprocess.run(["git", "init", "-q", repository], check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "gate@example.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Gate Test"], cwd=repository, check=True
+    )
+    (repository / "source.py").write_text("READY = True\n")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "candidate"], cwd=repository, check=True)
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+    ).strip()
+    tree = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True
+    ).strip()
+    store = store_at(tmp_path / "journal")
+    record = record_at_integration(
+        store, repository, source=commit, source_tree=tree, commit=commit, tree=tree
+    )
+    paths = root_paths(tmp_path, store, repository)
+    coding_root_effect.bootstrap_candidate(paths, commit=commit, tree=tree)
+    request = build_request(record)
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        coding_root_effect,
+        "_apply_release_ownership_via_bootstrap",
+        lambda _paths, candidate: calls.append(candidate) or {"status": "invoked"},
+    )
+    monkeypatch.setattr(
+        coding_root_effect,
+        "_runtime_canary",
+        lambda _paths, _root_id: {"schema": "canary", "status": "PASS"},
+    )
+
+    # An ordinary unprivileged materialization emits the bounded promotion
+    # request and then stays pending on the fixed root acknowledgement instead
+    # of completing against a materializer-owned (Doctor-rejected) release.
+    with pytest.raises(coding_root_effect.RestartPending):
+        coding_root_effect._default_effects(paths, request)
+    assert calls == [commit]
+    assert coding_root_effect._selected_release_ownership(
+        replace(
+            paths,
+            context_install_uid=os.geteuid(),
+            context_install_gid=os.getegid(),
+        ),
+        commit,
+    )["root_owned_immutable"] is True

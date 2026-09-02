@@ -7385,6 +7385,47 @@ def test_runtime_selector_rollback_preserves_a_concurrent_selection(
     assert current.readlink() == Path("releases/concurrent")
 
 
+def test_release_ownership_repair_is_registered_and_verifies_root_owned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert "release-ownership" in doctor_cli._REPAIRS
+    assert doctor_cli._REPAIR_POSTCONDITIONS["release-ownership"] == (
+        "context.snapshot",
+    )
+    paths, head, tree = _fixture(tmp_path)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        doctor_cli, "_source_identity", lambda _paths: (head, tree, "")
+    )
+
+    result = doctor_cli.repair_release_ownership(paths, desired_commit=head)
+
+    assert result["ok"] is True
+    assert result["operation"] == "release-ownership"
+    # The _fixture release is already owned by context_install_uid, so this is
+    # the idempotent path: no inode churn, invariants still verified.
+    assert result["changed"] is False
+    assert Path(result["receipt"]).is_file()
+    release = paths.runtime_root / "releases" / head
+    for path in (release, *release.rglob("*")):
+        observed = path.stat(follow_symlinks=False)
+        assert observed.st_uid == paths.context_install_uid
+        assert observed.st_gid == paths.context_install_gid
+        assert not observed.st_mode & 0o022
+
+
+def test_release_ownership_repair_refuses_a_dirty_or_mismatched_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, head, tree = _fixture(tmp_path)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        doctor_cli, "_source_identity", lambda _paths: (head, tree, " M x")
+    )
+    with pytest.raises(doctor_cli.DoctorError, match="clean canonical source"):
+        doctor_cli.repair_release_ownership(paths, desired_commit=head)
+
+
 def test_doctor_effective_root_source_status_is_demoted_to_ordinary_db(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

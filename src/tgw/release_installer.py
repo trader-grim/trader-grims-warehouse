@@ -13,7 +13,9 @@ import fcntl
 import hashlib
 import json
 import os
+import pwd
 import re
+import secrets
 import shutil
 import stat
 import tarfile
@@ -27,6 +29,9 @@ SCHEMA = "tgw-release-manifest-v1"
 RECEIPT_SCHEMA = "tgw-immutable-release-selection-v1"
 REFUSAL_SCHEMA = "tgw-immutable-release-refusal-v1"
 RUNTIME_SCHEMA = "tgw-release-runtime-files-v1"
+OWNERSHIP_PROMOTION_SCHEMA = "tgw-immutable-release-ownership-promotion-v1"
+_RELEASE_DIR_MODE = 0o555
+_RELEASE_FILE_MODES = frozenset({0o444, 0o555})
 _HEX = re.compile(r"^[0-9a-f]+$")
 _GENERATION = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 _RESERVED_GENERATIONS = frozenset({"current", "releases", "operations", "receipts", "refusals"})
@@ -402,6 +407,282 @@ def verify(root: Path, generation: str) -> dict[str, Any]:
         "file_count": len(actual),
         "status": "PASS",
         "runtime_manifest_sha256": runtime_manifest_hash,
+    }
+
+
+_PROMOTE_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+_PROMOTE_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+
+
+def _release_tree_ownership(release: Path) -> tuple[bool, list[str]]:
+    """Return whether every path under ``release`` is a non-writable owned inode.
+
+    The first element is ``True`` only when the release root and every
+    descendant is a directory (0555) or single-linked regular file (0444/0555)
+    with no group/other write bit; the second lists any offending relatives.
+    """
+    unsafe: list[str] = []
+    seen_root = False
+    for path in (release, *sorted(release.rglob("*"))):
+        relative = "." if path == release else str(path.relative_to(release))
+        observed = path.stat(follow_symlinks=False)
+        mode = stat.S_IMODE(observed.st_mode)
+        if path.is_symlink():
+            unsafe.append(relative + ":symlink")
+        elif stat.S_ISDIR(observed.st_mode):
+            if mode != _RELEASE_DIR_MODE:
+                unsafe.append(relative + ":dir-mode")
+        elif stat.S_ISREG(observed.st_mode):
+            if mode not in _RELEASE_FILE_MODES:
+                unsafe.append(relative + ":file-mode")
+            if observed.st_nlink != 1:
+                unsafe.append(relative + ":link-count")
+        else:
+            unsafe.append(relative + ":special")
+        if observed.st_mode & 0o022 and not path.is_symlink():
+            unsafe.append(relative + ":writable")
+        if path == release:
+            seen_root = stat.S_ISDIR(observed.st_mode)
+    return (seen_root and not unsafe), unsafe
+
+
+def _tree_is_owned_by(release: Path, *, uid: int, gid: int) -> bool:
+    for path in (release, *release.rglob("*")):
+        observed = path.stat(follow_symlinks=False)
+        if path.is_symlink() or observed.st_uid != uid or observed.st_gid != gid:
+            return False
+    return True
+
+
+def _promote_owner_recursive(
+    descriptor: int,
+    *,
+    uid: int,
+    gid: int,
+    allowed_source_uids: frozenset[int],
+) -> int:
+    """Re-own one already-open release directory and its descendants.
+
+    The directory descriptor binds every lookup to the opened inode even if a
+    pathname is concurrently renamed.  Regular files are validated as
+    single-linked immutable release content and replaced by a fresh
+    ``uid:gid`` inode rather than path-chowned, so an external hard link can
+    never receive a privileged ownership change.  Directory modes are made
+    owner-private only while replacement inodes are published, then restored.
+    """
+    observed = os.fstat(descriptor)
+    mode = stat.S_IMODE(observed.st_mode)
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or observed.st_uid not in allowed_source_uids
+        or mode != _RELEASE_DIR_MODE
+    ):
+        raise ReleaseError("release directory cannot be promoted safely")
+    promoted = 0
+    os.fchown(descriptor, uid, gid)
+    os.fchmod(descriptor, 0o700)
+    try:
+        scan_fd = os.open(".", _PROMOTE_DIR_FLAGS, dir_fd=descriptor)
+        try:
+            held = os.fstat(descriptor)
+            scanned = os.fstat(scan_fd)
+            if (held.st_dev, held.st_ino) != (scanned.st_dev, scanned.st_ino):
+                raise ReleaseError("release changed during ownership promotion")
+            names = sorted(os.listdir(scan_fd))
+        finally:
+            os.close(scan_fd)
+        for name in names:
+            child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(child.st_mode):
+                child_fd = os.open(name, _PROMOTE_DIR_FLAGS, dir_fd=descriptor)
+                try:
+                    bound = os.fstat(child_fd)
+                    if (bound.st_dev, bound.st_ino) != (child.st_dev, child.st_ino):
+                        raise ReleaseError("release changed during ownership promotion")
+                    promoted += _promote_owner_recursive(
+                        child_fd,
+                        uid=uid,
+                        gid=gid,
+                        allowed_source_uids=allowed_source_uids,
+                    )
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(child.st_mode):
+                promoted += _promote_owner_file(
+                    descriptor,
+                    name,
+                    child,
+                    uid=uid,
+                    gid=gid,
+                    allowed_source_uids=allowed_source_uids,
+                )
+            else:
+                raise ReleaseError("release cannot be promoted safely")
+    finally:
+        os.fchmod(descriptor, mode)
+    final = os.fstat(descriptor)
+    if final.st_uid != uid or final.st_gid != gid or stat.S_IMODE(final.st_mode) != mode:
+        raise ReleaseError("release ownership promotion is incomplete")
+    os.fsync(descriptor)
+    return promoted
+
+
+def _promote_owner_file(
+    parent_fd: int,
+    name: str,
+    expected: os.stat_result,
+    *,
+    uid: int,
+    gid: int,
+    allowed_source_uids: frozenset[int],
+) -> int:
+    mode = stat.S_IMODE(expected.st_mode)
+    if (
+        not stat.S_ISREG(expected.st_mode)
+        or expected.st_uid not in allowed_source_uids
+        or expected.st_nlink != 1
+        or mode not in _RELEASE_FILE_MODES
+    ):
+        raise ReleaseError("release file cannot be promoted safely")
+    source_fd = os.open(name, _PROMOTE_FILE_FLAGS, dir_fd=parent_fd)
+    temporary = f".tgw-release-promote-{secrets.token_hex(16)}"
+    target_fd: int | None = None
+    try:
+        before = os.fstat(source_fd)
+        if (before.st_dev, before.st_ino) != (expected.st_dev, expected.st_ino):
+            raise ReleaseError("release changed during ownership promotion")
+        target_fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            _write_all(target_fd, chunk)
+        after = os.fstat(source_fd)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_nlink,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_nlink,
+        ):
+            raise ReleaseError("release changed during ownership promotion")
+        os.fchown(target_fd, uid, gid)
+        os.fchmod(target_fd, mode)
+        os.fsync(target_fd)
+        os.close(target_fd)
+        target_fd = None
+        os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        promoted = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(promoted.st_mode)
+            or promoted.st_uid != uid
+            or promoted.st_gid != gid
+            or promoted.st_nlink != 1
+            or stat.S_IMODE(promoted.st_mode) != mode
+        ):
+            raise ReleaseError("release ownership promotion is incomplete")
+        return 1
+    finally:
+        if target_fd is not None:
+            os.close(target_fd)
+        try:
+            os.unlink(temporary, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        os.close(source_fd)
+
+
+def _default_source_uids(uid: int) -> frozenset[int]:
+    """Accounts a materialized-but-unpromoted release may currently be owned by."""
+    candidates = {uid, os.geteuid()}
+    for name in ("db",):
+        try:
+            candidates.add(pwd.getpwnam(name).pw_uid)
+        except KeyError:
+            pass
+    return frozenset(candidates)
+
+
+def promote_release_ownership(
+    root: Path,
+    generation: str,
+    *,
+    uid: int = 0,
+    gid: int = 0,
+    source_uids: frozenset[int] | None = None,
+) -> dict[str, Any]:
+    """Re-own an already materialized immutable release to ``uid:gid``.
+
+    ``materialize`` already lands 0555 directories and 0444/0555 files, but an
+    unprivileged materializer leaves them owned by its own account.  A cold
+    Doctor/Context launcher requires the selected release tree to be
+    ``root:root`` immutable, so this promotion re-owns every inode without
+    widening any mode and re-verifies the exact-tree and manifest invariants
+    before and after.  It is idempotent: a release already owned by ``uid:gid``
+    is verified and returned untouched.
+    """
+    generation = _generation(generation)
+    releases_root = root / "releases"
+    resolved_releases = releases_root.resolve(strict=True)
+    release = releases_root / generation
+    if release.is_symlink() or release.resolve(strict=True).parent != resolved_releases:
+        raise ReleaseError("release path escapes the immutable releases directory")
+    safe, unsafe = _release_tree_ownership(release)
+    if not safe:
+        raise ReleaseError("release tree is not immutable: " + ",".join(unsafe[:8]))
+    verify(root, generation)
+    if _tree_is_owned_by(release, uid=uid, gid=gid):
+        return {
+            "schema": OWNERSHIP_PROMOTION_SCHEMA,
+            "generation": generation,
+            "uid": uid,
+            "gid": gid,
+            "promoted_inodes": 0,
+            "already_owned": True,
+            "verification": verify(root, generation),
+        }
+    allowed_source_uids = source_uids or _default_source_uids(uid)
+    release_fd = os.open(release, _PROMOTE_DIR_FLAGS)
+    try:
+        bound = os.fstat(release_fd)
+        visible = release.stat(follow_symlinks=False)
+        if (bound.st_dev, bound.st_ino) != (visible.st_dev, visible.st_ino):
+            raise ReleaseError("release changed before ownership promotion")
+        promoted = _promote_owner_recursive(
+            release_fd,
+            uid=uid,
+            gid=gid,
+            allowed_source_uids=allowed_source_uids,
+        )
+    finally:
+        os.close(release_fd)
+    final = release.stat(follow_symlinks=False)
+    if (
+        final.st_uid != uid
+        or final.st_gid != gid
+        or stat.S_IMODE(final.st_mode) != _RELEASE_DIR_MODE
+        or not _tree_is_owned_by(release, uid=uid, gid=gid)
+    ):
+        raise ReleaseError("release ownership promotion is incomplete")
+    return {
+        "schema": OWNERSHIP_PROMOTION_SCHEMA,
+        "generation": generation,
+        "uid": uid,
+        "gid": gid,
+        "promoted_inodes": promoted,
+        "already_owned": False,
+        "verification": verify(root, generation),
     }
 
 
@@ -910,6 +1191,10 @@ def main() -> int:
     rollback_command.add_argument("--receipt", type=Path, required=True)
     rollback_command.add_argument("--expected-current", required=True)
     rollback_command.add_argument("--operation-id", required=True)
+    promote = commands.add_parser("promote-selected")
+    promote.add_argument("--uid", type=int, default=0)
+    promote.add_argument("--gid", type=int, default=0)
+    promote.add_argument("--allow-missing", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "install":
@@ -1016,6 +1301,17 @@ def main() -> int:
                 expected_current=args.expected_current,
                 operation_id=args.operation_id,
             )
+        elif args.command == "promote-selected":
+            selected = current_generation(args.root)
+            if selected is None:
+                if args.allow_missing:
+                    result = {"status": "no-selected-release"}
+                else:
+                    raise ReleaseError("no release is currently selected")
+            else:
+                result = promote_release_ownership(
+                    args.root, selected, uid=args.uid, gid=args.gid
+                )
         else:
             result = {"completed": recover(args.root), "current": current_generation(args.root)}
         print(json.dumps(result, indent=2, sort_keys=True))

@@ -13,8 +13,10 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from tgw import release_installer
 from tgw.admission_recovery import compile_release_admission, sign_environment_preflight_receipt
 from tgw.release_installer import (
+    OWNERSHIP_PROMOTION_SCHEMA,
     RECEIPT_SCHEMA,
     ReleaseError,
     _atomic_json,
@@ -22,6 +24,7 @@ from tgw.release_installer import (
     current_generation,
     install_runtime_files,
     materialize,
+    promote_release_ownership,
     recover,
     rollback,
     select,
@@ -447,3 +450,139 @@ def test_recover_rejects_ambiguous_selector(tmp_path: Path) -> None:
     _atomic_json(root / "operations" / "ambiguous.json", intent, mode=0o600)
     with pytest.raises(ReleaseError, match="ambiguous selector recovery"):
         recover(root)
+
+
+def _materialized(root: Path, tmp_path: Path, generation: str) -> Path:
+    archive = tmp_path / f"{generation}.tar.gz"
+    digest = _archive(
+        archive,
+        {
+            "src/tgw/example.py": b"VALUE = 1\n",
+            "src/tgw/pkg/mod.py": b"NESTED = 2\n",
+            "bin/run.sh": b"#!/bin/sh\nexit 0\n",
+        },
+        commit=COMMIT_A,
+    )
+    materialize(
+        root,
+        archive,
+        generation=generation,
+        commit=COMMIT_A,
+        tree=TREE,
+        archive_sha256=digest,
+    )
+    return root / "releases" / generation
+
+
+def _tree_modes(release: Path) -> dict[str, tuple[int, int]]:
+    modes: dict[str, tuple[int, int]] = {}
+    for path in sorted(release.rglob("*")):
+        observed = path.stat(follow_symlinks=False)
+        modes[str(path.relative_to(release))] = (
+            stat.S_IMODE(observed.st_mode),
+            observed.st_ino,
+        )
+    return modes
+
+
+def test_promote_release_ownership_reowns_every_inode_and_keeps_invariants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "tgw"
+    release = _materialized(root, tmp_path, "gen")
+    before = _tree_modes(release)
+    # materialize already lands 0555 dirs / 0444 files owned by this account;
+    # force the promotion recursion (which would otherwise fast-path) and
+    # target the same account so a non-root test can still exercise it.
+    calls = {"n": 0}
+
+    def owned(*_args: object, **_kwargs: object) -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    monkeypatch.setattr(release_installer, "_tree_is_owned_by", owned)
+    receipt = promote_release_ownership(
+        root, "gen", uid=os.getuid(), gid=os.getgid()
+    )
+    assert receipt["schema"] == OWNERSHIP_PROMOTION_SCHEMA
+    assert receipt["already_owned"] is False
+    assert receipt["promoted_inodes"] >= 3
+    assert receipt["verification"]["status"] == "PASS"
+
+    after = _tree_modes(release)
+    assert {name: mode for name, (mode, _ino) in after.items()} == {
+        name: mode for name, (mode, _ino) in before.items()
+    }
+    for name, (_mode, ino) in after.items():
+        if (release / name).is_file():
+            assert ino != before[name][1], name
+    assert verify(root, "gen")["status"] == "PASS"
+    assert stat.S_IMODE((release).stat().st_mode) == 0o555
+
+
+def test_promote_release_ownership_is_idempotent(tmp_path: Path) -> None:
+    root = tmp_path / "tgw"
+    _materialized(root, tmp_path, "gen")
+    first = promote_release_ownership(root, "gen", uid=os.getuid(), gid=os.getgid())
+    assert first["already_owned"] is True
+    assert first["promoted_inodes"] == 0
+    assert first["verification"]["status"] == "PASS"
+
+
+def test_promote_release_ownership_refuses_hard_linked_release_content(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "tgw"
+    release = _materialized(root, tmp_path, "gen")
+    parent = release / "src/tgw"
+    parent.chmod(0o755)
+    try:
+        os.link(parent / "example.py", parent / "example.hardlink")
+    finally:
+        parent.chmod(0o555)
+    with pytest.raises(ReleaseError, match="not immutable"):
+        promote_release_ownership(root, "gen", uid=os.getuid(), gid=os.getgid())
+
+
+def test_promote_selected_cli_targets_current_generation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "tgw"
+    _materialized(root, tmp_path, "gen")
+    os.symlink("releases/gen", root / "current")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--root",
+            str(root),
+            "promote-selected",
+            "--uid",
+            str(os.getuid()),
+            "--gid",
+            str(os.getgid()),
+        ],
+    )
+    assert release_installer.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["schema"] == OWNERSHIP_PROMOTION_SCHEMA
+    assert out["generation"] == "gen"
+
+
+def test_promote_selected_cli_allows_missing_selection(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "tgw"
+    _materialized(root, tmp_path, "gen")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "--root", str(root), "promote-selected", "--allow-missing"],
+    )
+    assert release_installer.main() == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "no-selected-release"}

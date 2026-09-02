@@ -35,7 +35,12 @@ from tgw.protected_git import (
 from tgw.release_installer import (
     _select as select_fixed_local,  # the fixed CAS primitive; never admission
 )
-from tgw.release_installer import current_generation, materialize, verify
+from tgw.release_installer import (
+    current_generation,
+    materialize,
+    promote_release_ownership,
+    verify,
+)
 
 REQUEST_SCHEMA = "tgw-local-coding-root-effect-request/v1"
 RESPONSE_SCHEMA = "tgw-local-coding-root-effect-response/v1"
@@ -90,8 +95,15 @@ class RootEffectPaths:
         "/opt/TGW/tgw-lib/config/tgw-context-current.json"
     )
     restart_ack: Path = Path("/run/tgw-coding-runtime-restart/complete")
+    coding_bootstrap: Path = Path("/usr/local/sbin/tgw-coding-bootstrap")
     group_gid: int | None = None
     root_uid: int = os.geteuid()
+    # The cold Doctor/Context launcher requires the selected release tree to be
+    # this exact owner.  A lifecycle materialization runs unprivileged, so the
+    # promotion is emitted as a bounded root-effect the pinned root bootstrap
+    # applies, and _restart_acknowledged blocks until the tree is root-owned.
+    context_install_uid: int = 0
+    context_install_gid: int = 0
 
     @classmethod
     def from_config(cls, path: Path | str) -> "RootEffectPaths":
@@ -691,6 +703,137 @@ def _restart_request(paths: RootEffectPaths, request: Mapping[str, Any]) -> Path
     return path
 
 
+def _selected_release_ownership(
+    paths: RootEffectPaths, candidate_commit: str
+) -> dict[str, Any]:
+    """Describe the exact ownership/mode of the selected release tree.
+
+    ``materialize`` already lands 0555 directories and 0444/0555 files; the
+    only thing an unprivileged lifecycle materialization cannot do is leave the
+    tree ``context_install_uid:context_install_gid`` (root:root).  This returns
+    that observation so callers can require the fixed root promotion.
+    """
+
+    release = paths.runtime_root / "releases" / candidate_commit
+    if _COMMIT.fullmatch(candidate_commit) is None:
+        raise RootEffectError("selected release identity is invalid")
+    if release.is_symlink() or not release.is_dir():
+        raise RootEffectError("selected release is not an immutable directory")
+    want_uid = paths.context_install_uid
+    want_gid = paths.context_install_gid
+    unsafe: list[str] = []
+    for path in (release, *sorted(release.rglob("*"))):
+        observed = path.stat(follow_symlinks=False)
+        relative = "." if path == release else str(path.relative_to(release))
+        mode = stat.S_IMODE(observed.st_mode)
+        if path.is_symlink():
+            unsafe.append(relative + ":symlink")
+            continue
+        if observed.st_uid != want_uid or observed.st_gid != want_gid:
+            unsafe.append(relative + ":owner")
+        if observed.st_mode & 0o022:
+            unsafe.append(relative + ":writable")
+        if stat.S_ISDIR(observed.st_mode):
+            if mode != 0o555:
+                unsafe.append(relative + ":dir-mode")
+        elif stat.S_ISREG(observed.st_mode):
+            if mode not in (0o444, 0o555):
+                unsafe.append(relative + ":file-mode")
+            if observed.st_nlink != 1:
+                unsafe.append(relative + ":link-count")
+        else:
+            unsafe.append(relative + ":special")
+    return {
+        "release": str(release),
+        "expected_uid": want_uid,
+        "expected_gid": want_gid,
+        "root_owned_immutable": not unsafe,
+        "unsafe": unsafe[:8],
+    }
+
+
+def _apply_release_ownership_via_bootstrap(
+    paths: RootEffectPaths, candidate_commit: str
+) -> dict[str, Any]:
+    """Apply the bounded root-effect through the existing pinned root bootstrap.
+
+    This is the same ``tgw-recovery`` sudoers pin the Doctor already prescribes
+    for privileged coding repairs — it is invoked with a fixed argument shape
+    and no sudo surface is widened.  The pinned root path re-verifies the exact
+    Git tree, promotes ownership, and re-verifies, so the root:root immutability
+    check is never bypassed.
+    """
+
+    bootstrap = paths.coding_bootstrap
+    try:
+        state = bootstrap.lstat()
+    except OSError:
+        return {"status": "pinned-bootstrap-unavailable", "path": str(bootstrap)}
+    if bootstrap.is_symlink() or not stat.S_ISREG(state.st_mode) or state.st_uid != 0:
+        return {"status": "pinned-bootstrap-untrusted", "path": str(bootstrap)}
+    completed = subprocess.run(
+        [
+            "/usr/bin/sudo",
+            "-n",
+            str(bootstrap),
+            "--commit",
+            candidate_commit,
+            "--repair",
+            "release-ownership",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=600,
+    )
+    return {
+        "status": "invoked",
+        "invocation": "sudo -n tgw-coding-bootstrap --repair release-ownership",
+        "returncode": completed.returncode,
+        "detail": (completed.stderr or completed.stdout)[-500:],
+    }
+
+
+def _ensure_selected_release_root_owned(
+    paths: RootEffectPaths, request: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Land the selected release ``root:root`` immutable for the cold Doctor.
+
+    ``materialize`` already lands 0555 directories and 0444/0555 files, but an
+    unprivileged lifecycle materialization leaves them owned by ``db``.  When
+    this consumer already runs as ``context_install_uid`` the promotion happens
+    inline; otherwise it emits a bounded root-effect request that the existing
+    pinned root bootstrap applies.  Either way :func:`_restart_acknowledged`
+    blocks until the tree is genuinely root-owned, so an ordinary lifecycle
+    materialization never self-wounds the Doctor.
+    """
+
+    candidate_commit = str(request["candidate_commit"])
+    ownership = _selected_release_ownership(paths, candidate_commit)
+    if ownership["root_owned_immutable"]:
+        return {"status": "already-root-owned", "ownership": ownership}
+    if os.geteuid() == paths.context_install_uid:
+        promotion = promote_release_ownership(
+            paths.runtime_root,
+            candidate_commit,
+            uid=paths.context_install_uid,
+            gid=paths.context_install_gid,
+        )
+        after = _selected_release_ownership(paths, candidate_commit)
+        if not after["root_owned_immutable"]:
+            raise RootEffectError(
+                "inline release ownership promotion is incomplete: "
+                + ",".join(after["unsafe"])
+            )
+        return {"status": "promoted-inline", "promotion": promotion, "ownership": after}
+    outcome = _apply_release_ownership_via_bootstrap(paths, candidate_commit)
+    return {
+        "status": "delegated-to-pinned-bootstrap",
+        "bootstrap": outcome,
+        "ownership": _selected_release_ownership(paths, candidate_commit),
+    }
+
+
 def _restart_acknowledged(
     paths: RootEffectPaths, trigger: Path, *, candidate_commit: str
 ) -> dict[str, Any]:
@@ -734,12 +877,23 @@ def _restart_acknowledged(
     selected = current_generation(paths.runtime_root)
     if selected != candidate_commit:
         raise RestartPending("fixed restart acknowledgement belongs to another runtime")
+    ownership = _selected_release_ownership(paths, candidate_commit)
+    if not ownership["root_owned_immutable"]:
+        raise RestartPending(
+            "fixed restart has not promoted the selected release to root:root: "
+            + ",".join(ownership["unsafe"])
+        )
     unsigned = {
         "schema": "tgw-local-coding-static-restart-acknowledgement/v1",
         "candidate_commit": selected,
         "acknowledgement": str(acknowledgement),
         "acknowledgement_mtime_ns": ack_state.st_mtime_ns,
         "services": observed,
+        "release_root_ownership": {
+            "expected_uid": ownership["expected_uid"],
+            "expected_gid": ownership["expected_gid"],
+            "root_owned_immutable": ownership["root_owned_immutable"],
+        },
     }
     return {**unsigned, "acknowledgement_hash": _hash(unsigned)}
 
@@ -842,6 +996,8 @@ def _default_effects(
             evidence_identity=evidence_identity,
         )
     _write_state(paths, request, "selected")
+    _ensure_selected_release_root_owned(paths, request)
+    _write_state(paths, request, "promoted")
     trigger = _restart_request(paths, request)
     workers = _restart_acknowledged(
         paths, trigger, candidate_commit=str(request["candidate_commit"])

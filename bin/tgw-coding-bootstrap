@@ -288,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
             "workers",
             "plan-render-worker",
             "runtime",
+            "release-ownership",
             "unix-git-access",
             "obsolete-surfaces",
         ),
