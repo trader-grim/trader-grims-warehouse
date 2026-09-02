@@ -138,6 +138,46 @@ def ebay_write(
     return resp.json()
 
 
+def sold_evidence(
+    cfg: Dict[str, Any],
+    sku: str,
+    *,
+    ebay_sale: List[Dict[str, Any]],
+    sold_out: bool = False,
+    remaining_quantity: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    POST /api/items/{sku}/sold-evidence — sanctioned machine sold-marking route
+    (PP-SOLD-001 / Todo #1966).
+
+    Records the completed-sale evidence mark_item_sold produces: the full
+    ``ebay_sale`` order list and, on sellout, the ``status=sold`` /
+    ``ebay_listing.status=Sold`` transition plus the ``draft_listing.quantity``
+    decrement.  Draft content is never touched.  Uses the distinct machine
+    Bearer token — the generic PATCH fence refuses these fields
+    (``workflow_evidence_write_required``).
+
+    sold_out: item is fully sold — forces quantity 0 and the status transition.
+    remaining_quantity: post-decrement draft quantity for a partial multi-qty
+        sale; ignored when sold_out is set.  None (with sold_out False) records
+        only the ebay_sale list — the "oversold" case.
+    """
+    payload: Dict[str, Any] = {
+        "ebay_sale": list(ebay_sale),
+        "sold_out": bool(sold_out),
+    }
+    if remaining_quantity is not None:
+        payload["remaining_quantity"] = int(remaining_quantity)
+    resp = requests.post(
+        f"{_BASE}/api/items/{sku}/sold-evidence",
+        json=payload,
+        headers=_machine_headers(cfg),
+        timeout=10,
+    )
+    _raise(resp)
+    return resp.json()
+
+
 def create_item(cfg: Dict[str, Any], sku: str, data: Dict[str, Any]) -> Dict[str, Any]:
     """
     POST /api/items — create new item through the fence.

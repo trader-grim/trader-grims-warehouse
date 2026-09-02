@@ -66,6 +66,68 @@ def make_fake_patch_item(itemdata_root):
     return fake_fence_patch_item
 
 
+def make_fake_sold_evidence(itemdata_root):
+    """Return a fake fence.sold_evidence that applies the sold-order evidence
+    set to the item JSON on disk, mirroring http_server._apply_sold_evidence
+    (PP-SOLD-001 / Todo #1966). Draft content other than quantity is untouched.
+    """
+    def fake_fence_sold_evidence(cfg, sku, *, ebay_sale, sold_out=False,
+                                 remaining_quantity=None):
+        root = Path(cfg.get('itemdata_root', itemdata_root))
+        p = root / sku / f'{sku}.json'
+        doc = json.loads(p.read_text(encoding='utf-8'))
+        doc['ebay_sale'] = list(ebay_sale)
+        if sold_out:
+            doc['status'] = 'sold'
+            existing_listing = doc.get('ebay_listing')
+            if not isinstance(existing_listing, dict):
+                existing_listing = {}
+            doc['ebay_listing'] = {**existing_listing, 'status': 'Sold'}
+        target_quantity = 0 if sold_out else remaining_quantity
+        if target_quantity is not None:
+            existing_draft = doc.get('draft_listing')
+            if not isinstance(existing_draft, dict):
+                existing_draft = {}
+            doc['draft_listing'] = {**existing_draft, 'quantity': target_quantity}
+        p.write_text(json.dumps(doc), encoding='utf-8')
+        from tgw.item_mutation import item_generation
+        return {'ok': True, 'sku': sku, 'resulting_generation': item_generation(doc)}
+    return fake_fence_sold_evidence
+
+
+def make_fake_sold_evidence_tmp(tmp_path):
+    """Like make_fake_sold_evidence but resolves sku path via tmp_path directly."""
+    import json
+    from pathlib import Path
+
+    def fake_fence_sold_evidence(cfg, sku, *, ebay_sale, sold_out=False,
+                                 remaining_quantity=None):
+        root = cfg.get('itemdata_root') or tmp_path
+        p = Path(root) / sku / f'{sku}.json'
+        if not p.exists():
+            p = Path(tmp_path) / sku / f'{sku}.json'
+        if not p.exists():
+            return {'ok': True, 'sku': sku}
+        doc = json.loads(p.read_text(encoding='utf-8'))
+        doc['ebay_sale'] = list(ebay_sale)
+        if sold_out:
+            doc['status'] = 'sold'
+            existing_listing = doc.get('ebay_listing')
+            if not isinstance(existing_listing, dict):
+                existing_listing = {}
+            doc['ebay_listing'] = {**existing_listing, 'status': 'Sold'}
+        target_quantity = 0 if sold_out else remaining_quantity
+        if target_quantity is not None:
+            existing_draft = doc.get('draft_listing')
+            if not isinstance(existing_draft, dict):
+                existing_draft = {}
+            doc['draft_listing'] = {**existing_draft, 'quantity': target_quantity}
+        p.write_text(json.dumps(doc), encoding='utf-8')
+        from tgw.item_mutation import item_generation
+        return {'ok': True, 'sku': sku, 'resulting_generation': item_generation(doc)}
+    return fake_fence_sold_evidence
+
+
 def make_fake_create_item(itemdata_root):
     """Return a fake fence_create_item that writes the item JSON directly to
     disk under itemdata_root, mirroring what the real fence server does —

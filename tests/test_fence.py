@@ -253,6 +253,114 @@ class TestEbayWrite:
         assert not any(k.get("queue_name") == "catalog_rebuild" for k in env["enqueue_calls"])
 
 
+MACHINE_KEY = "test-machine-key-fence-001"
+MACHINE_AUTH = {"Authorization": f"Bearer {MACHINE_KEY}"}
+
+
+class TestSoldEvidence:
+    """PP-SOLD-001 / Todo #1966 — the sanctioned machine sold-marking route."""
+
+    def _seed_listed(self, env):
+        _write_item(env["itemdata_root"], SKU, {
+            "sku": SKU,
+            "title": "Test Item",
+            "status": "listed",
+            "draft_listing": {"quantity": 2, "title": "Draft Title",
+                              "description": "Draft body", "price": "19.99"},
+            "ebay_listing": {"listing_id": "227407776039", "status": "Active"},
+        })
+
+    def test_sellout_marks_sold_without_touching_draft(self, env, monkeypatch):
+        monkeypatch.setattr(http_server, "_machine_api_key", MACHINE_KEY)
+        self._seed_listed(env)
+        sale = [{"order_id": "O-1", "buyer": "bob", "sale_price": 19.99,
+                 "quantity": 2, "sale_date": "2026-08-25", "synced_at": "2026-08-25T00:00:00Z"}]
+        r = env["client"].post(
+            f"/api/items/{SKU}/sold-evidence",
+            json={"ebay_sale": sale, "sold_out": True},
+            headers=MACHINE_AUTH,
+        )
+        assert r.status_code == 200, r.text
+        doc = _read_item(env["itemdata_root"], SKU)
+        assert doc["status"] == "sold"
+        assert doc["ebay_sale"] == sale
+        assert doc["ebay_listing"]["status"] == "Sold"
+        assert doc["ebay_listing"]["listing_id"] == "227407776039"
+        assert doc["draft_listing"]["quantity"] == 0
+        # draft content preserved verbatim
+        assert doc["draft_listing"]["title"] == "Draft Title"
+        assert doc["draft_listing"]["description"] == "Draft body"
+        assert doc["draft_listing"]["price"] == "19.99"
+        assert set(r.json()["changed_fields"]) == {"ebay_sale", "status", "ebay_listing", "draft_listing"}
+
+    def test_partial_sale_only_decrements_quantity(self, env, monkeypatch):
+        monkeypatch.setattr(http_server, "_machine_api_key", MACHINE_KEY)
+        self._seed_listed(env)
+        sale = [{"order_id": "O-2", "quantity": 1}]
+        r = env["client"].post(
+            f"/api/items/{SKU}/sold-evidence",
+            json={"ebay_sale": sale, "remaining_quantity": 1},
+            headers=MACHINE_AUTH,
+        )
+        assert r.status_code == 200, r.text
+        doc = _read_item(env["itemdata_root"], SKU)
+        assert doc["status"] == "listed"
+        assert doc["ebay_listing"]["status"] == "Active"
+        assert doc["draft_listing"]["quantity"] == 1
+        assert doc["draft_listing"]["title"] == "Draft Title"
+
+    def test_oversold_records_only_ebay_sale(self, env, monkeypatch):
+        monkeypatch.setattr(http_server, "_machine_api_key", MACHINE_KEY)
+        _write_item(env["itemdata_root"], SKU, {
+            "sku": SKU, "status": "sold",
+            "draft_listing": {"quantity": 0, "title": "Draft Title"},
+            "ebay_listing": {"listing_id": "227407776039", "status": "Sold"},
+            "ebay_sale": [{"order_id": "O-1"}],
+        })
+        sale = [{"order_id": "O-1"}, {"order_id": "O-3"}]
+        r = env["client"].post(
+            f"/api/items/{SKU}/sold-evidence",
+            json={"ebay_sale": sale},
+            headers=MACHINE_AUTH,
+        )
+        assert r.status_code == 200, r.text
+        doc = _read_item(env["itemdata_root"], SKU)
+        assert doc["ebay_sale"] == sale
+        assert doc["draft_listing"]["quantity"] == 0
+        assert r.json()["changed_fields"] == ["ebay_sale"]
+
+    def test_rejects_non_machine_credential(self, env, monkeypatch):
+        monkeypatch.setattr(http_server, "_machine_api_key", MACHINE_KEY)
+        self._seed_listed(env)
+        r = env["client"].post(
+            f"/api/items/{SKU}/sold-evidence",
+            json={"ebay_sale": [], "sold_out": True},
+            headers=AUTH,  # operator API key, not the machine credential
+        )
+        assert r.status_code == 403
+
+    def test_generation_conflict_is_409(self, env, monkeypatch):
+        monkeypatch.setattr(http_server, "_machine_api_key", MACHINE_KEY)
+        self._seed_listed(env)
+        r = env["client"].post(
+            f"/api/items/{SKU}/sold-evidence",
+            json={"ebay_sale": [], "sold_out": True,
+                  "expected_generation": "0" * 64},
+            headers=MACHINE_AUTH,
+        )
+        assert r.status_code == 409
+        assert r.json()["detail"]["code"] == "generation_conflict"
+
+    def test_404_for_unknown_sku(self, env, monkeypatch):
+        monkeypatch.setattr(http_server, "_machine_api_key", MACHINE_KEY)
+        r = env["client"].post(
+            "/api/items/tgw20260101999999999/sold-evidence",
+            json={"ebay_sale": [], "sold_out": True},
+            headers=MACHINE_AUTH,
+        )
+        assert r.status_code == 404
+
+
 class TestPatchCommittedGeneration:
     def test_response_binds_exact_committed_document(self, env):
         response = env["client"].patch(

@@ -822,6 +822,22 @@ class EbayWriteBody(BaseModel):
     allow_protected: Optional[List[str]] = None
 
 
+class SoldEvidenceBody(BaseModel):
+    # PP-SOLD-001 / Todo #1966 — the sanctioned machine sold-marking route.
+    # ebay_sale is the FULL replacement list of sold-order records (mark_item_sold
+    # builds it by appending the new order to the item's existing list, keyed on
+    # order_id). sold_out asserts the sellout transition — status=sold,
+    # ebay_listing.status=Sold, and draft_listing.quantity forced to 0.
+    # remaining_quantity is the post-decrement draft quantity for a partial
+    # multi-qty sale; it is ignored when sold_out is set, and None leaves
+    # draft_listing.quantity untouched (the oversold case). No other field —
+    # and in particular no draft content — is writable here.
+    ebay_sale: List[Dict[str, Any]]
+    sold_out: bool = False
+    remaining_quantity: Optional[int] = Field(default=None, ge=0)
+    expected_generation: Optional[str] = None
+
+
 class CreateItemBody(BaseModel):
     sku: str
     data: Dict[str, Any]
@@ -2031,6 +2047,71 @@ def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/items/{sku}/sold-evidence — sanctioned machine sold-marking route
+# (PP-SOLD-001 / Todo #1966)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/items/{sku}/sold-evidence")
+def sold_evidence(
+    sku: str,
+    body: SoldEvidenceBody,
+    operator_identity: str = Depends(_require_fence_patch_auth),
+) -> Dict[str, Any]:
+    """Record a completed eBay sale as workflow evidence — machine credential only.
+
+    ``mark_item_sold`` (tgw/ebay/pull.py) reconciles a completed order: it
+    appends the order to ``ebay_sale``, decrements ``draft_listing.quantity``,
+    and on sellout sets ``status=sold`` + ``ebay_listing.status=Sold``.  The
+    last two are workflow-evidence fields the generic item PATCH fence refuses
+    outright (``workflow_evidence_write_required``), and any ``draft_listing``
+    write there demands a published operator-object command — neither is
+    available to the unattended ``ebay_legacy_sync`` sweep, which then dead-ends
+    with ``errors>0`` and never advances its cursor.  This endpoint applies
+    exactly that bounded evidence set — and never any draft content — behind
+    the dedicated machine credential.
+    """
+    if operator_identity != "machine:item-write-fence":
+        raise HTTPException(
+            status_code=403,
+            detail="sold-evidence route requires the machine item-write fence credential",
+        )
+    if not all(isinstance(record, dict) for record in body.ebay_sale):
+        raise HTTPException(status_code=422, detail="ebay_sale must be a list of order records")
+
+    json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    if not json_path.exists():
+        raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
+
+    try:
+        changed_fields, resulting_generation = _apply_sold_evidence(
+            json_path,
+            sku,
+            ebay_sale=list(body.ebay_sale),
+            sold_out=body.sold_out,
+            remaining_quantity=body.remaining_quantity,
+            expected_generation=body.expected_generation,
+        )
+    except _ItemGenerationConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "generation_conflict",
+                "expected": exc.observed,
+                "received": exc.expected,
+                "refresh": f"/api/operator/items/{sku}",
+            },
+        ) from exc
+    _enqueue_catalog_rebuild(f"sold_evidence:{sku}")
+    return {
+        "ok": True,
+        "sku": sku,
+        "changed_fields": changed_fields,
+        "resulting_generation": resulting_generation,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Internal write helpers — all item data writes route through these
 # (PP-FENCE-001 Session C: UI layer must not call atomic_write_json directly)
 # ---------------------------------------------------------------------------
@@ -2468,6 +2549,96 @@ def _apply_ebay_write(
     except Exception:
         pass
     return changed, resulting_generation
+
+
+def _apply_sold_evidence(
+    json_path: "Path",
+    sku: str,
+    *,
+    ebay_sale: List[Dict[str, Any]],
+    sold_out: bool = False,
+    remaining_quantity: Optional[int] = None,
+    expected_generation: Optional[str] = None,
+) -> Tuple[List[str], str]:
+    """Apply exactly the evidence a completed eBay sale produces (PP-SOLD-001 /
+    Todo #1966): the ``ebay_sale`` order list, the sellout ``status`` /
+    ``ebay_listing.status`` transition, and the ``draft_listing.quantity``
+    decrement.
+
+    Draft content is never read or rewritten — only the numeric ``quantity``
+    sub-field of ``draft_listing`` is touched, and only when it actually
+    changes.  Mirrors ``_apply_patch``'s post-write tail (catalog upsert +
+    mutation audit) so the incremental catalog stays live.
+    """
+    with item_mutation_lock(
+        journal_root=_item_mutation_journal_root(json_path),
+        sku=sku,
+    ):
+        doc = load_item_doc(json_path)
+        observed_generation = item_generation(doc)
+        if (
+            expected_generation is not None
+            and observed_generation != expected_generation
+        ):
+            raise _ItemGenerationConflict(
+                expected=expected_generation,
+                observed=observed_generation,
+            )
+
+        _before_doc = dict(doc)
+        changed: List[str] = ["ebay_sale"]
+        doc["ebay_sale"] = list(ebay_sale)
+
+        if sold_out:
+            doc["status"] = "sold"
+            existing_listing = doc.get("ebay_listing")
+            if not isinstance(existing_listing, dict):
+                existing_listing = {}
+            doc["ebay_listing"] = {**existing_listing, "status": "Sold"}
+            changed += ["status", "ebay_listing"]
+
+        target_quantity = 0 if sold_out else remaining_quantity
+        if target_quantity is not None:
+            existing_draft = doc.get("draft_listing")
+            if not isinstance(existing_draft, dict):
+                existing_draft = {}
+            if existing_draft.get("quantity") != target_quantity:
+                doc["draft_listing"] = {**existing_draft, "quantity": target_quantity}
+                changed.append("draft_listing")
+
+        atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
+        resulting_generation = item_generation(doc)
+        _sku_for_mutation = doc.get("sku") or json_path.stem
+        try:
+            from .sqlite_catalog import upsert_catalog_row
+
+            upsert_catalog_row(_cfg, doc)
+        except Exception as _uc_exc:
+            log.warning("sqlite catalog upsert failed for %s: %s", _sku_for_mutation, _uc_exc)
+            finding_generation = _persist_finding(
+                json_path,
+                _sku_for_mutation,
+                "sqlite_catalog_upsert_failed",
+                f"SQLite catalog upsert failed after write: {_uc_exc}",
+                "apply_sold_evidence",
+                item_lock_held=True,
+            )
+            if finding_generation is not None:
+                resulting_generation = finding_generation
+        try:
+            from .apis.nats_client import publish_mutation
+
+            for _ck in changed:
+                publish_mutation(
+                    sku=_sku_for_mutation,
+                    field=_ck,
+                    old_value=_before_doc.get(_ck),
+                    new_value=doc.get(_ck),
+                    source="http_sold_evidence",
+                )
+        except Exception:
+            pass
+        return changed, resulting_generation
 
 
 # ---------------------------------------------------------------------------

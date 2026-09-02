@@ -34,6 +34,7 @@ from tgw.apis.ebay.client import ebay_get
 from tgw.apis.ebay.trading import get_my_ebay_selling, get_orders
 from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
+from tgw.apis.fence import sold_evidence as fence_sold_evidence
 from tgw.ebay.draft_specifics import wrap_ebay_specifics
 
 log = logging.getLogger(__name__)
@@ -388,32 +389,29 @@ def mark_item_sold(json_path: Path, order_id: str, buyer: str,
     }
     ebay_sale_list = existing_sales + [new_sale]
 
+    # status=sold, ebay_listing.status=Sold, and the draft_listing.quantity
+    # decrement are all workflow-lifecycle evidence the generic PATCH fence
+    # refuses (workflow_evidence_write_required / operator_object_command_
+    # required). The sanctioned machine sold-evidence route applies exactly
+    # this bounded set — and never any draft content — so the unattended
+    # ebay_legacy_sync sweep can mark sold and advance its cursor
+    # (PP-SOLD-001 / Todo #1966).
     if already_sold_out:
         # Oversold case: item was already fully sold, but a further distinct
         # order came in. Record it — never drop it — quantity stays at 0.
-        fence_patch_item(cfg, sku, {
-            'ebay_sale': ebay_sale_list,
-        })
+        fence_sold_evidence(cfg, sku, ebay_sale=ebay_sale_list)
         log.warning('ebay_pull: OVERSOLD %s order=%s price=$%s recorded on already-sold-out item',
                     sku, order_id, sale_price)
         tgw_logging.log_event('ebay_item_sold', sku=sku,
                               order_id=order_id, sale_price=sale_price, sold_out=True,
                               oversold=True)
     elif remaining == 0:
-        fence_ebay_write(cfg, sku, ebay_listing={'status': 'Sold'})
-        fence_patch_item(cfg, sku, {
-            'status': 'sold',
-            'ebay_sale': ebay_sale_list,
-            'draft_listing': {'quantity': 0},
-        })
+        fence_sold_evidence(cfg, sku, ebay_sale=ebay_sale_list, sold_out=True)
         log.info('ebay_pull: sold out %s order=%s price=$%s', sku, order_id, sale_price)
         tgw_logging.log_event('ebay_item_sold', sku=sku,
                               order_id=order_id, sale_price=sale_price, sold_out=True)
     else:
-        fence_patch_item(cfg, sku, {
-            'ebay_sale': ebay_sale_list,
-            'draft_listing': {'quantity': remaining},
-        })
+        fence_sold_evidence(cfg, sku, ebay_sale=ebay_sale_list, remaining_quantity=remaining)
         log.info('ebay_pull: partial sale %s order=%s price=$%s qty %d→%d',
                  sku, order_id, sale_price, current_qty, remaining)
         tgw_logging.log_event('ebay_item_sold', sku=sku,

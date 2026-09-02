@@ -151,9 +151,11 @@ def test_build_title_lookup_then_match(tmp_path):
 def _silence_log_event(tmp_path, monkeypatch):
     # log_event may write to a configured sink; isolate it.
     monkeypatch.setattr(pull.tgw_logging, "log_event", lambda *a, **k: None)
-    from tests.conftest import make_fake_fence_write_tmp, make_fake_patch_item_tmp
+    from tests.conftest import (make_fake_fence_write_tmp, make_fake_patch_item_tmp,
+                                make_fake_sold_evidence_tmp)
     monkeypatch.setattr(pull, 'fence_ebay_write', make_fake_fence_write_tmp(tmp_path))
     monkeypatch.setattr(pull, 'fence_patch_item', make_fake_patch_item_tmp(tmp_path))
+    monkeypatch.setattr(pull, 'fence_sold_evidence', make_fake_sold_evidence_tmp(tmp_path))
 
 
 def _sold_item(tmp_path, sku="tgw500", **doc):
