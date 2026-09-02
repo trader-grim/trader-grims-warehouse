@@ -84,6 +84,69 @@ _SEVERITY_ALIASES = {
 }
 
 
+_REPORT_FINDINGS_KEYS = (
+    "findings",
+    "defects",
+    "issues",
+    "problems",
+    "violations",
+)
+_REPORT_VERDICT_KEYS = (
+    "verdict",
+    "status",
+    "result",
+    "outcome",
+    "decision",
+    "conclusion",
+    "disposition",
+)
+_VERDICT_ALIASES = {
+    "pass": "PASS",
+    "passed": "PASS",
+    "passing": "PASS",
+    "ok": "PASS",
+    "okay": "PASS",
+    "success": "PASS",
+    "succeeded": "PASS",
+    "clean": "PASS",
+    "clear": "PASS",
+    "approve": "PASS",
+    "approved": "PASS",
+    "accept": "PASS",
+    "accepted": "PASS",
+    "no_findings": "PASS",
+    "fail": "FAIL",
+    "failed": "FAIL",
+    "failing": "FAIL",
+    "failure": "FAIL",
+    "reject": "FAIL",
+    "rejected": "FAIL",
+    "blocked": "FAIL",
+    "block": "FAIL",
+    "changes_requested": "FAIL",
+    "request_changes": "FAIL",
+    "needs_changes": "FAIL",
+    "not_approved": "FAIL",
+}
+
+
+def _canonical_verdict(value: Any) -> str | None:
+    """Map a model-variant verdict token onto ``PASS``/``FAIL`` or ``None``.
+
+    ``None`` means the value is not a recognizable verdict at all (missing,
+    non-string, or an unknown token); the caller treats that as "no verdict
+    signal present" rather than assuming a pass.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    token = value.strip().upper()
+    if token in {"PASS", "FAIL"}:
+        return token
+    return _VERDICT_ALIASES.get(
+        value.strip().lower().replace("-", "_").replace(" ", "_")
+    )
+
+
 def _first_present(finding: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
         if key in finding and finding[key] not in (None, ""):
@@ -187,12 +250,19 @@ def _normalize_report(report: Any, snapshot_root: Path) -> dict[str, Any]:
 
     Findings are normalized field-by-field and checked against the immutable
     snapshot at ``snapshot_root`` (see :func:`_normalize_finding`).
-    The verdict is derived from whether any findings survived normalization --
-    the only self-consistent shapes the contract admits are ``PASS`` with no
-    findings and ``FAIL`` with at least one -- so a model that names the
-    wrong verdict but cites its findings still yields a valid receipt.  A
-    ``FAIL`` verdict with no findings is genuinely ambiguous and raises a
-    structured error instead of being silently downgraded to ``PASS``.
+    The findings array and the verdict are each looked up under a set of
+    top-level aliases (``findings``/``defects``/``issues``/... and
+    ``verdict``/``status``/``result``/...) so a model that renames the
+    container still normalizes.  The verdict is derived from whether any
+    findings survived normalization -- the only self-consistent shapes the
+    contract admits are ``PASS`` with no findings and ``FAIL`` with at least
+    one -- so a model that names the wrong verdict but cites its findings
+    still yields a valid receipt.  A ``FAIL`` verdict with no findings is
+    genuinely ambiguous and raises a structured error instead of being
+    silently downgraded to ``PASS``.  A report that carries *neither* a
+    recognizable findings array *nor* a recognizable verdict is likewise
+    ambiguous -- there is no evidence it is a pass -- and raises a structured
+    error naming the deviation rather than defaulting to ``PASS``.
     """
     if not isinstance(report, Mapping):
         raise ClaudeReviewBackendError("Claude review report is not a JSON object")
@@ -201,7 +271,28 @@ def _normalize_report(report: Any, snapshot_root: Path) -> dict[str, Any]:
         raise ClaudeReviewBackendError(
             f"Claude review report schema {schema!r} is not tgw-code-review/v1"
         )
-    findings_raw = report.get("findings")
+    findings_key = next(
+        (key for key in _REPORT_FINDINGS_KEYS if key in report), None
+    )
+    findings_raw = report.get(findings_key) if findings_key is not None else None
+    has_findings_array = isinstance(findings_raw, list)
+
+    verdict_key = next(
+        (key for key in _REPORT_VERDICT_KEYS if key in report), None
+    )
+    model_verdict = _canonical_verdict(
+        report.get(verdict_key) if verdict_key is not None else None
+    )
+
+    if not has_findings_array and model_verdict is None:
+        raise ClaudeReviewBackendError(
+            "Claude review report exposes neither a recognizable findings array "
+            f"(any of: {', '.join(_REPORT_FINDINGS_KEYS)}) nor a recognizable "
+            f"PASS/FAIL verdict (any of: {', '.join(_REPORT_VERDICT_KEYS)}); "
+            f"top-level keys were {sorted(map(str, report))}; refusing to "
+            "normalize an unattested report to PASS"
+        )
+
     if findings_raw is None:
         findings_raw = []
     if not isinstance(findings_raw, list):
@@ -210,9 +301,6 @@ def _normalize_report(report: Any, snapshot_root: Path) -> dict[str, Any]:
         _normalize_finding(item, index, snapshot_root)
         for index, item in enumerate(findings_raw)
     ]
-    model_verdict = report.get("verdict")
-    if isinstance(model_verdict, str):
-        model_verdict = model_verdict.strip().upper()
     if model_verdict == "FAIL" and not findings:
         raise ClaudeReviewBackendError(
             "Claude review returned verdict FAIL with no findings; the diagnostic "

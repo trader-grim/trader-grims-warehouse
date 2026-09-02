@@ -272,6 +272,84 @@ def test_run_errors_on_fail_verdict_without_findings(tmp_path):
     assert excinfo.value.raw_report == model_report
 
 
+def test_run_normalizes_aliased_top_level_findings_and_verdict(tmp_path):
+    claude = executable(tmp_path / "claude")
+    (tmp_path / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    request = _request(tmp_path)
+    # 'status'/'defects' instead of 'verdict'/'findings' -- the dialect that
+    # was silently normalized to PASS/0-findings before.
+    model_report = {
+        "schema": "tgw-code-review/v1",
+        "status": "FAIL",
+        "snapshot_hash": request["snapshot_hash"],
+        "summary": "buffer overflow in feature.py",
+        "defects": [
+            {"severity": "high", "file": "feature.py", "line": 1, "message": "oob write"}
+        ],
+    }
+
+    result = run(
+        request, tmp_path, claude_bin=claude, invoke=_invoke_returning(model_report)
+    )
+
+    assert result["verdict"] == "FAIL"
+    assert result["findings"] == [
+        {"severity": "high", "path": "feature.py", "line": 1, "message": "oob write"}
+    ]
+
+
+def test_run_errors_when_neither_verdict_nor_findings_recognizable(tmp_path):
+    claude = executable(tmp_path / "claude")
+    request = _request(tmp_path)
+    # No findings array under any alias, no recognizable verdict token.
+    model_report = {
+        "schema": "tgw-code-review/v1",
+        "snapshot_hash": request["snapshot_hash"],
+        "summary": "everything looks fine to me",
+    }
+
+    with pytest.raises(ClaudeReviewBackendError, match="neither a recognizable") as excinfo:
+        run(request, tmp_path, claude_bin=claude, invoke=_invoke_returning(model_report))
+
+    assert excinfo.value.raw_report == model_report
+    assert excinfo.value.raw_stdout
+
+
+def test_run_errors_on_fail_status_alias_without_findings(tmp_path):
+    claude = executable(tmp_path / "claude")
+    request = _request(tmp_path)
+    model_report = {
+        "schema": "tgw-code-review/v1",
+        "status": "rejected",
+        "snapshot_hash": request["snapshot_hash"],
+        "summary": "bad but uncited",
+        "defects": [],
+    }
+
+    with pytest.raises(ClaudeReviewBackendError, match="FAIL with no findings") as excinfo:
+        run(request, tmp_path, claude_bin=claude, invoke=_invoke_returning(model_report))
+
+    assert excinfo.value.raw_report == model_report
+
+
+def test_run_accepts_recognizable_pass_verdict_alias_without_findings_array(tmp_path):
+    claude = executable(tmp_path / "claude")
+    request = _request(tmp_path)
+    model_report = {
+        "schema": "tgw-code-review/v1",
+        "outcome": "clean",
+        "snapshot_hash": request["snapshot_hash"],
+        "summary": "no material findings",
+    }
+
+    result = run(
+        request, tmp_path, claude_bin=claude, invoke=_invoke_returning(model_report)
+    )
+
+    assert result["verdict"] == "PASS"
+    assert result["findings"] == []
+
+
 def test_run_attaches_stdout_on_unparseable_report(tmp_path):
     claude = executable(tmp_path / "claude")
     request = _request(tmp_path)
