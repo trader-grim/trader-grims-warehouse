@@ -59,9 +59,26 @@ OVERRIDE_EVENT_SCHEMA = "tgw-main-ref-guard-override-event/v1"
 PROTECTED_REFS: tuple[str, ...] = ("refs/heads/main",)
 
 #: Unix account names that are the sanctioned source publisher.  ``db`` runs the
-#: coding-lifecycle foreman that fast-forwards ``main``; ``root`` is retained for
-#: receipt-driven recovery/bootstrap (``tgw-coding-bootstrap`` is root-owned).
+#: coding-lifecycle foreman that fast-forwards ``main``.  ``root`` is deliberately
+#: *not* in this list: a root-performed raw advance is still allowed (for
+#: receipt-driven recovery/bootstrap -- ``tgw-coding-bootstrap`` is root-owned),
+#: but never as a silent publisher advance.  It goes through the ``implicit_root``
+#: branch of :func:`evaluate`, which always writes a durable override record with
+#: ``"implicit_root": true``.  See :func:`_is_publisher`.
 DEFAULT_PUBLISHER_IDENTITIES: tuple[str, ...] = ("db",)
+
+#: Explicit, umask-independent permissions for the guard's durable audit trail.
+#: The canonical ``.git`` tree is setgid to group ``tgw-coders`` (the population
+#: this guard targets): the state directory is group-writable *and* setgid so a
+#: non-publisher emergency override can still append its event, while the
+#: recorded high-water mark in ``guard.json`` (see :func:`_record_override_high_water`)
+#: makes a later truncation or deletion of the log tamper-evident -- :func:`guard_status`
+#: then reports ``modified`` (Doctor FAIL), the same escalation as removing the hook.
+GUARD_STATE_DIR_MODE = 0o2775
+GUARD_FILE_MODE = 0o664
+
+#: Chain anchor for the first override-events.log line (see :func:`verify_override_log`).
+_OVERRIDE_LOG_GENESIS = "tgw-main-ref-guard-override-log/v1-genesis"
 
 #: Non-empty value = an explicit emergency override justification.  Its use is
 #: always recorded in the durable override event log; it is never the default.
@@ -69,7 +86,17 @@ OVERRIDE_ENV = "TGW_MAIN_REF_GUARD_OVERRIDE"
 
 _ZERO_OID = re.compile(r"\A0{40}(?:0{24})?\Z")
 _OID = re.compile(r"\A[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
+#: githooks(5): for a *symbolic* reference update the old/new field of a
+#: reference-transaction line is a ref target with a ``ref:`` prefix
+#: (e.g. ``ref:refs/heads/main``) rather than an object id.
+_REF_TARGET = re.compile(r"\Aref:\S.*\Z")
 _TRANSACTION_STATES = ("prepared", "committed", "aborted")
+
+
+def _is_oid_or_symref(value: str) -> bool:
+    """True for a well-formed object id *or* the documented ``ref:`` symref form."""
+
+    return bool(_OID.match(value) or _REF_TARGET.match(value))
 
 
 class MainRefGuardError(RuntimeError):
@@ -126,7 +153,7 @@ def parse_transaction_input(text: str) -> list[RefUpdate]:
         if len(parts) != 3:
             raise MainRefGuardError(f"malformed reference-transaction line: {raw!r}")
         old, new, name = parts
-        if not _OID.match(old) or not _OID.match(new):
+        if not _is_oid_or_symref(old) or not _is_oid_or_symref(new):
             raise MainRefGuardError(f"malformed object id in hook line: {raw!r}")
         updates.append(RefUpdate(old=old, new=new, name=name))
     return updates
@@ -394,33 +421,157 @@ def _expected_hook_body(
 # --------------------------------------------------------------------------- #
 # Override event log
 # --------------------------------------------------------------------------- #
+def _relax_mode(path: Path, mode: int) -> None:
+    """Best-effort ``chmod`` so the audit trail's posture does not depend on the
+    ambient umask.  Silently ignored when we do not own ``path`` -- e.g. a
+    non-publisher appending to a log that the publisher already created with the
+    right mode."""
+
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def _ensure_state_dir(common_dir: Path) -> Path:
+    """Create ``<common-dir>/tgw-main-ref-guard/`` with an explicit, pinned mode."""
+
+    state_dir = Path(common_dir) / GUARD_STATE_DIRNAME
+    state_dir.mkdir(parents=True, exist_ok=True)
+    _relax_mode(state_dir, GUARD_STATE_DIR_MODE)
+    return state_dir
+
+
+def _log_lines(log_path: Path) -> list[str]:
+    if not log_path.is_file():
+        return []
+    return [line.strip() for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _record_override_high_water(state_dir: Path, count: int, log_sha256: str) -> None:
+    """Best-effort: record the log's length/hash in ``guard.json``.
+
+    ``guard.json`` is group-writable, so this is not an authenticated anchor --
+    but it turns the *low-effort* evasion (``: > override-events.log``) into a
+    tamper-evident one: :func:`guard_status` compares this high-water mark against
+    the log actually present and reports ``modified`` (Doctor FAIL) if the log has
+    shrunk.  A determined agent must now also rewrite ``guard.json`` in the same
+    step, which is no longer strictly easier or less detectable than removing the
+    hook outright."""
+
+    config_path = state_dir / GUARD_CONFIG_NAME
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(config, dict):
+        return
+    config["override_event_count"] = count
+    config["override_log_sha256"] = log_sha256
+    tmp = config_path.with_name(f".{GUARD_CONFIG_NAME}.tgw-tmp")
+    try:
+        tmp.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _relax_mode(tmp, GUARD_FILE_MODE)
+        os.replace(tmp, config_path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def record_override_event(
     common_dir: Path,
     override: Mapping[str, object],
     *,
     now: datetime | None = None,
 ) -> Path:
-    """Append one durable JSON line for an override use and return the log path."""
+    """Append one durable JSON line for an override use and return the log path.
 
-    state_dir = common_dir / GUARD_STATE_DIRNAME
-    state_dir.mkdir(parents=True, exist_ok=True)
+    Each line carries a 1-based ``seq`` and ``prev_sha256`` (the SHA-256 of the
+    preceding line, or :data:`_OVERRIDE_LOG_GENESIS` for the first) so the log is
+    a hash chain -- an in-place rewrite of any earlier line is detectable by
+    :func:`verify_override_log`.
+
+    Raises :class:`MainRefGuardError` if the event cannot be written durably: the
+    guard never allows an *unrecorded* ``refs/heads/main`` advance, so
+    :func:`run_hook` turns this into a clean refusal rather than letting an
+    unhandled ``OSError`` abort the transaction with a traceback."""
+
+    state_dir = _ensure_state_dir(Path(common_dir))
     log_path = state_dir / OVERRIDE_LOG_NAME
+    try:
+        existing = _log_lines(log_path)
+        if not log_path.exists():
+            log_path.touch()
+            _relax_mode(log_path, GUARD_FILE_MODE)
+    except OSError as exc:
+        raise MainRefGuardError(
+            f"cannot prepare override log {log_path}: {exc}"
+        ) from exc
+
     event = dict(override)
     event.setdefault("schema", OVERRIDE_EVENT_SCHEMA)
     event["recorded_at"] = (now or datetime.now(UTC)).isoformat()
-    with log_path.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(event, sort_keys=True) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
+    event["seq"] = len(existing) + 1
+    event["prev_sha256"] = _sha256_text(existing[-1]) if existing else _OVERRIDE_LOG_GENESIS
+    serialized = json.dumps(event, sort_keys=True)
+    try:
+        with log_path.open("a", encoding="utf-8") as stream:
+            stream.write(serialized + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError as exc:
+        raise MainRefGuardError(
+            f"cannot append to override log {log_path}: {exc}"
+        ) from exc
+
+    _record_override_high_water(state_dir, event["seq"], _sha256_file(log_path))
     return log_path
 
 
 def override_event_count(common_dir: Path) -> int:
-    log_path = common_dir / GUARD_STATE_DIRNAME / OVERRIDE_LOG_NAME
+    log_path = Path(common_dir) / GUARD_STATE_DIRNAME / OVERRIDE_LOG_NAME
     if not log_path.is_file():
         return 0
     with log_path.open("r", encoding="utf-8") as stream:
         return sum(1 for line in stream if line.strip())
+
+
+def verify_override_log(common_dir: Path) -> tuple[str, int]:
+    """Return ``(state, count)`` for the durable override log.
+
+    ``state`` is ``"ok"`` when every line is JSON with a contiguous 1-based
+    ``seq`` and a ``prev_sha256`` that chains to the previous line, ``"broken"``
+    when the chain does not hold (an in-place edit or a mid-file deletion), and
+    ``"unreadable"`` when the file cannot be read at all."""
+
+    log_path = Path(common_dir) / GUARD_STATE_DIRNAME / OVERRIDE_LOG_NAME
+    if not log_path.is_file():
+        return ("ok", 0)
+    try:
+        raw_lines = log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ("unreadable", 0)
+    prev = _OVERRIDE_LOG_GENESIS
+    count = 0
+    for raw in raw_lines:
+        line = raw.strip()
+        if not line:
+            continue
+        count += 1
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return ("broken", count)
+        if (
+            not isinstance(event, dict)
+            or event.get("seq") != count
+            or event.get("prev_sha256") != prev
+        ):
+            return ("broken", count)
+        prev = _sha256_text(line)
+    return ("ok", count)
 
 
 # --------------------------------------------------------------------------- #
@@ -481,9 +632,25 @@ def run_hook(
         return 1
 
     if decision.override is not None:
-        log_path = record_override_event(
-            Path(common_git_dir), decision.override, now=now
-        )
+        try:
+            log_path = record_override_event(
+                Path(common_git_dir), decision.override, now=now
+            )
+        except MainRefGuardError as exc:
+            # Fail closed on the audit guarantee: acceptance condition 3 requires
+            # every override to leave a durable record, so an override that
+            # cannot be recorded is refused -- but cleanly, not as a traceback.
+            sys.stderr.write(
+                "tgw main-ref guard: refused.\n"
+                f"  the emergency override was requested but could not be "
+                f"recorded durably ({exc});\n"
+                "  the guard does not permit an unrecorded refs/heads/main "
+                "advance.\n"
+                "  fix write access to the guard state directory under\n"
+                f"  {common_git_dir}, or land the change through the sanctioned\n"
+                "  `tgw coding` publisher path.\n"
+            )
+            return 1
         refs = ", ".join(u.name for u in decision.protected_updates)
         sys.stderr.write(
             "tgw main-ref guard: EXPLICIT OVERRIDE in use.\n"
@@ -555,8 +722,15 @@ def install_guard(
     tmp_path.chmod(0o755)
     os.replace(tmp_path, hook_path)
 
-    state_dir = common_dir / GUARD_STATE_DIRNAME
-    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir = _ensure_state_dir(common_dir)
+    override_log = state_dir / OVERRIDE_LOG_NAME
+    override_log.touch(exist_ok=True)
+    _relax_mode(override_log, GUARD_FILE_MODE)
+    # Carry the existing durable log forward as the tamper-evidence high-water
+    # mark, so reinstalling the guard on a repo that already has recorded
+    # overrides does not silently reset the baseline a later truncation is
+    # checked against.
+    _, existing_overrides = verify_override_log(common_dir)
     config = {
         "schema": GUARD_CONFIG_SCHEMA,
         "version": GUARD_VERSION,
@@ -569,12 +743,14 @@ def install_guard(
         "hook_path": str(hook_path),
         "hook_sha256": _sha256_text(script),
         "installed_at": (now or datetime.now(UTC)).isoformat(),
+        "override_event_count": existing_overrides,
+        "override_log_sha256": _sha256_file(override_log),
     }
     config_path = state_dir / GUARD_CONFIG_NAME
     config_tmp = config_path.with_name(f".{GUARD_CONFIG_NAME}.tgw-tmp")
     config_tmp.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _relax_mode(config_tmp, GUARD_FILE_MODE)
     os.replace(config_tmp, config_path)
-    (state_dir / OVERRIDE_LOG_NAME).touch(exist_ok=True)
 
     return {"ok": True, "installed": True, "hook_path": str(hook_path), "config": config}
 
@@ -620,7 +796,10 @@ def guard_status(repo: Path) -> dict[str, object]:
     * ``absent`` -- no hook and no state directory: the guard was never
       installed on this repo;
     * ``modified`` / ``foreign`` / ``not-executable`` -- a hook occupies the
-      slot but is not the guard this package would install.
+      slot but is not the guard this package would install.  ``modified`` also
+      covers a durable override log that has been truncated, deleted, or rewritten
+      out of hash chain below the high-water mark recorded in ``guard.json``
+      (``override_log_tampered``).
 
     The expected body is re-derived only from trusted inputs, never from values
     read out of the (group-writable) installed hook or ``guard.json``: a
@@ -653,6 +832,8 @@ def guard_status(repo: Path) -> dict[str, object]:
         "protected_refs": list(PROTECTED_REFS),
         "override_event_count": override_event_count(common_dir),
         "override_log": str(override_log),
+        "override_log_integrity": "ok",
+        "override_log_tampered": False,
         "active": False,
         "integrity": "absent",
     }
@@ -666,6 +847,33 @@ def guard_status(repo: Path) -> dict[str, object]:
     # The enforced allow-list is the package constant, embedded in the hook body
     # -- never whatever ``guard.json`` happens to say.
     status["publisher_identities"] = list(DEFAULT_PUBLISHER_IDENTITIES)
+
+    # Tamper-evidence for the durable override log: the hash chain must hold, and
+    # the log must not have fewer events than the high-water mark last recorded
+    # in guard.json.  Truncating or deleting the log (the strictly-easier evasion
+    # that the disclosed `rm .git/hooks/reference-transaction` bypass had over it)
+    # therefore now reads as ``modified`` -- Doctor FAIL, the same escalation.
+    log_state, log_count = verify_override_log(common_dir)
+    recorded_high_water: int | None = None
+    recorded_log_sha: str | None = None
+    if isinstance(config, dict):
+        rc = config.get("override_event_count")
+        if isinstance(rc, int) and not isinstance(rc, bool):
+            recorded_high_water = rc
+        rs = config.get("override_log_sha256")
+        if isinstance(rs, str):
+            recorded_log_sha = rs
+    shrunk = recorded_high_water is not None and log_count < recorded_high_water
+    edited_in_place = (
+        recorded_log_sha is not None
+        and recorded_high_water == log_count
+        and override_log.is_file()
+        and recorded_log_sha != _sha256_file(override_log)
+    )
+    status["override_log_integrity"] = log_state
+    status["override_log_tampered"] = bool(
+        log_state != "ok" or shrunk or edited_in_place
+    )
 
     if not status["hook_present"]:
         # Distinguish a pristine repo from one whose guard was torn out: the
@@ -700,6 +908,10 @@ def guard_status(repo: Path) -> dict[str, object]:
     elif not status["executable"]:
         status["integrity"] = "not-executable"
     elif not status["hook_matches_package"]:
+        status["integrity"] = "modified"
+    elif status["override_log_tampered"]:
+        # Hook body is byte-correct, but the durable override audit trail has
+        # been truncated, deleted, or rewritten out of chain.
         status["integrity"] = "modified"
     elif config is None:
         status["integrity"] = "config-missing"

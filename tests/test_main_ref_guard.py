@@ -132,6 +132,34 @@ def test_parse_transaction_input_rejects_garbage() -> None:
         guard.parse_transaction_input("not a valid line\n")
 
 
+def test_parse_transaction_input_accepts_symref_target() -> None:
+    """githooks(5): a symbolic-ref update line uses a ``ref:`` target, not an OID.
+
+    Finding 2: a HEAD symref line bundled with a real ``refs/heads/main`` OID
+    update must parse, not raise (which would abort the whole transaction, even
+    for the sanctioned publisher).
+    """
+    text = (
+        f"{A} {B} refs/heads/main\n"
+        "ref:refs/heads/old ref:refs/heads/main HEAD\n"
+    )
+    parsed = guard.parse_transaction_input(text)
+    assert [u.name for u in parsed] == ["refs/heads/main", "HEAD"]
+    # only the real main OID update is a protected change
+    assert guard.protected_updates(parsed) == _updates((A, B, "refs/heads/main"))
+
+
+def test_run_hook_allows_publisher_bundle_with_symref(tmp_path: Path) -> None:
+    rc = guard.run_hook(
+        ["reference-transaction", "prepared"],
+        f"{A} {B} refs/heads/main\nref:refs/heads/x ref:refs/heads/y HEAD\n",
+        environ={},
+        common_git_dir=tmp_path,
+        publisher_identities=(getpass.getuser(),),
+    )
+    assert rc == 0
+
+
 def test_protected_updates_only_flags_changing_main() -> None:
     updates = _updates(
         (A, A, "refs/heads/main"),  # no change
@@ -456,6 +484,145 @@ def test_uninstall_is_reversible_and_keeps_override_log(repo: Path) -> None:
     assert not (guard.hooks_dir(repo) / "reference-transaction").exists()
     # durable record survives an uninstall
     assert guard.override_event_count(common) == 1
+
+
+# --------------------------------------------------------------------------- #
+# override log: permission posture + tamper evidence (Finding 1)
+# --------------------------------------------------------------------------- #
+def _record(common: Path, reason: str) -> None:
+    guard.record_override_event(
+        common,
+        {
+            "justification": reason,
+            "caller_name": "claude",
+            "caller_uid": 1000,
+            "implicit_root": False,
+            "protected_updates": [],
+        },
+    )
+
+
+def test_install_pins_state_dir_and_log_permissions(repo: Path) -> None:
+    """The audit trail's permission posture is explicit, not left to the umask."""
+    guard.install_guard(repo, source_path=SRC)
+    state_dir = guard.guard_state_dir(repo)
+    log = state_dir / guard.OVERRIDE_LOG_NAME
+    dir_mode = state_dir.stat().st_mode
+    # group-writable + setgid so a non-publisher emergency override can append
+    assert dir_mode & 0o020, oct(dir_mode)
+    assert dir_mode & 0o2000, oct(dir_mode)
+    assert log.stat().st_mode & 0o020, oct(log.stat().st_mode)
+
+
+def test_override_log_is_hash_chained(repo: Path) -> None:
+    common = guard.common_git_dir(repo)
+    _record(common, "one")
+    _record(common, "two")
+    state, count = guard.verify_override_log(common)
+    assert (state, count) == ("ok", 2)
+    lines = [
+        json.loads(x)
+        for x in (common / guard.GUARD_STATE_DIRNAME / guard.OVERRIDE_LOG_NAME)
+        .read_text()
+        .splitlines()
+        if x.strip()
+    ]
+    assert [e["seq"] for e in lines] == [1, 2]
+    assert lines[0]["prev_sha256"] == guard._OVERRIDE_LOG_GENESIS
+    assert lines[1]["prev_sha256"] != guard._OVERRIDE_LOG_GENESIS
+
+
+def test_status_flags_truncated_override_log(repo: Path) -> None:
+    """Finding 1: erasing the log is now as detectable as removing the hook."""
+    guard.install_guard(repo, source_path=SRC)
+    common = guard.common_git_dir(repo)
+    _record(common, "incident 1942")
+    assert guard.guard_status(repo)["integrity"] == "ok"
+
+    log = common / guard.GUARD_STATE_DIRNAME / guard.OVERRIDE_LOG_NAME
+    log.write_text("")  # `: > override-events.log`
+
+    status = guard.guard_status(repo)
+    assert status["override_log_tampered"] is True
+    assert status["integrity"] == "modified"
+    assert status["active"] is False
+    result = doctor_cli.check_main_ref_guard(doctor_cli.DoctorPaths(repository=repo))
+    assert result["state"] == "FAIL"
+
+
+def test_status_flags_deleted_override_log(repo: Path) -> None:
+    guard.install_guard(repo, source_path=SRC)
+    common = guard.common_git_dir(repo)
+    _record(common, "incident 1942")
+    (common / guard.GUARD_STATE_DIRNAME / guard.OVERRIDE_LOG_NAME).unlink()
+    status = guard.guard_status(repo)
+    assert status["integrity"] == "modified"
+    assert status["active"] is False
+
+
+def test_status_flags_rewritten_override_log_line(repo: Path) -> None:
+    guard.install_guard(repo, source_path=SRC)
+    common = guard.common_git_dir(repo)
+    _record(common, "one")
+    _record(common, "two")
+    log = common / guard.GUARD_STATE_DIRNAME / guard.OVERRIDE_LOG_NAME
+    lines = log.read_text().splitlines()
+    forged = json.loads(lines[0])
+    forged["justification"] = "backdated"
+    lines[0] = json.dumps(forged, sort_keys=True)
+    log.write_text("\n".join(lines) + "\n")
+    assert guard.verify_override_log(common)[0] == "broken"
+    assert guard.guard_status(repo)["integrity"] == "modified"
+
+
+def test_reinstall_carries_override_high_water_mark(repo: Path) -> None:
+    guard.install_guard(repo, source_path=SRC)
+    common = guard.common_git_dir(repo)
+    _record(common, "incident 1942")
+    guard.uninstall_guard(repo)  # drops guard.json, keeps the log
+    guard.install_guard(repo, source_path=SRC)
+    cfg = json.loads((guard.guard_state_dir(repo) / guard.GUARD_CONFIG_NAME).read_text())
+    assert cfg["override_event_count"] == 1
+    # a later truncation is still caught against the carried-forward baseline
+    (common / guard.GUARD_STATE_DIRNAME / guard.OVERRIDE_LOG_NAME).write_text("")
+    assert guard.guard_status(repo)["integrity"] == "modified"
+
+
+def test_record_override_event_raises_when_log_unwritable(repo: Path, tmp_path: Path) -> None:
+    """A non-writable state dir yields MainRefGuardError, not a bare OSError."""
+    frozen = tmp_path / "frozen"
+    frozen.mkdir()
+    (frozen / guard.GUARD_STATE_DIRNAME).mkdir()
+    (frozen / guard.GUARD_STATE_DIRNAME / guard.OVERRIDE_LOG_NAME).touch()
+    os.chmod(frozen / guard.GUARD_STATE_DIRNAME / guard.OVERRIDE_LOG_NAME, 0o444)
+    os.chmod(frozen / guard.GUARD_STATE_DIRNAME, 0o555)
+    try:
+        if os.getuid() == 0:
+            pytest.skip("root ignores file permission bits")
+        with pytest.raises(guard.MainRefGuardError):
+            _record(frozen, "cannot land")
+    finally:
+        os.chmod(frozen / guard.GUARD_STATE_DIRNAME, 0o755)
+
+
+def test_run_hook_refuses_when_override_cannot_be_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 1 (symmetric half): an unrecordable override is a clean refusal,
+    not an unhandled traceback that aborts the transaction."""
+
+    def _boom(*_a, **_k):
+        raise guard.MainRefGuardError("state dir is read-only")
+
+    monkeypatch.setattr(guard, "record_override_event", _boom)
+    rc = guard.run_hook(
+        ["reference-transaction", "prepared"],
+        f"{A} {B} refs/heads/main\n",
+        environ={guard.OVERRIDE_ENV: "emergency"},
+        common_git_dir=tmp_path,
+        publisher_identities=("no-such-publisher",),
+    )
+    assert rc == 1
 
 
 # --------------------------------------------------------------------------- #

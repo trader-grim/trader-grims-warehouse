@@ -6486,6 +6486,16 @@ def check_main_ref_guard(paths: DoctorPaths) -> dict[str, Any]:
             "main ref guard hook was installed and has since been removed "
             "(guard state directory still present) -- possible tampering; reinstall"
         )
+    elif integrity == "modified" and status.get("override_log_tampered"):
+        state = "FAIL"
+        detail = (
+            "main ref guard hook body is intact but its durable override audit "
+            f"trail is not ({status.get('override_log_integrity')}; "
+            f"{status.get('override_event_count')} event(s) now present in "
+            f"{status.get('override_log')}) -- the log has been truncated, "
+            "deleted, or rewritten; treat as tampering and review the recorded "
+            "refs/heads/main advances"
+        )
     else:
         state = "FAIL"
         detail = f"main ref guard hook integrity problem: {integrity}"

@@ -30,7 +30,10 @@ canonical repository. During the `prepared` phase the hook:
      record;
    - `TGW_MAIN_REF_GUARD_OVERRIDE='<reason>'` set → **allowed**, and the use is
      appended to `<git-common-dir>/tgw-main-ref-guard/override-events.log` as a
-     durable JSON line;
+     durable JSON line (a hash-chained record: each line carries `seq` and
+     `prev_sha256`). If the event cannot be written durably the guard **refuses**
+     the advance with an actionable message rather than allowing an unrecorded
+     one or aborting with a traceback;
    - effective uid `0` (root — receipt-driven recovery/bootstrap) → **allowed**,
      but never silently: it produces the same durable override record (with
      `"implicit_root": true`) that an explicit override would;
@@ -51,6 +54,19 @@ directory (`<git-common-dir>/tgw-main-ref-guard/`, holding `guard.json` and the
 durable override log) is intentionally kept across an uninstall — it is what
 lets the Doctor tell a repo that was never guarded (`absent`) apart from one
 whose hook was removed after installation (`removed`, escalated to FAIL).
+
+The state directory and its files are created with **explicit, umask-independent
+permissions** (`install_guard` pins the directory to `2775` — setgid,
+group-writable — and `guard.json` / `override-events.log` to `664`). The
+canonical `.git` tree is setgid to group `tgw-coders`, so a non-publisher
+emergency override can still append its event regardless of the ambient umask
+(no `PermissionError` aborting the transaction). The audit trail's integrity does
+not rely on those permissions holding, though: `install_guard` records the
+override log's length and hash as a high-water mark in `guard.json`, and
+`guard_status` re-checks the hash chain and that count on every read. Truncating,
+deleting, or rewriting `override-events.log` therefore reads as `modified`
+(Doctor **FAIL**) — the same escalation as removing the hook, closing the gap
+where log erasure used to be a strictly easier and less detectable evasion.
 
 The hook embeds the absolute git-common-dir that `install_guard` computed, so it
 resolves the override log correctly even if `core.hooksPath` relocates the hooks
@@ -114,6 +130,7 @@ provider-transferable:
 | WARN  | `config-missing` | hook body verified against the package but `guard.json` is gone |
 | FAIL  | `removed` | guard was installed and the hook has since disappeared — possible tampering |
 | FAIL  | `modified` / `foreign` / `not-executable` | a hook occupies the slot but is not the guard this package installs (includes a redirected `source_path`, a widened embedded allow-list, or a forged `guard.json` hash) |
+| FAIL  | `modified` (`override_log_tampered`) | hook body is intact but `override-events.log` has been truncated, deleted, or rewritten out of hash chain below the high-water mark recorded in `guard.json` |
 | UNKNOWN | — | status could not be read |
 
 ## Residual risk / threat model
@@ -137,10 +154,18 @@ group-writable by `tgw-coders` (the population the guard targets). It is
 - The `TGW_MAIN_REF_GUARD_OVERRIDE` env var is a deliberately low-friction
   emergency lever: it is *not* an authenticated identity and any caller can set
   it. It is not a silent bypass, though — every use (and every root advance) is
-  appended to the durable, `fsync`-ed override log, and the Doctor drops the
-  canonical host from PASS to **WARN** for as long as any such event is
-  unreviewed. The stronger identity gate is the publisher-owned-ref arrangement
-  below.
+  appended to the durable, `fsync`-ed override log (a `seq` + `prev_sha256` hash
+  chain), and the Doctor drops the canonical host from PASS to **WARN** for as
+  long as any such event is unreviewed. The stronger identity gate is the
+  publisher-owned-ref arrangement below.
+- Erasing the override log is **not** an easier evasion than removing the hook.
+  `override-events.log` and its state directory are created with pinned,
+  umask-independent modes; `install_guard` records the log's length and hash in
+  `guard.json`; and `guard_status` re-checks both on every read, so a truncation
+  or deletion turns the Doctor **FAIL** (`modified`). A determined agent can
+  still rewrite both the log and `guard.json` in one coordinated step — that is
+  the same class as `rm .git/hooks/reference-transaction`, and is the residual
+  risk the publisher-owned-ref arrangement below closes.
 
 The strictly stronger control is a **publisher-owned-ref arrangement** — `main`
 advanced only in a location the `tgw-coders` group cannot write (a separate
