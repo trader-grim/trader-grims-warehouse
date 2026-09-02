@@ -146,6 +146,7 @@ def _invoke_returning(report: dict):
 
 def test_run_normalizes_noncanonical_finding_shapes(tmp_path):
     claude = executable(tmp_path / "claude")
+    (tmp_path / "feature.py").write_text("x = 1\n", encoding="utf-8")
     request = _request(tmp_path)
     # description-vs-message, file-vs-path, missing line, severity alias, extra key.
     model_report = {
@@ -212,6 +213,46 @@ def test_run_errors_with_raw_report_on_unmappable_finding(tmp_path):
     assert "snapshot-relative path" in str(excinfo.value)
     assert excinfo.value.raw_report == model_report
     assert excinfo.value.raw_stdout and "no path here" in excinfo.value.raw_stdout
+
+
+@pytest.mark.parametrize(
+    ("finding", "match"),
+    [
+        (
+            {"severity": "high", "path": "/etc/passwd", "line": 1, "message": "abs"},
+            "not snapshot-relative",
+        ),
+        (
+            {"severity": "high", "path": "../outside.py", "line": 1, "message": "esc"},
+            "not snapshot-relative",
+        ),
+        (
+            {"severity": "high", "path": "ghost.py", "line": 1, "message": "missing"},
+            "absent from the snapshot",
+        ),
+        (
+            {"severity": "high", "path": "feature.py", "line": 99, "message": "far"},
+            "outside 'feature.py'",
+        ),
+    ],
+)
+def test_run_errors_with_raw_report_on_out_of_snapshot_finding(tmp_path, finding, match):
+    claude = executable(tmp_path / "claude")
+    (tmp_path / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    request = _request(tmp_path)
+    model_report = {
+        "schema": "tgw-code-review/v1",
+        "verdict": "FAIL",
+        "snapshot_hash": request["snapshot_hash"],
+        "summary": "bad",
+        "findings": [finding],
+    }
+
+    with pytest.raises(ClaudeReviewBackendError, match=match) as excinfo:
+        run(request, tmp_path, claude_bin=claude, invoke=_invoke_returning(model_report))
+
+    assert excinfo.value.raw_report == model_report
+    assert excinfo.value.raw_stdout and "result" in excinfo.value.raw_stdout
 
 
 def test_run_errors_on_fail_verdict_without_findings(tmp_path):

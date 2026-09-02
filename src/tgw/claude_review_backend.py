@@ -91,7 +91,9 @@ def _first_present(finding: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 
-def _normalize_finding(finding: Any, index: int) -> dict[str, Any]:
+def _normalize_finding(
+    finding: Any, index: int, snapshot_root: Path
+) -> dict[str, Any]:
     """Map a model-variant finding shape onto the exact review-contract fields.
 
     Tolerated deviations: unknown extra keys (dropped), ``description`` /
@@ -101,6 +103,15 @@ def _normalize_finding(finding: Any, index: int) -> dict[str, Any]:
     that is not an object, carries no message text or path, or has an
     unmappable severity or non-integer line -- raises a structured error that
     names the deviation.
+
+    The normalized ``path`` and ``line`` are additionally checked against the
+    immutable snapshot at ``snapshot_root`` (the review cwd): a path that is
+    absolute or escapes the snapshot, that names a file absent from the
+    snapshot, or a line past the end of that file raises a structured error.
+    The provider-neutral contract validator applied downstream enforces the
+    same three conditions; catching them here keeps the deviation attributable
+    to the model's own output (raw report + stdout) instead of surfacing later
+    as a bare ``ReviewRunnerError`` with no report evidence.
     """
     if not isinstance(finding, Mapping):
         raise ClaudeReviewBackendError(
@@ -142,18 +153,40 @@ def _normalize_finding(finding: Any, index: int) -> dict[str, Any]:
             ) from None
         if line < 1:
             line = 1
+    path = path.strip()
+    relative = Path(path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ClaudeReviewBackendError(
+            f"Claude review finding at index {index} path {path!r} is not "
+            "snapshot-relative"
+        )
+    source = snapshot_root / relative
+    if not source.is_file():
+        raise ClaudeReviewBackendError(
+            f"Claude review finding at index {index} path {path!r} is absent "
+            "from the snapshot"
+        )
+    source_lines = len(
+        source.read_text(encoding="utf-8", errors="replace").splitlines()
+    )
+    if line > source_lines:
+        raise ClaudeReviewBackendError(
+            f"Claude review finding at index {index} line {line} is outside "
+            f"{path!r} ({source_lines} line(s) in the snapshot)"
+        )
     return {
         "severity": severity,
-        "path": path.strip(),
+        "path": path,
         "line": line,
         "message": message.strip(),
     }
 
 
-def _normalize_report(report: Any) -> dict[str, Any]:
+def _normalize_report(report: Any, snapshot_root: Path) -> dict[str, Any]:
     """Coerce a model-variant review report onto ``tgw-code-review/v1``.
 
-    Findings are normalized field-by-field (see :func:`_normalize_finding`).
+    Findings are normalized field-by-field and checked against the immutable
+    snapshot at ``snapshot_root`` (see :func:`_normalize_finding`).
     The verdict is derived from whether any findings survived normalization --
     the only self-consistent shapes the contract admits are ``PASS`` with no
     findings and ``FAIL`` with at least one -- so a model that names the
@@ -174,7 +207,8 @@ def _normalize_report(report: Any) -> dict[str, Any]:
     if not isinstance(findings_raw, list):
         raise ClaudeReviewBackendError("Claude review findings are not a list")
     findings = [
-        _normalize_finding(item, index) for index, item in enumerate(findings_raw)
+        _normalize_finding(item, index, snapshot_root)
+        for index, item in enumerate(findings_raw)
     ]
     model_verdict = report.get("verdict")
     if isinstance(model_verdict, str):
@@ -325,7 +359,7 @@ def run(
             "Claude review returned invalid report JSON", raw_stdout=raw_stdout
         )
     try:
-        report = _normalize_report(raw_report)
+        report = _normalize_report(raw_report, cwd)
     except ClaudeReviewBackendError as exc:
         exc.raw_report = raw_report
         exc.raw_stdout = raw_stdout

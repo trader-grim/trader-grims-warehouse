@@ -291,3 +291,58 @@ def test_claude_review_fail_verdict_survives_mismatched_echoed_hash(tmp_path, mo
         expected_job_id="job-1",
     )
     assert validated["report"]["findings"][0]["message"] == "ruff: unused import"
+
+
+def test_claude_review_out_of_snapshot_finding_carries_raw_report_to_artifact(
+    tmp_path, monkeypatch
+):
+    """A normalizable finding whose path/line is not in the snapshot must fail
+    with the model's raw report attached, not as a bare ``ReviewRunnerError``
+    that reaches the failure artifact without report evidence.
+    """
+    repo, base, commit, tree = _repo(tmp_path)
+    monkeypatch.setenv("TGW_REVIEW_EXECUTOR", "claude")
+    claude_bin = tmp_path / "claude"
+    claude_bin.write_text("#!/bin/sh\nexit 0\n")
+    claude_bin.chmod(0o755)
+
+    model_report = {
+        "schema": "tgw-code-review/v1",
+        "verdict": "FAIL",
+        "snapshot_hash": "sha256:" + "0" * 64,
+        "summary": "issue outside the snapshot",
+        "findings": [
+            {
+                "severity": "high",
+                "path": "/opt/TGW/src/tgw/other.py",
+                "line": 4,
+                "message": "absolute path the model invented",
+            }
+        ],
+    }
+
+    def invoke(command, *, cwd, input, **kwargs):
+        out = json.dumps({"type": "result", "result": json.dumps(model_report)}) + "\n"
+        return subprocess.CompletedProcess(command, 0, out, "")
+
+    def backend(request, worktree):
+        from tgw.claude_review_backend import run as claude_run
+
+        return claude_run(request, worktree, claude_bin=claude_bin, invoke=invoke)
+
+    monkeypatch.setattr(coding_review, "run_claude_review", backend)
+
+    payload = _payload(base, commit, tree)
+    with pytest.raises(coding_review.ReviewRunnerError) as excinfo:
+        coding_review.run_local_review(payload, repo)
+    assert excinfo.value.raw_report == model_report
+
+    monkeypatch.setenv("TGW_CODING_JOB", json.dumps(payload))
+    monkeypatch.chdir(repo)
+    captured: dict[str, str] = {}
+    monkeypatch.setattr("builtins.print", lambda text: captured.setdefault("out", text))
+    coding_review.main()
+    artifact = json.loads(captured["out"])["artifacts"][0]
+    assert artifact["kind"] == "independent_review_failure"
+    assert artifact["raw_report"] == model_report
+    assert "provider_stdout" in artifact
