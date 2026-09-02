@@ -154,7 +154,9 @@ def test_evaluate_allows_publisher() -> None:
     assert "publisher" in decision.reason
 
 
-def test_evaluate_allows_root() -> None:
+def test_evaluate_allows_root_but_records_it() -> None:
+    # root is no longer an implicit silent publisher: a raw root advance is
+    # allowed (receipt-driven recovery) but always leaves a durable record.
     decision = guard.evaluate(
         "prepared",
         _updates((A, B, "refs/heads/main")),
@@ -163,6 +165,24 @@ def test_evaluate_allows_root() -> None:
         publisher_identities=("db",),
     )
     assert decision.allowed
+    assert decision.override is not None
+    assert decision.override["implicit_root"] is True
+    assert decision.override["caller_uid"] == 0
+
+
+def test_evaluate_root_with_explicit_reason_is_not_implicit() -> None:
+    decision = guard.evaluate(
+        "prepared",
+        _updates((A, B, "refs/heads/main")),
+        uid=0,
+        caller_name="root",
+        publisher_identities=("db",),
+        override_value="incident 1942",
+    )
+    assert decision.allowed
+    assert decision.override is not None
+    assert decision.override["implicit_root"] is False
+    assert decision.override["justification"] == "incident 1942"
 
 
 def test_evaluate_rejects_ordinary_agent() -> None:
@@ -340,6 +360,84 @@ def test_status_reports_removed_after_hook_deletion(repo: Path) -> None:
     assert result["state"] == "FAIL"
 
 
+def test_status_rejects_hook_with_redirected_source_path(repo: Path) -> None:
+    """A byte-valid render that points ``sys.path`` at an attacker dir is ``modified``.
+
+    Finding 2: ``guard_status`` re-derives the expected body from trusted inputs
+    only (the installed package's own source path), never from the ``source_path``
+    embedded in the group-writable hook, so ``render_hook_script`` with an
+    attacker-chosen path cannot round-trip to ``ok``.
+    """
+    guard.install_guard(repo, source_path=SRC)
+    hook = guard.hooks_dir(repo) / "reference-transaction"
+    evil = guard.render_hook_script(
+        source_path="/tmp/evil",
+        common_git_dir=guard.common_git_dir(repo),
+        publisher_identities=guard.DEFAULT_PUBLISHER_IDENTITIES,
+    )
+    hook.write_text(evil)
+    hook.chmod(0o755)
+    status = guard.guard_status(repo)
+    assert status["integrity"] == "modified"
+    assert status["active"] is False
+
+
+def test_status_rejects_hook_with_widened_publisher_list(repo: Path) -> None:
+    """Finding 1: the embedded allow-list is anchored to the package constant."""
+    guard.install_guard(repo, source_path=SRC)
+    hook = guard.hooks_dir(repo) / "reference-transaction"
+    widened = guard.render_hook_script(
+        source_path=str(guard.PACKAGE_SOURCE_PATH),
+        common_git_dir=guard.common_git_dir(repo),
+        publisher_identities=("claude", *guard.DEFAULT_PUBLISHER_IDENTITIES),
+    )
+    hook.write_text(widened)
+    hook.chmod(0o755)
+    status = guard.guard_status(repo)
+    assert status["integrity"] == "modified"
+    assert status["active"] is False
+
+
+def test_guard_json_publisher_list_is_ignored(repo: Path) -> None:
+    """Finding 1: rewriting ``guard.json`` grants no authority and no ``ok`` loss."""
+    guard.install_guard(repo, source_path=SRC)
+    cfg = guard.guard_state_dir(repo) / guard.GUARD_CONFIG_NAME
+    data = json.loads(cfg.read_text())
+    data["publisher_identities"] = ["claude", "deepseek", "codex"]
+    cfg.write_text(json.dumps(data))
+    status = guard.guard_status(repo)
+    assert status["integrity"] == "ok"
+    assert status["publisher_identities"] == list(guard.DEFAULT_PUBLISHER_IDENTITIES)
+
+
+def test_status_rejects_forged_guard_json_hash(repo: Path) -> None:
+    guard.install_guard(repo, source_path=SRC)
+    cfg = guard.guard_state_dir(repo) / guard.GUARD_CONFIG_NAME
+    data = json.loads(cfg.read_text())
+    data["hook_sha256"] = "sha256:" + "0" * 64
+    cfg.write_text(json.dumps(data))
+    status = guard.guard_status(repo)
+    assert status["integrity"] == "modified"
+    assert status["active"] is False
+
+
+@pytest.mark.skipif(os.getuid() != 0, reason="implicit-root path only exercisable as root")
+def test_root_raw_advance_succeeds_and_is_recorded(repo: Path) -> None:
+    """Finding 5: a root-performed raw advance still leaves a durable record."""
+    guard.install_guard(repo, source_path=SRC, publisher_identities=("no-such-publisher",))
+    before = _head(repo)
+    (repo / "b").write_text("more\n")
+    _git(repo, "add", ".")
+    done = _git(repo, "commit", "-m", "root advance", env={guard.OVERRIDE_ENV: ""})
+    assert done.returncode == 0, done.stderr
+    assert _head(repo) != before
+    common = guard.common_git_dir(repo)
+    log = common / guard.GUARD_STATE_DIRNAME / guard.OVERRIDE_LOG_NAME
+    lines = [json.loads(x) for x in log.read_text().splitlines() if x.strip()]
+    assert lines and lines[-1]["implicit_root"] is True
+    assert lines[-1]["caller_uid"] == 0
+
+
 def test_hook_embeds_common_git_dir(repo: Path) -> None:
     result = guard.install_guard(repo, source_path=SRC)
     body = Path(result["hook_path"]).read_text()
@@ -450,6 +548,27 @@ def test_doctor_check_passes_when_active(repo: Path) -> None:
     )
     assert result["state"] == "PASS"
     assert result["evidence"]["active"] is True
+
+
+def test_doctor_check_warns_after_override_event(repo: Path) -> None:
+    """Finding 3: an out-of-band main advance takes the canonical host off green."""
+    guard.install_guard(repo, source_path=SRC)
+    guard.record_override_event(
+        guard.common_git_dir(repo),
+        {
+            "justification": "incident 1942",
+            "caller_name": "claude",
+            "caller_uid": 1000,
+            "implicit_root": False,
+            "protected_updates": [],
+        },
+    )
+    result = doctor_cli.check_main_ref_guard(
+        doctor_cli.DoctorPaths(repository=repo)
+    )
+    assert result["state"] == "WARN"
+    assert result["evidence"]["override_event_count"] == 1
+    assert result["evidence"]["integrity"] == "ok"
 
 
 def test_doctor_check_fails_on_tampered_hook(repo: Path) -> None:

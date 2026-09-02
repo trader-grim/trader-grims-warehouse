@@ -24,13 +24,24 @@ canonical repository. During the `prepared` phase the hook:
    without importing `tgw` (worktree branches, tags, notes, stash,
    remote-tracking refs, `HEAD`, `ORIG_HEAD` are never affected).
 2. Otherwise it imports `tgw.main_ref_guard` and evaluates the caller:
-   - effective uid `0` (root — receipt-driven recovery/bootstrap) or a
-     configured publisher identity (`db` by default) → **allowed**;
+   - a sanctioned publisher identity (`db` — the `DEFAULT_PUBLISHER_IDENTITIES`
+     package constant, embedded literally into the hook body as
+     `_PUBLISHER_IDENTITIES`, **not** read from any file) → **allowed**, no
+     record;
    - `TGW_MAIN_REF_GUARD_OVERRIDE='<reason>'` set → **allowed**, and the use is
      appended to `<git-common-dir>/tgw-main-ref-guard/override-events.log` as a
      durable JSON line;
+   - effective uid `0` (root — receipt-driven recovery/bootstrap) → **allowed**,
+     but never silently: it produces the same durable override record (with
+     `"implicit_root": true`) that an explicit override would;
    - anything else → **refused**, the ref does not change, and the hook prints
      an actionable message.
+
+   The authorization list travels *inside* the tamper-anchored hook body. It is
+   never loaded from the group-writable state directory, so an ordinary
+   `tgw-coders` agent cannot widen it by editing `guard.json`; editing the
+   embedded `_PUBLISHER_IDENTITIES` instead changes the hook body, which
+   `guard_status` then reports as `modified` (FAIL).
 3. If the guard module cannot be imported it fails closed (refuses the `main`
    update).
 
@@ -42,12 +53,16 @@ lets the Doctor tell a repo that was never guarded (`absent`) apart from one
 whose hook was removed after installation (`removed`, escalated to FAIL).
 
 The hook embeds the absolute git-common-dir that `install_guard` computed, so it
-resolves `guard.json` and the override log correctly even if `core.hooksPath`
-relocates the hooks directory. Its body is a pure render from the installed
-`tgw` package; `guard_status` re-derives the exact expected body from the hook's
-own embedded parameters, so an edit to an installed hook always reads as
-`modified` (FAIL) even if `guard.json` is deleted in the same step to try to
-hide it — the tamper anchor is the package, not the group-writable state dir.
+resolves the override log correctly even if `core.hooksPath` relocates the hooks
+directory. `guard_status` re-derives the one body it will accept as genuine from
+**trusted inputs only** — the installed package's own source directory
+(`PACKAGE_SOURCE_PATH`), the common git dir resolved fresh from `git`, the
+package constant `DEFAULT_PUBLISHER_IDENTITIES`, and the standard interpreter —
+and compares byte-for-byte. Nothing is read back out of the installed hook or
+`guard.json`, so a redirected `source_path`, a rewritten embedded allow-list, or
+any body edit all read as `modified` (FAIL), even if `guard.json` is deleted or
+its recorded hash forged in the same step. The tamper anchor is the installed
+`tgw` package — for both the hook body *and* the authorization list.
 
 ## Installation / lifecycle
 
@@ -93,11 +108,12 @@ provider-transferable:
 
 | state | integrity | meaning |
 | ----- | --------- | ------- |
-| PASS  | `ok` | hook present, tgw-managed, executable, byte-for-byte the package render, config present |
+| PASS  | `ok`, and `override_event_count == 0` | hook present, tgw-managed, executable, byte-for-byte the trusted package render, `guard.json` hash agrees |
+| WARN  | `ok`, and `override_event_count > 0` | guard intact, but `refs/heads/main` was advanced out of band ≥ 1× (explicit override or recorded root advance) — review each event and rotate the log to clear |
 | WARN  | `absent` | guard was never installed on this repo (expected on a freshly provisioned host) |
-| WARN  | `config-missing` | hook body verified against the package but `guard.json` is gone (a custom publisher list cannot be confirmed) |
+| WARN  | `config-missing` | hook body verified against the package but `guard.json` is gone |
 | FAIL  | `removed` | guard was installed and the hook has since disappeared — possible tampering |
-| FAIL  | `modified` / `foreign` / `not-executable` | a hook occupies the slot but is not the guard this package installs |
+| FAIL  | `modified` / `foreign` / `not-executable` | a hook occupies the slot but is not the guard this package installs (includes a redirected `source_path`, a widened embedded allow-list, or a forged `guard.json` hash) |
 | UNKNOWN | — | status could not be read |
 
 ## Residual risk / threat model
@@ -114,8 +130,17 @@ group-writable by `tgw-coders` (the population the guard targets). It is
   these are interceptable by any hook.
 - Bypass by hook removal is **tamper-evident**: after installation the Doctor
   reports `removed` → FAIL (the state directory survives), so the canonical
-  host's health turns red rather than silently amber. Editing the hook body is
-  likewise FAIL (`modified`), anchored on the installed package.
+  host's health turns red rather than silently amber. Editing the hook body —
+  including redirecting its `source_path` or widening its embedded
+  `_PUBLISHER_IDENTITIES` — is likewise FAIL (`modified`), anchored on the
+  installed package, not on the group-writable `guard.json`.
+- The `TGW_MAIN_REF_GUARD_OVERRIDE` env var is a deliberately low-friction
+  emergency lever: it is *not* an authenticated identity and any caller can set
+  it. It is not a silent bypass, though — every use (and every root advance) is
+  appended to the durable, `fsync`-ed override log, and the Doctor drops the
+  canonical host from PASS to **WARN** for as long as any such event is
+  unreviewed. The stronger identity gate is the publisher-owned-ref arrangement
+  below.
 
 The strictly stronger control is a **publisher-owned-ref arrangement** — `main`
 advanced only in a location the `tgw-coders` group cannot write (a separate

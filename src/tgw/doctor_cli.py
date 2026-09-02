@@ -6446,7 +6446,24 @@ def check_main_ref_guard(paths: DoctorPaths) -> dict[str, Any]:
         )
 
     integrity = status.get("integrity")
-    if integrity == "ok":
+    try:
+        override_events = int(status.get("override_event_count") or 0)
+    except (TypeError, ValueError):
+        override_events = 0
+    if integrity == "ok" and override_events > 0:
+        # The guard is intact, but refs/heads/main has been advanced at least
+        # once outside the sanctioned publisher path (an explicit override or a
+        # recorded root advance).  That is exactly the 2026-08-31 desync shape,
+        # so the canonical host must not read green until an operator has
+        # reviewed each event and rotated the durable log.
+        state = "WARN"
+        detail = (
+            f"canonical main ref guard is installed and active, but "
+            f"{override_events} out-of-band refs/heads/main advancement(s) are "
+            f"recorded in {status.get('override_log')}; review each against a "
+            "sanctioned recovery and rotate the log to clear this warning"
+        )
+    elif integrity == "ok":
         state = "PASS"
         detail = "canonical main ref guard hook is installed and active"
     elif integrity == "absent":

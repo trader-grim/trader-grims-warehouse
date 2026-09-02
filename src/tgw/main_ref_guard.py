@@ -149,11 +149,10 @@ def caller_identity(uid: int | None = None) -> tuple[int, str]:
     return resolved, name
 
 
-def _is_publisher(uid: int, name: str, publisher_identities: Sequence[str]) -> bool:
-    # root is always allowed: receipt-driven recovery/bootstrap is root-owned and
-    # is itself the sanctioned atomic HEAD+cursor path of last resort.
-    if uid == 0:
-        return True
+def _is_publisher(name: str, publisher_identities: Sequence[str]) -> bool:
+    # Identity match only.  ``root`` is *not* an implicit publisher: a
+    # root-performed raw advance is still recorded (see :func:`evaluate`), so the
+    # receipt-driven recovery path leaves the same durable trail as any override.
     return name in tuple(publisher_identities)
 
 
@@ -181,26 +180,36 @@ def evaluate(
             f"reference-transaction state {state!r} is not vetoable",
             protected_updates=touched,
         )
-    if _is_publisher(uid, caller_name, publisher_identities):
+    if _is_publisher(caller_name, publisher_identities):
         return GuardDecision(
             "allow",
             f"caller {caller_name!r} is the sanctioned source publisher",
             protected_updates=touched,
         )
     justification = (override_value or "").strip()
+    implicit_root = uid == 0 and not justification
+    if implicit_root:
+        # root may still advance main (receipt-driven recovery/bootstrap), but it
+        # is never silent: it produces the same durable override record an agent
+        # override would, so Finding-5's "zero audit trail" case cannot happen.
+        justification = (
+            "uid 0 performed a raw refs/heads/main advancement "
+            "(implicit recovery identity; no explicit override reason given)"
+        )
     if justification:
         override = {
             "schema": OVERRIDE_EVENT_SCHEMA,
             "justification": justification,
             "caller_uid": uid,
             "caller_name": caller_name,
+            "implicit_root": implicit_root,
             "protected_updates": [
                 {"old": u.old, "new": u.new, "ref": u.name} for u in touched
             ],
         }
         return GuardDecision(
             "allow",
-            "explicit recorded override",
+            "root advancement (recorded)" if implicit_root else "explicit recorded override",
             protected_updates=touched,
             override=override,
         )
@@ -268,6 +277,7 @@ def render_hook_script(
     *,
     source_path: str,
     common_git_dir: str | Path,
+    publisher_identities: Sequence[str] = DEFAULT_PUBLISHER_IDENTITIES,
     python_executable: str = "/usr/bin/python3",
 ) -> str:
     """Render the self-contained ``reference-transaction`` hook.
@@ -277,18 +287,22 @@ def render_hook_script(
     exits non-zero -- fail closed, protecting ``main``.
 
     ``common_git_dir`` is the absolute common git dir computed by
-    :func:`install_guard`; it is embedded literally so the hook resolves
-    ``guard.json`` and the durable override log correctly even when
-    ``core.hooksPath`` relocates the hooks directory outside the git dir.
+    :func:`install_guard`; it is embedded literally so the hook resolves the
+    durable override log correctly even when ``core.hooksPath`` relocates the
+    hooks directory outside the git dir.
 
-    The rendered body is a pure function of its arguments, so
-    :func:`guard_status` can re-render the exact expected script and detect any
-    edit to an installed hook -- the tamper anchor lives in the installed ``tgw``
-    package, not in the group-writable state directory.
+    ``publisher_identities`` is embedded literally into the hook body -- the
+    authorization list travels *inside* the tamper-anchored artifact, never in
+    the group-writable state directory.  :func:`guard_status` re-renders the
+    expected body from trusted inputs only (the installed package's own source
+    path, the freshly resolved common git dir, and the package constant
+    :data:`DEFAULT_PUBLISHER_IDENTITIES`) and compares byte-for-byte, so neither
+    a body edit nor a rewrite of the embedded allow-list can read as ``ok``.
     """
 
     protected = ", ".join(repr(ref) for ref in PROTECTED_REFS)
     common = str(Path(common_git_dir))
+    publishers = ", ".join(repr(name) for name in publisher_identities)
     return f"""#!{python_executable}
 # {SENTINEL} {GUARD_VERSION} -- managed by tgw.main_ref_guard; DO NOT EDIT.
 # Rejects non-publisher updates to refs/heads/main (Todo 1942).
@@ -299,6 +313,7 @@ import sys
 
 _PROTECTED = ({protected},)
 _COMMON_GIT_DIR = {common!r}
+_PUBLISHER_IDENTITIES = ({publishers},)
 
 
 def _touches_protected(text):
@@ -328,6 +343,7 @@ def _main():
         data,
         environ=os.environ,
         common_git_dir=_COMMON_GIT_DIR,
+        publisher_identities=_PUBLISHER_IDENTITIES,
     )
 
 
@@ -348,35 +364,31 @@ def _sha256_file(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-_HOOK_SHEBANG = re.compile(r"\A#!(\S+)")
-_HOOK_SOURCE_PATH = re.compile(r"^\s*sys\.path\.insert\(0, (['\"])(?P<v>.*?)\1\)$", re.M)
-_HOOK_COMMON_DIR = re.compile(r"^_COMMON_GIT_DIR = (['\"])(?P<v>.*?)\1$", re.M)
+#: The ``src`` directory of the *installed* ``tgw`` package running this code.
+#: The hook must load ``tgw`` from here; :func:`guard_status` re-renders the
+#: expected body against this path, never against a path read out of the
+#: (group-writable) installed hook.
+PACKAGE_SOURCE_PATH = Path(__file__).resolve().parents[1]
 
 
-def _hook_is_genuine_render(text: str) -> bool:
-    """True iff ``text`` is exactly what :func:`render_hook_script` would emit.
+def _expected_hook_body(
+    repo: Path, *, python_executable: str = "/usr/bin/python3"
+) -> str:
+    """Render the only hook body this package would accept as genuine on ``repo``.
 
-    The render is a pure function of (shebang, embedded source path, embedded
-    common git dir).  We read those three back out of ``text`` and re-render:
-    only an untouched, package-produced hook round-trips byte-for-byte, so any
-    edit to the body is detected even when the recorded ``guard.json`` (which
-    lives in a group-writable directory) has been deleted to hide it.
+    Every input is trusted: the installed package's own source directory, the
+    common git dir resolved fresh from ``git`` at status time, the package
+    constant :data:`DEFAULT_PUBLISHER_IDENTITIES`, and the standard interpreter.
+    A hook that does not match this byte-for-byte -- a redirected ``source_path``,
+    a rewritten embedded allow-list, any body edit -- cannot read as ``ok``.
     """
 
-    shebang = _HOOK_SHEBANG.match(text)
-    source = _HOOK_SOURCE_PATH.search(text)
-    common = _HOOK_COMMON_DIR.search(text)
-    if not (shebang and source and common):
-        return False
-    try:
-        rerendered = render_hook_script(
-            source_path=source.group("v"),
-            common_git_dir=common.group("v"),
-            python_executable=shebang.group(1),
-        )
-    except Exception:
-        return False
-    return rerendered == text
+    return render_hook_script(
+        source_path=str(PACKAGE_SOURCE_PATH),
+        common_git_dir=common_git_dir(repo),
+        publisher_identities=DEFAULT_PUBLISHER_IDENTITIES,
+        python_executable=python_executable,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -414,31 +426,23 @@ def override_event_count(common_dir: Path) -> int:
 # --------------------------------------------------------------------------- #
 # Hook entry point
 # --------------------------------------------------------------------------- #
-def _load_publisher_identities(common_dir: Path) -> list[str]:
-    config = common_dir / GUARD_STATE_DIRNAME / GUARD_CONFIG_NAME
-    if not config.is_file():
-        return list(DEFAULT_PUBLISHER_IDENTITIES)
-    try:
-        value = json.loads(config.read_text(encoding="utf-8"))
-        identities = value["publisher_identities"]
-        if not isinstance(identities, list) or not all(
-            isinstance(item, str) and item for item in identities
-        ):
-            raise ValueError
-    except (OSError, ValueError, KeyError, json.JSONDecodeError):
-        return list(DEFAULT_PUBLISHER_IDENTITIES)
-    return identities
-
-
 def run_hook(
     argv: Sequence[str],
     stdin_text: str,
     *,
     environ: Mapping[str, str],
     common_git_dir: Path,
+    publisher_identities: Sequence[str] = DEFAULT_PUBLISHER_IDENTITIES,
     now: datetime | None = None,
 ) -> int:
-    """Evaluate one reference-transaction invocation; return the hook exit code."""
+    """Evaluate one reference-transaction invocation; return the hook exit code.
+
+    ``publisher_identities`` is supplied by the caller -- the installed hook
+    passes its own embedded ``_PUBLISHER_IDENTITIES`` literal.  The list is
+    never read from the group-writable state directory, so it cannot be widened
+    by the population the guard targets without editing the tamper-anchored hook
+    body (which :func:`guard_status` then flags as ``modified``).
+    """
 
     state = argv[1] if len(argv) > 1 else ""
     try:
@@ -451,7 +455,6 @@ def run_hook(
     if not protected_updates(updates):
         return 0
 
-    publisher_identities = _load_publisher_identities(Path(common_git_dir))
     uid, name = caller_identity()
     decision = evaluate(
         state,
@@ -511,10 +514,18 @@ def install_guard(
 
     Reversible: :func:`uninstall_guard` (or ``rm`` of the hook file) fully
     restores the previous behaviour.
+
+    ``publisher_identities`` is not exposed on the CLI: the canonical install
+    always embeds :data:`DEFAULT_PUBLISHER_IDENTITIES`, and :func:`guard_status`
+    only rates a hook ``ok`` when the embedded list is exactly that constant.
+    The argument exists for tests that need to exercise the git-level abort
+    against a synthetic identity list.
     """
 
     repo = Path(repo).resolve()
-    resolved_source = Path(source_path).resolve() if source_path else (repo / "src")
+    resolved_source = (
+        Path(source_path).resolve() if source_path else PACKAGE_SOURCE_PATH
+    )
     if not (resolved_source / "tgw" / "main_ref_guard.py").is_file():
         raise MainRefGuardError(
             f"tgw.main_ref_guard is not importable from {resolved_source}"
@@ -536,6 +547,7 @@ def install_guard(
     script = render_hook_script(
         source_path=str(resolved_source),
         common_git_dir=common_dir,
+        publisher_identities=publisher_identities,
         python_executable=python_executable,
     )
     tmp_path = hook_path.with_name(f".{HOOK_NAME}.tgw-tmp")
@@ -595,11 +607,13 @@ def guard_status(repo: Path) -> dict[str, object]:
 
     Integrity values:
 
-    * ``ok`` -- hook present, tgw-managed, executable, byte-for-byte the script
-      this package renders, and its recorded config is present;
+    * ``ok`` -- hook present, tgw-managed, executable, byte-for-byte the body
+      :func:`_expected_hook_body` renders from *trusted* inputs (the installed
+      package source path, the freshly resolved common git dir, and the package
+      constant :data:`DEFAULT_PUBLISHER_IDENTITIES`), and its recorded
+      ``guard.json`` hash agrees;
     * ``config-missing`` -- hook body verified against the package but
-      ``guard.json`` is gone, so a customised ``--publisher`` list cannot be
-      confirmed;
+      ``guard.json`` is gone;
     * ``removed`` -- no hook, but the guard state directory (created by
       :func:`install_guard` and kept across :func:`uninstall_guard`) is still
       there: the guard was installed and then removed out of band;
@@ -608,9 +622,11 @@ def guard_status(repo: Path) -> dict[str, object]:
     * ``modified`` / ``foreign`` / ``not-executable`` -- a hook occupies the
       slot but is not the guard this package would install.
 
-    The expected hook body is a pure render from the installed ``tgw`` package,
-    so editing an installed hook is always detected as ``modified`` even if
-    ``guard.json`` is deleted in the same breath to try to hide it.
+    The expected body is re-derived only from trusted inputs, never from values
+    read out of the (group-writable) installed hook or ``guard.json``: a
+    redirected ``source_path``, a rewritten embedded publisher allow-list, or any
+    body edit therefore all read as ``modified`` -- even if ``guard.json`` is
+    deleted or rewritten in the same step to try to hide it.
     """
 
     repo = Path(repo).resolve()
@@ -647,10 +663,9 @@ def guard_status(repo: Path) -> dict[str, object]:
             config = json.loads(config_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             config = None
-    if config:
-        status["publisher_identities"] = config.get(
-            "publisher_identities", list(DEFAULT_PUBLISHER_IDENTITIES)
-        )
+    # The enforced allow-list is the package constant, embedded in the hook body
+    # -- never whatever ``guard.json`` happens to say.
+    status["publisher_identities"] = list(DEFAULT_PUBLISHER_IDENTITIES)
 
     if not status["hook_present"]:
         # Distinguish a pristine repo from one whose guard was torn out: the
@@ -668,12 +683,15 @@ def guard_status(repo: Path) -> dict[str, object]:
     observed_sha = _sha256_file(hook_path)
     status["hook_sha256"] = observed_sha
 
-    # Verify the body against what this package renders.  The three inputs a
-    # render depends on (shebang, embedded source path, embedded common git dir)
-    # are read back out of the hook itself and fed to render_hook_script: only a
-    # genuine, unedited render round-trips, so this catches any body edit without
-    # relying on the group-writable guard.json as the hash anchor.
-    status["hook_matches_package"] = _hook_is_genuine_render(text)
+    # Compare the installed hook against the one and only body this package would
+    # accept, re-derived from trusted inputs alone (see _expected_hook_body).
+    # Nothing here is read back out of the installed hook, so an attacker-chosen
+    # source_path or a rewritten embedded publisher list cannot round-trip.
+    try:
+        expected_body = _expected_hook_body(repo)
+    except MainRefGuardError:
+        expected_body = None
+    status["hook_matches_package"] = expected_body is not None and text == expected_body
     if config:
         status["hook_matches_config"] = config.get("hook_sha256") == observed_sha
 
@@ -685,6 +703,10 @@ def guard_status(repo: Path) -> dict[str, object]:
         status["integrity"] = "modified"
     elif config is None:
         status["integrity"] = "config-missing"
+    elif not status["hook_matches_config"]:
+        # Body is byte-correct but guard.json's recorded hash disagrees: the
+        # record has been tampered with.  Do not rate this "ok".
+        status["integrity"] = "modified"
     else:
         status["integrity"] = "ok"
 
@@ -708,13 +730,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_install.add_argument("--repo", type=Path, required=True)
     p_install.add_argument("--source-path", type=Path, default=None)
     p_install.add_argument("--python-executable", default="/usr/bin/python3")
-    p_install.add_argument(
-        "--publisher",
-        action="append",
-        dest="publishers",
-        default=None,
-        help="publisher identity (repeatable); default: db",
-    )
     p_install.add_argument("--force", action="store_true")
 
     p_uninstall = sub.add_parser("uninstall", help="remove the guard hook")
@@ -736,9 +751,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _emit(
                 install_guard(
                     args.repo,
-                    publisher_identities=tuple(args.publishers)
-                    if args.publishers
-                    else DEFAULT_PUBLISHER_IDENTITIES,
                     source_path=args.source_path,
                     python_executable=args.python_executable,
                     force=args.force,
