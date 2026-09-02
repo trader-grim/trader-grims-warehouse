@@ -2263,8 +2263,10 @@ def test_installed_config_and_services_are_exact_and_forbid_broad_effects():
         assert "[install]" in body
         assert "type=simple" in body
         if name == "tgw-claude-review-worker.service":
-            assert "tgw_codex_review_bin=/home/codex/.local/bin/codex" in body
-            assert "tgw_codex_review_auth=/home/codex/.codex/auth.json" in body
+            assert "user=claude" in body
+            assert "tgw_review_executor=claude" in body
+            assert "tgw_review_require_actor=claude" in body
+            assert "tgw_claude_review_bin=/home/claude/.local/bin/claude" in body
             assert "privatenetwork=true" not in body
         if name == "tgw-coding-root-effect.service":
             assert "user=db" in body
