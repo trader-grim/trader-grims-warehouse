@@ -7440,7 +7440,6 @@ def test_c14_patch_item_aspects_form_clear_roundtrip(env):
     prior test (test_draft_specifics.py) covers the accessor directly, this
     covers the full endpoint round trip an operator's browser actually
     exercises."""
-    client = env["client"]
     json_path = env["itemdata_root"] / SKU_A / f"{SKU_A}.json"
 
     r = _published_command_patch(
