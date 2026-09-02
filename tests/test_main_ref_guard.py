@@ -10,6 +10,7 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import pwd
 import subprocess
 from pathlib import Path
 
@@ -21,14 +22,71 @@ from tgw import main_ref_guard as guard
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 
+try:
+    _UNPRIV = pwd.getpwnam("nobody")
+except KeyError:  # pragma: no cover - environment without a nobody account
+    _UNPRIV = None
 
-def _git(repo: Path, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+#: When the suite itself runs as root, ``root`` is always a sanctioned publisher,
+#: so the git-level abort can only be exercised by dropping the git subprocess to
+#: an unprivileged uid.  When the suite runs as an ordinary user no drop is
+#: needed -- that user is already a non-publisher.
+_NEED_DROP = os.getuid() == 0
+
+
+def _can_drop_to_unpriv() -> bool:
+    if not _NEED_DROP or _UNPRIV is None:
+        return not _NEED_DROP
+    try:
+        subprocess.run(
+            ["true"],
+            check=True,
+            user=_UNPRIV.pw_uid,
+            group=_UNPRIV.pw_gid,
+            extra_groups=[],
+            capture_output=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+# Skip the git-level abort tests only if we are root AND cannot actually drop
+# privileges (e.g. a single-user namespace).  On a real multi-user root runner
+# the drop works and the tests exercise the real reference-transaction abort.
+_CANNOT_DROP = _NEED_DROP and not _can_drop_to_unpriv()
+
+
+def _make_tree_accessible(path: Path) -> None:
+    """Let an unprivileged uid read/write the whole repo (root-only test aid)."""
+    subprocess.run(["chmod", "-R", "a+rwX", str(path)], check=True)
+
+
+def _git(
+    repo: Path,
+    *args: str,
+    env: dict | None = None,
+    drop_privileges: bool = False,
+) -> subprocess.CompletedProcess:
+    kwargs: dict = {}
+    full_env = {**os.environ, **(env or {})}
+    cmd = ["git", "-C", str(repo)]
+    if drop_privileges and _NEED_DROP and _UNPRIV is not None:
+        _make_tree_accessible(repo)
+        kwargs.update(user=_UNPRIV.pw_uid, group=_UNPRIV.pw_gid, extra_groups=[])
+        full_env.update(
+            HOME=str(repo),
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL="/dev/null",
+        )
+        cmd += ["-c", "safe.directory=*"]
     return subprocess.run(
-        ["git", "-C", str(repo), *args],
+        [*cmd, *args],
         check=False,
         capture_output=True,
         text=True,
-        env={**os.environ, **(env or {})},
+        env=full_env,
+        **kwargs,
     )
 
 
@@ -160,17 +218,20 @@ def test_evaluate_ignores_transactions_that_do_not_touch_main() -> None:
 # hook rendering
 # --------------------------------------------------------------------------- #
 def test_render_hook_script_is_deterministic_and_marked() -> None:
-    a = guard.render_hook_script(source_path="/x/src")
-    b = guard.render_hook_script(source_path="/x/src")
+    a = guard.render_hook_script(source_path="/x/src", common_git_dir="/x/.git")
+    b = guard.render_hook_script(source_path="/x/src", common_git_dir="/x/.git")
     assert a == b
     assert f"{guard.SENTINEL} {guard.GUARD_VERSION}" in a
     assert "refs/heads/main" in a
+    assert "'/x/.git'" in a  # common git dir embedded literally
 
 
 def test_hook_prefilter_shortcircuits_without_importing_tgw(tmp_path: Path) -> None:
     script = tmp_path / "reference-transaction"
     script.write_text(
-        guard.render_hook_script(source_path="/nonexistent/does/not/import")
+        guard.render_hook_script(
+            source_path="/nonexistent/does/not/import", common_git_dir=tmp_path
+        )
     )
     script.chmod(0o755)
     # A transaction that does not touch main must exit 0 even though the
@@ -188,7 +249,9 @@ def test_hook_prefilter_shortcircuits_without_importing_tgw(tmp_path: Path) -> N
 def test_hook_fails_closed_when_guard_cannot_load(tmp_path: Path) -> None:
     script = tmp_path / "reference-transaction"
     script.write_text(
-        guard.render_hook_script(source_path="/nonexistent/does/not/import")
+        guard.render_hook_script(
+            source_path="/nonexistent/does/not/import", common_git_dir=tmp_path
+        )
     )
     script.chmod(0o755)
     clean_env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
@@ -244,6 +307,45 @@ def test_status_reports_absent(repo: Path) -> None:
     assert status["active"] is False
 
 
+def test_status_detects_body_edit_even_when_config_deleted(repo: Path) -> None:
+    """Editing the hook AND deleting guard.json still reads as ``modified``.
+
+    The expected hook body is re-rendered from the installed package, so the
+    tamper cannot be self-suppressed by removing the only writable hash anchor.
+    """
+    guard.install_guard(repo, source_path=SRC)
+    hook = guard.hooks_dir(repo) / "reference-transaction"
+    hook.write_text(hook.read_text().replace("DO NOT EDIT", "DO NOT EDIT (hah)"))
+    (guard.guard_state_dir(repo) / guard.GUARD_CONFIG_NAME).unlink()
+    status = guard.guard_status(repo)
+    assert status["integrity"] == "modified"
+    assert status["active"] is False
+
+
+def test_status_reports_config_missing_when_only_guard_json_gone(repo: Path) -> None:
+    guard.install_guard(repo, source_path=SRC)
+    (guard.guard_state_dir(repo) / guard.GUARD_CONFIG_NAME).unlink()
+    status = guard.guard_status(repo)
+    assert status["integrity"] == "config-missing"
+    assert status["active"] is False
+
+
+def test_status_reports_removed_after_hook_deletion(repo: Path) -> None:
+    """A silent ``rm`` of an installed hook is tamper-evident (not ``absent``)."""
+    guard.install_guard(repo, source_path=SRC)
+    (guard.hooks_dir(repo) / "reference-transaction").unlink()
+    status = guard.guard_status(repo)
+    assert status["integrity"] == "removed"
+    result = doctor_cli.check_main_ref_guard(doctor_cli.DoctorPaths(repository=repo))
+    assert result["state"] == "FAIL"
+
+
+def test_hook_embeds_common_git_dir(repo: Path) -> None:
+    result = guard.install_guard(repo, source_path=SRC)
+    body = Path(result["hook_path"]).read_text()
+    assert repr(str(guard.common_git_dir(repo))) in body
+
+
 def test_uninstall_is_reversible_and_keeps_override_log(repo: Path) -> None:
     guard.install_guard(repo, source_path=SRC)
     common = guard.common_git_dir(repo)
@@ -271,40 +373,54 @@ def test_publisher_identity_may_advance_main(repo: Path) -> None:
     assert _head(repo) != before
 
 
-@pytest.mark.skipif(os.getuid() == 0, reason="root is always a sanctioned publisher")
+@pytest.mark.skipif(
+    _CANNOT_DROP, reason="root suite with no unprivileged account to drop to"
+)
 def test_ordinary_agent_is_refused(repo: Path) -> None:
     guard.install_guard(repo, source_path=SRC, publisher_identities=("no-such-publisher",))
     before = _head(repo)
     (repo / "b").write_text("more\n")
-    _git(repo, "add", ".")
-    done = _git(repo, "commit", "-m", "raw advance", env={guard.OVERRIDE_ENV: ""})
+    _git(repo, "add", ".", drop_privileges=True)
+    done = _git(
+        repo,
+        "commit",
+        "-m",
+        "raw advance",
+        env={guard.OVERRIDE_ENV: ""},
+        drop_privileges=True,
+    )
     assert done.returncode != 0
     assert "tgw main-ref guard: refused" in done.stderr
     assert _head(repo) == before  # ref unchanged
 
 
-@pytest.mark.skipif(os.getuid() == 0, reason="root is always a sanctioned publisher")
+@pytest.mark.skipif(
+    _CANNOT_DROP, reason="root suite with no unprivileged account to drop to"
+)
 def test_non_main_branch_is_unaffected_by_guard(repo: Path) -> None:
     guard.install_guard(repo, source_path=SRC, publisher_identities=("no-such-publisher",))
-    assert _git(repo, "checkout", "-b", "topic").returncode == 0
+    assert _git(repo, "checkout", "-b", "topic", drop_privileges=True).returncode == 0
     (repo / "b").write_text("more\n")
-    _git(repo, "add", ".")
-    done = _git(repo, "commit", "-m", "topic work")
+    _git(repo, "add", ".", drop_privileges=True)
+    done = _git(repo, "commit", "-m", "topic work", drop_privileges=True)
     assert done.returncode == 0, done.stderr
 
 
-@pytest.mark.skipif(os.getuid() == 0, reason="root is always a sanctioned publisher")
+@pytest.mark.skipif(
+    _CANNOT_DROP, reason="root suite with no unprivileged account to drop to"
+)
 def test_explicit_override_advances_main_and_is_recorded(repo: Path) -> None:
     guard.install_guard(repo, source_path=SRC, publisher_identities=("no-such-publisher",))
     before = _head(repo)
     (repo / "b").write_text("more\n")
-    _git(repo, "add", ".")
+    _git(repo, "add", ".", drop_privileges=True)
     done = _git(
         repo,
         "commit",
         "-m",
         "override advance",
         env={guard.OVERRIDE_ENV: "incident recovery ticket 1942"},
+        drop_privileges=True,
     )
     assert done.returncode == 0, done.stderr
     assert _head(repo) != before

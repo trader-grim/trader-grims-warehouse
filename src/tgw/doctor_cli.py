@@ -6450,11 +6450,25 @@ def check_main_ref_guard(paths: DoctorPaths) -> dict[str, Any]:
         state = "PASS"
         detail = "canonical main ref guard hook is installed and active"
     elif integrity == "absent":
+        # Never installed on this repo: an ATTENTION nudge, not a tamper alarm.
+        # Coding-runtime provisioning installs the guard; see docs/main-ref-guard.md.
         state = "WARN"
-        detail = "canonical main ref guard hook is not installed"
-    elif integrity == "unverifiable":
+        detail = (
+            "canonical main ref guard hook is not installed yet "
+            "(run `python3 -m tgw.main_ref_guard install`)"
+        )
+    elif integrity in {"config-missing", "unverifiable"}:
         state = "WARN"
-        detail = "main ref guard hook is present but its recorded config is missing"
+        detail = (
+            "main ref guard hook body is intact but its recorded config "
+            "(guard.json) is missing; a customised publisher list cannot be confirmed"
+        )
+    elif integrity == "removed":
+        state = "FAIL"
+        detail = (
+            "main ref guard hook was installed and has since been removed "
+            "(guard state directory still present) -- possible tampering; reinstall"
+        )
     else:
         state = "FAIL"
         detail = f"main ref guard hook integrity problem: {integrity}"

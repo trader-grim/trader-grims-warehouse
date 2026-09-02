@@ -248,11 +248,14 @@ def guard_state_dir(repo: Path) -> Path:
 
 
 def guard_common_git_dir(hook_file: str | Path) -> Path:
-    """Resolve the common git dir from an installed hook's own path.
+    """Best-effort common-git-dir guess from an installed hook's own path.
 
-    The hook lives at ``<hooks-dir>/reference-transaction``; the hooks dir is a
-    child of the common git dir unless ``core.hooksPath`` relocates it, in which
-    case the installer records the common dir in ``guard.json`` beside the hook.
+    Only a fallback: the rendered hook carries the absolute common git dir that
+    :func:`install_guard` computed, so it never has to infer it.  This helper is
+    retained for the manual ``python3 -m tgw.main_ref_guard reference-transaction``
+    entry point, where it assumes the default layout (hooks dir is a direct child
+    of the common git dir).  ``core.hooksPath`` relocation is handled by the
+    embedded path, not here.
     """
 
     return Path(hook_file).resolve().parent.parent
@@ -261,23 +264,41 @@ def guard_common_git_dir(hook_file: str | Path) -> Path:
 # --------------------------------------------------------------------------- #
 # Hook script rendering
 # --------------------------------------------------------------------------- #
-def render_hook_script(*, source_path: str, python_executable: str = "/usr/bin/python3") -> str:
+def render_hook_script(
+    *,
+    source_path: str,
+    common_git_dir: str | Path,
+    python_executable: str = "/usr/bin/python3",
+) -> str:
     """Render the self-contained ``reference-transaction`` hook.
 
     The hook does its own stdlib-only pre-filter and imports :mod:`tgw` only when
     ``refs/heads/main`` is actually being changed.  If the import then fails it
     exits non-zero -- fail closed, protecting ``main``.
+
+    ``common_git_dir`` is the absolute common git dir computed by
+    :func:`install_guard`; it is embedded literally so the hook resolves
+    ``guard.json`` and the durable override log correctly even when
+    ``core.hooksPath`` relocates the hooks directory outside the git dir.
+
+    The rendered body is a pure function of its arguments, so
+    :func:`guard_status` can re-render the exact expected script and detect any
+    edit to an installed hook -- the tamper anchor lives in the installed ``tgw``
+    package, not in the group-writable state directory.
     """
 
     protected = ", ".join(repr(ref) for ref in PROTECTED_REFS)
+    common = str(Path(common_git_dir))
     return f"""#!{python_executable}
 # {SENTINEL} {GUARD_VERSION} -- managed by tgw.main_ref_guard; DO NOT EDIT.
 # Rejects non-publisher updates to refs/heads/main (Todo 1942).
-# Remove this file to disable the guard (fully reversible).
+# Remove this file to disable the guard (fully reversible); once the guard has
+# been installed, removal is tamper-evident -- `tgw doctor` turns FAIL.
 import os
 import sys
 
 _PROTECTED = ({protected},)
+_COMMON_GIT_DIR = {common!r}
 
 
 def _touches_protected(text):
@@ -294,7 +315,7 @@ def _main():
         return 0
     sys.path.insert(0, {source_path!r})
     try:
-        from tgw.main_ref_guard import guard_common_git_dir, run_hook
+        from tgw.main_ref_guard import run_hook
     except Exception as exc:  # fail closed: protect main if the guard cannot load
         sys.stderr.write(
             "tgw main-ref guard: refusing a refs/heads/main update because the "
@@ -306,7 +327,7 @@ def _main():
         sys.argv,
         data,
         environ=os.environ,
-        common_git_dir=guard_common_git_dir(__file__),
+        common_git_dir=_COMMON_GIT_DIR,
     )
 
 
@@ -325,6 +346,37 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1 << 20), b""):
             digest.update(chunk)
     return "sha256:" + digest.hexdigest()
+
+
+_HOOK_SHEBANG = re.compile(r"\A#!(\S+)")
+_HOOK_SOURCE_PATH = re.compile(r"^\s*sys\.path\.insert\(0, (['\"])(?P<v>.*?)\1\)$", re.M)
+_HOOK_COMMON_DIR = re.compile(r"^_COMMON_GIT_DIR = (['\"])(?P<v>.*?)\1$", re.M)
+
+
+def _hook_is_genuine_render(text: str) -> bool:
+    """True iff ``text`` is exactly what :func:`render_hook_script` would emit.
+
+    The render is a pure function of (shebang, embedded source path, embedded
+    common git dir).  We read those three back out of ``text`` and re-render:
+    only an untouched, package-produced hook round-trips byte-for-byte, so any
+    edit to the body is detected even when the recorded ``guard.json`` (which
+    lives in a group-writable directory) has been deleted to hide it.
+    """
+
+    shebang = _HOOK_SHEBANG.match(text)
+    source = _HOOK_SOURCE_PATH.search(text)
+    common = _HOOK_COMMON_DIR.search(text)
+    if not (shebang and source and common):
+        return False
+    try:
+        rerendered = render_hook_script(
+            source_path=source.group("v"),
+            common_git_dir=common.group("v"),
+            python_executable=shebang.group(1),
+        )
+    except Exception:
+        return False
+    return rerendered == text
 
 
 # --------------------------------------------------------------------------- #
@@ -482,7 +534,9 @@ def install_guard(
             )
 
     script = render_hook_script(
-        source_path=str(resolved_source), python_executable=python_executable
+        source_path=str(resolved_source),
+        common_git_dir=common_dir,
+        python_executable=python_executable,
     )
     tmp_path = hook_path.with_name(f".{HOOK_NAME}.tgw-tmp")
     tmp_path.write_text(script, encoding="utf-8")
@@ -537,7 +591,27 @@ def uninstall_guard(repo: Path, *, force: bool = False) -> dict[str, object]:
 
 
 def guard_status(repo: Path) -> dict[str, object]:
-    """Read-only report of guard presence and integrity on ``repo``."""
+    """Read-only report of guard presence and integrity on ``repo``.
+
+    Integrity values:
+
+    * ``ok`` -- hook present, tgw-managed, executable, byte-for-byte the script
+      this package renders, and its recorded config is present;
+    * ``config-missing`` -- hook body verified against the package but
+      ``guard.json`` is gone, so a customised ``--publisher`` list cannot be
+      confirmed;
+    * ``removed`` -- no hook, but the guard state directory (created by
+      :func:`install_guard` and kept across :func:`uninstall_guard`) is still
+      there: the guard was installed and then removed out of band;
+    * ``absent`` -- no hook and no state directory: the guard was never
+      installed on this repo;
+    * ``modified`` / ``foreign`` / ``not-executable`` -- a hook occupies the
+      slot but is not the guard this package would install.
+
+    The expected hook body is a pure render from the installed ``tgw`` package,
+    so editing an installed hook is always detected as ``modified`` even if
+    ``guard.json`` is deleted in the same breath to try to hide it.
+    """
 
     repo = Path(repo).resolve()
     hooks = hooks_dir(repo)
@@ -545,32 +619,27 @@ def guard_status(repo: Path) -> dict[str, object]:
     hook_path = hooks / HOOK_NAME
     state_dir = common_dir / GUARD_STATE_DIRNAME
     config_path = state_dir / GUARD_CONFIG_NAME
+    override_log = state_dir / OVERRIDE_LOG_NAME
 
     status: dict[str, object] = {
         "repository": str(repo),
         "hooks_dir": str(hooks),
         "hook_path": str(hook_path),
         "hook_present": hook_path.is_file(),
+        "state_dir": str(state_dir),
+        "state_dir_present": state_dir.is_dir(),
         "managed": False,
         "executable": False,
         "config_present": config_path.is_file(),
         "hook_matches_config": False,
+        "hook_matches_package": False,
         "publisher_identities": list(DEFAULT_PUBLISHER_IDENTITIES),
         "protected_refs": list(PROTECTED_REFS),
         "override_event_count": override_event_count(common_dir),
-        "override_log": str(state_dir / OVERRIDE_LOG_NAME),
+        "override_log": str(override_log),
         "active": False,
         "integrity": "absent",
     }
-
-    if not status["hook_present"]:
-        return status
-
-    text = hook_path.read_text(encoding="utf-8", errors="replace")
-    status["managed"] = _is_managed_hook(text)
-    status["executable"] = bool(hook_path.stat().st_mode & stat.S_IXUSR)
-    observed_sha = _sha256_file(hook_path)
-    status["hook_sha256"] = observed_sha
 
     config: Mapping[str, object] | None = None
     if config_path.is_file():
@@ -582,16 +651,40 @@ def guard_status(repo: Path) -> dict[str, object]:
         status["publisher_identities"] = config.get(
             "publisher_identities", list(DEFAULT_PUBLISHER_IDENTITIES)
         )
+
+    if not status["hook_present"]:
+        # Distinguish a pristine repo from one whose guard was torn out: the
+        # state directory and its durable records outlive an uninstall, so their
+        # presence with no hook means "removed", which the Doctor escalates.
+        if state_dir.is_dir() and (config is not None or override_log.exists()):
+            status["integrity"] = "removed"
+        else:
+            status["integrity"] = "absent"
+        return status
+
+    text = hook_path.read_text(encoding="utf-8", errors="replace")
+    status["managed"] = _is_managed_hook(text)
+    status["executable"] = bool(hook_path.stat().st_mode & stat.S_IXUSR)
+    observed_sha = _sha256_file(hook_path)
+    status["hook_sha256"] = observed_sha
+
+    # Verify the body against what this package renders.  The three inputs a
+    # render depends on (shebang, embedded source path, embedded common git dir)
+    # are read back out of the hook itself and fed to render_hook_script: only a
+    # genuine, unedited render round-trips, so this catches any body edit without
+    # relying on the group-writable guard.json as the hash anchor.
+    status["hook_matches_package"] = _hook_is_genuine_render(text)
+    if config:
         status["hook_matches_config"] = config.get("hook_sha256") == observed_sha
 
     if not status["managed"]:
         status["integrity"] = "foreign"
     elif not status["executable"]:
         status["integrity"] = "not-executable"
-    elif config and not status["hook_matches_config"]:
+    elif not status["hook_matches_package"]:
         status["integrity"] = "modified"
-    elif not config:
-        status["integrity"] = "unverifiable"
+    elif config is None:
+        status["integrity"] = "config-missing"
     else:
         status["integrity"] = "ok"
 
