@@ -205,6 +205,35 @@ def test_claude_review_executor_backend_failure_raises_review_runner_error(tmp_p
         coding_review.run_local_review(_payload(base, commit, tree), repo)
 
 
+def test_claude_review_backend_failure_carries_raw_report_to_artifact(tmp_path, monkeypatch):
+    repo, base, commit, tree = _repo(tmp_path)
+    monkeypatch.setenv("TGW_REVIEW_EXECUTOR", "claude")
+    raw = {"verdict": "FAIL", "summary": "x", "findings": [{"severity": "high", "message": "no path"}]}
+
+    def fake(request, worktree):
+        raise coding_review.ClaudeReviewBackendError(
+            "Claude review finding at index 0 has no snapshot-relative path",
+            raw_report=raw,
+            raw_stdout='{"type":"result","result":"..."}\n',
+        )
+
+    monkeypatch.setattr(coding_review, "run_claude_review", fake)
+
+    with pytest.raises(coding_review.ReviewRunnerError) as excinfo:
+        coding_review.run_local_review(_payload(base, commit, tree), repo)
+    assert excinfo.value.raw_report == raw
+
+    monkeypatch.setenv("TGW_CODING_JOB", json.dumps(_payload(base, commit, tree)))
+    monkeypatch.chdir(repo)
+    captured: dict[str, str] = {}
+    monkeypatch.setattr("builtins.print", lambda text: captured.setdefault("out", text))
+    coding_review.main()
+    artifact = json.loads(captured["out"])["artifacts"][0]
+    assert artifact["kind"] == "independent_review_failure"
+    assert artifact["raw_report"] == raw
+    assert "provider_stdout" in artifact
+
+
 def test_claude_review_fail_verdict_survives_mismatched_echoed_hash(tmp_path, monkeypatch):
     """A FAIL-verdict review must still yield a valid receipt even when the
     model echoes a snapshot_hash that differs from the bound request hash.

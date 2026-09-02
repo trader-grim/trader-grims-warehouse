@@ -134,3 +134,111 @@ def test_run_rejects_snapshot_root_mismatch(tmp_path):
 
     with pytest.raises(ClaudeReviewBackendError, match="snapshot root mismatch"):
         run(request, tmp_path, claude_bin=claude)
+
+
+def _invoke_returning(report: dict):
+    def invoke(command, **kwargs):
+        out = json.dumps({"type": "result", "result": json.dumps(report)}) + "\n"
+        return subprocess.CompletedProcess(command, 0, out, "")
+
+    return invoke
+
+
+def test_run_normalizes_noncanonical_finding_shapes(tmp_path):
+    claude = executable(tmp_path / "claude")
+    request = _request(tmp_path)
+    # description-vs-message, file-vs-path, missing line, severity alias, extra key.
+    model_report = {
+        "schema": "tgw-code-review/v1",
+        "verdict": "PASS",  # contradicts the cited finding; derived verdict wins
+        "snapshot_hash": request["snapshot_hash"],
+        "summary": "one issue",
+        "findings": [
+            {
+                "level": "warning",
+                "file": "feature.py",
+                "description": "unchecked return value",
+                "confidence": 0.9,
+            }
+        ],
+    }
+
+    result = run(
+        request, tmp_path, claude_bin=claude, invoke=_invoke_returning(model_report)
+    )
+
+    assert result["verdict"] == "FAIL"
+    assert result["findings"] == [
+        {
+            "severity": "medium",
+            "path": "feature.py",
+            "line": 1,
+            "message": "unchecked return value",
+        }
+    ]
+    assert result["snapshot_hash"] == request["snapshot_hash"]
+
+
+def test_run_derives_pass_when_verdict_missing_and_no_findings(tmp_path):
+    claude = executable(tmp_path / "claude")
+    request = _request(tmp_path)
+    model_report = {
+        "snapshot_hash": request["snapshot_hash"],
+        "summary": "looks fine",
+        "findings": [],
+    }
+
+    result = run(
+        request, tmp_path, claude_bin=claude, invoke=_invoke_returning(model_report)
+    )
+
+    assert result["verdict"] == "PASS"
+    assert result["schema"] == "tgw-code-review/v1"
+
+
+def test_run_errors_with_raw_report_on_unmappable_finding(tmp_path):
+    claude = executable(tmp_path / "claude")
+    request = _request(tmp_path)
+    model_report = {
+        "verdict": "FAIL",
+        "snapshot_hash": request["snapshot_hash"],
+        "summary": "bad",
+        "findings": [{"severity": "high", "message": "no path here"}],
+    }
+
+    with pytest.raises(ClaudeReviewBackendError) as excinfo:
+        run(request, tmp_path, claude_bin=claude, invoke=_invoke_returning(model_report))
+
+    assert "snapshot-relative path" in str(excinfo.value)
+    assert excinfo.value.raw_report == model_report
+    assert excinfo.value.raw_stdout and "no path here" in excinfo.value.raw_stdout
+
+
+def test_run_errors_on_fail_verdict_without_findings(tmp_path):
+    claude = executable(tmp_path / "claude")
+    request = _request(tmp_path)
+    model_report = {
+        "schema": "tgw-code-review/v1",
+        "verdict": "FAIL",
+        "snapshot_hash": request["snapshot_hash"],
+        "summary": "something is wrong but no line",
+        "findings": [],
+    }
+
+    with pytest.raises(ClaudeReviewBackendError, match="FAIL with no findings") as excinfo:
+        run(request, tmp_path, claude_bin=claude, invoke=_invoke_returning(model_report))
+
+    assert excinfo.value.raw_report == model_report
+
+
+def test_run_attaches_stdout_on_unparseable_report(tmp_path):
+    claude = executable(tmp_path / "claude")
+    request = _request(tmp_path)
+
+    def invoke(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, "not json at all\n", "")
+
+    with pytest.raises(ClaudeReviewBackendError, match="invalid report") as excinfo:
+        run(request, tmp_path, claude_bin=claude, invoke=invoke)
+
+    assert excinfo.value.raw_stdout == "not json at all\n"

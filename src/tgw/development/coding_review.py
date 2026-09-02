@@ -354,9 +354,16 @@ def run_local_review(
     try:
         semantic_report = dict(backend(request, worktree))
     except (CodexReviewBackendError, ClaudeReviewBackendError, OSError, ValueError) as exc:
-        raise ReviewRunnerError(
+        error = ReviewRunnerError(
             f"independent semantic review backend failed: {exc}"
-        ) from exc
+        )
+        # Carry the model's own output up to the failure artifact so an
+        # output-dialect defect is diagnosable without a manual repro.
+        for attribute in ("raw_report", "raw_stdout"):
+            value = getattr(exc, attribute, None)
+            if value is not None:
+                setattr(error, attribute, value)
+        raise error from exc
     validate_review_report(semantic_report, snapshot_hash, worktree)
     failed = [item for item in checks if item["returncode"] != 0]
     report = dict(semantic_report)
@@ -631,12 +638,23 @@ def main() -> int:
             raise ReviewRunnerError("independent review job must be an object")
         result = run_local_review(payload, Path.cwd())
     except (KeyError, OSError, ValueError, ReviewRunnerError) as exc:
+        failure: dict[str, Any] = {
+            "kind": "independent_review_failure",
+            "detail": str(exc),
+        }
+        raw_report = getattr(exc, "raw_report", None)
+        if raw_report is not None:
+            try:
+                failure["raw_report"] = json.loads(json.dumps(raw_report))
+            except (TypeError, ValueError):
+                failure["raw_report"] = repr(raw_report)[:8000]
+        raw_stdout = getattr(exc, "raw_stdout", None)
+        if isinstance(raw_stdout, str) and raw_stdout:
+            failure["provider_stdout"] = raw_stdout[-8000:]
         result = {
             "outcome": "failed",
             "established_conditions": [],
-            "artifacts": [
-                {"kind": "independent_review_failure", "detail": str(exc)}
-            ],
+            "artifacts": [failure],
         }
     print(json.dumps(result, sort_keys=True))
     return 0
