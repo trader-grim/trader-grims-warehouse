@@ -180,6 +180,21 @@ def test_inventory_available_honors_ebay_side_sellout_with_stale_local_status():
     assert _result(snap, "inventory_available") == FingerprintResult.FALSE
 
 
+def test_inventory_available_ignores_ended_ebay_listing_status():
+    # Todo #1967 review: only 'Sold' is terminal on the eBay side — an
+    # ended-but-unsold listing is relist-eligible and must stay available.
+    goal = GoalProfile("listable", "1", ("inventory_available",))
+    snap = _snapshot(
+        _make_item(
+            status="In Stock",
+            draft_listing={"quantity": 1},
+            ebay_listing={"listing_id": "227407776039", "status": "Ended"},
+        ),
+        goal=goal,
+    )
+    assert _result(snap, "inventory_available") == FingerprintResult.TRUE
+
+
 # ---------------------------------------------------------------------------
 # item_has_photos
 # ---------------------------------------------------------------------------

@@ -1293,6 +1293,66 @@ def test_resync_photos_reconciles_sold_item_to_live_without_dispatch(env, enqueu
     assert doc["draft_listing"]["imageUrls"] == live
     assert doc["draft_listing"]["description"] == "keep me"
 
+    # The reconcile actually converges _photo_sync_state — a second call now
+    # reports already_satisfied instead of looping on held/reconciled forever.
+    again = env["client"].post(
+        f"/api/items/{sku}/action",
+        json={"action": "resync_photos"},
+        headers=AUTH_HEADERS,
+    ).json()
+    assert again["status"] == "already_satisfied"
+
+
+def test_resync_photos_reconciles_when_ebay_photos_rows_are_out_of_order(env, enqueue_calls):
+    """Todo #1967 review: rows whose list order differs from photo_order must
+    still be pinned by each row's own local file position, so _photo_sync_state
+    converges rather than looping on held."""
+    sku = "tgw20260401000000016"
+    item_dir = env["itemdata_root"] / sku
+    item_dir.mkdir()
+    (item_dir / "001.jpg").write_bytes(b"one")
+    (item_dir / "002.jpg").write_bytes(b"two")
+    live = [
+        "https://i.ebayimg.com/00/s/x/z/LqUAAOSwwNNnu5PL/$_57.JPG",
+        "https://i.ebayimg.com/00/s/x/z/Y~0AAOSw~uZnu5PM/$_57.JPG",
+    ]
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "status": "In Stock",
+            "photo_order": ["001.jpg", "002.jpg"],
+            "ebay_listing": {"status": "Sold"},
+            "draft_listing": {"imageUrls": list(live), "source": "ebay_live"},
+            "ebay_offer": {"offer_id": "o", "photo_urls": list(live)},
+            "ebay_photos": [
+                {"local": str(item_dir / "002.jpg"), "url": "https://old/b"},
+                {"local": str(item_dir / "001.jpg"), "url": "https://old/a"},
+            ],
+            "ebay_submitted": {"inventory_item": {"product": {"imageUrls": list(live)}}},
+            "ebay_live": {"inventory_item": {"product": {"imageUrls": list(live)}}},
+        },
+    )
+
+    body = env["client"].post(
+        f"/api/items/{sku}/action",
+        json={"action": "resync_photos"},
+        headers=AUTH_HEADERS,
+    ).json()
+    assert body["status"] == "reconciled_to_live"
+
+    doc = json.loads((item_dir / f"{sku}.json").read_text())
+    by_local = {e["local"].rsplit("/", 1)[-1]: e["url"] for e in doc["ebay_photos"]}
+    assert by_local == {"001.jpg": live[0], "002.jpg": live[1]}
+
+    again = env["client"].post(
+        f"/api/items/{sku}/action",
+        json={"action": "resync_photos"},
+        headers=AUTH_HEADERS,
+    ).json()
+    assert again["status"] == "already_satisfied"
+
 
 def test_worker_edit_to_not_yet_live_draft_does_not_auto_enqueue(env, enqueue_calls):
     """Machine draft persistence does not mint operator authority or enqueue."""

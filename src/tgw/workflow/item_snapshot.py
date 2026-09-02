@@ -294,14 +294,16 @@ def inventory_available(item: Mapping[str, Any]) -> bool:
     must never turn a sold item back into a listing candidate.
 
     An eBay-side completed sale is the same terminal evidence class: when the
-    listing mirror reports ``ebay_listing.status`` Sold/Ended/Completed the
-    item is out of the listing pipeline even if the local ``status`` and
-    ``draft_listing.quantity`` were never reconciled to that sellout (the
-    half-reconciled state that let a sold SKU keep dispatching ``ebay_upload``
-    and diverging its photo set — Todo #1967).  ``mark_item_sold`` /
-    ``_apply_sold_evidence`` set both markers together; a lone
-    ``ebay_listing.status`` Sold with a stale in-stock local status is exactly
-    the case that must still read as unavailable.
+    listing mirror reports ``ebay_listing.status`` Sold the item is out of the
+    listing pipeline even if the local ``status`` and ``draft_listing.quantity``
+    were never reconciled to that sellout (the half-reconciled state that let a
+    sold SKU keep dispatching ``ebay_upload`` and diverging its photo set —
+    Todo #1967).  ``mark_item_sold`` / ``_apply_sold_evidence`` set both markers
+    together; a lone ``ebay_listing.status`` Sold with a stale in-stock local
+    status is exactly the case that must still read as unavailable.  Only
+    ``Sold`` is matched here — it is the sole terminal value any sync path
+    writes to ``ebay_listing.status`` — while an ended-but-unsold listing stays
+    available because it is relist-eligible.
     """
     status = str(item.get("status") or "").strip().lower()
     if status in {"sold", "disposed", "archived", "deleted"}:
@@ -309,7 +311,7 @@ def inventory_available(item: Mapping[str, Any]) -> bool:
     listing = item.get("ebay_listing")
     if isinstance(listing, Mapping):
         listing_status = str(listing.get("status") or "").strip().lower()
-        if listing_status in {"sold", "ended", "completed"}:
+        if listing_status == "sold":
             return False
     draft = item.get("draft_listing")
     draft = draft if isinstance(draft, Mapping) else {}

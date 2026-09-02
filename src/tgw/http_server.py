@@ -3090,10 +3090,44 @@ def item_action(
             # never reconciled to the eBay sellout).  The only legal move is to
             # pin the local photo projections to whatever the live listing
             # already shows — no listing content is read or written.
+            #
+            # The reconcile is computed and written under a single held item
+            # lock, from a doc re-read inside that lock: an ebay_sync /
+            # ebay_price / ebay_stage worker may legitimately commit a fresher
+            # ebay_offer (price, price_comps, provider_effect_id, staged_price)
+            # or ebay_submitted between the read above and this write, and that
+            # value must not be silently reverted to the pre-read snapshot
+            # (#1189).  ebay_offer / ebay_submitted go through _apply_ebay_write
+            # so the merge is a deep-merge with protected sub-fields
+            # (price_comps, staged_at) restored, not a wholesale replace.
             if not photo_ready and listing_photo_terminal(doc):
-                reconcile_patch = reconcile_photo_state_to_live(doc)
+                reconcile_patch: Dict[str, Any] = {}
+                with item_mutation_lock(
+                    journal_root=_item_mutation_journal_root(json_path),
+                    sku=sku,
+                ):
+                    locked_doc = load_item_doc(json_path)
+                    if listing_photo_terminal(locked_doc):
+                        reconcile_patch = reconcile_photo_state_to_live(
+                            locked_doc, json_path.parent
+                        )
+                    if reconcile_patch:
+                        ebay_blocks = {
+                            key: reconcile_patch[key]
+                            for key in ("ebay_offer", "ebay_submitted")
+                            if key in reconcile_patch
+                        }
+                        if ebay_blocks:
+                            _apply_ebay_write(
+                                json_path, sku, _item_lock_held=True, **ebay_blocks
+                            )
+                        if "ebay_photos" in reconcile_patch:
+                            _apply_patch(
+                                json_path,
+                                {"ebay_photos": reconcile_patch["ebay_photos"]},
+                                _item_lock_held=True,
+                            )
                 if reconcile_patch:
-                    _apply_patch(json_path, reconcile_patch)
                     _enqueue_catalog_rebuild(f"resync_photos:{sku}")
                     _, _, photo_fingerprint = _photo_sync_state(
                         load_item_doc(json_path), json_path.parent
@@ -3124,7 +3158,9 @@ def item_action(
                     "detail": (
                         f"{photo_reason} — listing is sold/terminal and the live "
                         "listing photo set could not be reconciled automatically "
-                        "(no live imageUrls or photo count mismatch); operator attention required"
+                        "(no live imageUrls, draft_listing.imageUrls not pinned to "
+                        "live, or local/hosted/live photo counts do not line up "
+                        "1:1); operator attention required"
                     ),
                 }
 
