@@ -110,13 +110,13 @@ _ALLOWLIST = {
     (_SRC / "tgw" / "http_server.py", 3013),  # (b) revision_draft.delta
     (_SRC / "tgw" / "http_server.py", 3014),  # (b) revision_draft.delta
     (_SRC / "tgw" / "http_server.py", 3019),  # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 4397),  # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
-    (_SRC / "tgw" / "http_server.py", 4457),  # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
+    (_SRC / "tgw" / "http_server.py", 4452),  # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
+    (_SRC / "tgw" / "http_server.py", 4512),  # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
     # Refreshed 2026-07-20 (todo #1582, PP-AGENTTRACE-001 Phase 3): the new
     # /form/runs route + _render_runs_html() inserted ~186 lines before this
     # entry, shifting it from 5855 to 6041 — re-verified against current
     # HEAD, no accessor-routing behavior changed, only position.
-    (_SRC / "tgw" / "http_server.py", 7734),  # (b) revision_draft.delta
+    (_SRC / "tgw" / "http_server.py", 7789),  # (b) revision_draft.delta
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)

@@ -1224,8 +1224,74 @@ def test_resync_photos_queues_upload_for_same_count_but_wrong_photo_set(
     assert "1 stale hosted photo" in body["detail"]
     assert body["status"] == "workflow_dispatched"
     assert body["job_id"] == "workflow-upload-1"
-    assert captured["scopes"] == ("upload", "stage")
+    # Todo #1967: a photo resync authorises only the upload scope — never a
+    # full content restage on the back of a "resync photos" click.
+    assert captured["scopes"] == ("upload",)
     assert not any(call["kwargs"].get("queue_name") == "ebay_upload" for call in enqueue_calls)
+
+
+def test_resync_photos_reconciles_sold_item_to_live_without_dispatch(env, enqueue_calls):
+    """Todo #1967: a sold listing whose local photo set diverged from live must
+    be pinned back to the live imageUrls — never re-uploaded / re-staged."""
+    sku = "tgw20260401000000015"
+    item_dir = env["itemdata_root"] / sku
+    item_dir.mkdir()
+    first = item_dir / "001.jpg"
+    second = item_dir / "002.jpg"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    live = [
+        "https://i.ebayimg.com/00/s/x/z/LqUAAOSwwNNnu5PL/$_57.JPG",
+        "https://i.ebayimg.com/00/s/x/z/Y~0AAOSw~uZnu5PM/$_57.JPG",
+    ]
+    diverged = [
+        "https://i.ebayimg.com/00/s/x/z/IdkAAeSwOiBqR2tI/$_12.JPG",
+        "https://i.ebayimg.com/00/s/x/z/HqsAAeSwAotqR2tK/$_12.JPG",
+    ]
+    _write_item(
+        env["itemdata_root"],
+        sku,
+        {
+            "sku": sku,
+            "status": "In Stock",
+            "photo_order": ["001.jpg", "002.jpg"],
+            "ebay_listing": {"listing_id": "227407776039", "status": "Sold"},
+            "draft_listing": {"imageUrls": list(live), "source": "ebay_live",
+                              "description": "keep me"},
+            "ebay_offer": {"offer_id": "265223002018", "photo_urls": list(diverged)},
+            "ebay_photos": [
+                {"local": str(first), "url": diverged[0]},
+                {"local": str(second), "url": diverged[1]},
+            ],
+            "ebay_submitted": {
+                "inventory_item": {"product": {"imageUrls": list(diverged)}},
+                "staged_at": "2026-08-31T23:06:24Z",
+            },
+            "ebay_live": {"inventory_item": {"product": {"imageUrls": list(live)}}},
+        },
+    )
+
+    response = env["client"].post(
+        f"/api/items/{sku}/action",
+        json={"action": "resync_photos"},
+        headers=AUTH_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "reconciled_to_live"
+    assert set(body["reconciled_fields"]) == {"ebay_photos", "ebay_offer", "ebay_submitted"}
+    assert not any(
+        call["kwargs"].get("queue_name") in {"ebay_upload", "ebay_stage"}
+        for call in enqueue_calls
+    )
+
+    doc = json.loads((item_dir / f"{sku}.json").read_text())
+    assert [e["url"] for e in doc["ebay_photos"]] == live
+    assert doc["ebay_offer"]["photo_urls"] == live
+    assert doc["ebay_submitted"]["inventory_item"]["product"]["imageUrls"] == live
+    assert doc["draft_listing"]["imageUrls"] == live
+    assert doc["draft_listing"]["description"] == "keep me"
 
 
 def test_worker_edit_to_not_yet_live_draft_does_not_auto_enqueue(env, enqueue_calls):

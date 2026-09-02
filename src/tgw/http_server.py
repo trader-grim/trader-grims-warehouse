@@ -3070,6 +3070,10 @@ def item_action(
             # the same source so this check can't disagree with upload.
             from tgw.assets import ordered_photos
             from tgw.workflow.item_snapshot import _photo_sync_state
+            from tgw.workflow.photo_reconcile import (
+                listing_photo_terminal,
+                reconcile_photo_state_to_live,
+            )
 
             doc = load_item_doc(json_path)
             local_photo_count = len(ordered_photos(doc, json_path.parent))
@@ -3078,6 +3082,52 @@ def item_action(
                 doc,
                 json_path.parent,
             )
+
+            # Todo #1967 / PP-WORKFLOW-001: a sold or otherwise terminal listing
+            # must never get an upload/stage effect from a photo resync (the
+            # Aug 31 divergence was exactly a sold SKU that kept re-uploading a
+            # fresh EPS family into ebay_photos because the local status was
+            # never reconciled to the eBay sellout).  The only legal move is to
+            # pin the local photo projections to whatever the live listing
+            # already shows — no listing content is read or written.
+            if not photo_ready and listing_photo_terminal(doc):
+                reconcile_patch = reconcile_photo_state_to_live(doc)
+                if reconcile_patch:
+                    _apply_patch(json_path, reconcile_patch)
+                    _enqueue_catalog_rebuild(f"resync_photos:{sku}")
+                    _, _, photo_fingerprint = _photo_sync_state(
+                        load_item_doc(json_path), json_path.parent
+                    )
+                    return {
+                        "ok": True,
+                        "sku": sku,
+                        "action": "resync_photos",
+                        "status": "reconciled_to_live",
+                        "reconciled_fields": sorted(reconcile_patch),
+                        "local_photo_count": local_photo_count,
+                        "hosted_count": hosted_count,
+                        "photo_fingerprint": photo_fingerprint,
+                        "detail": (
+                            f"{photo_reason} — listing is sold/terminal; pinned "
+                            "ebay_photos, ebay_offer.photo_urls and ebay_submitted "
+                            "to the live listing imageUrls without touching listing content"
+                        ),
+                    }
+                return {
+                    "ok": False,
+                    "sku": sku,
+                    "action": "resync_photos",
+                    "status": "held",
+                    "local_photo_count": local_photo_count,
+                    "hosted_count": hosted_count,
+                    "photo_fingerprint": photo_fingerprint,
+                    "detail": (
+                        f"{photo_reason} — listing is sold/terminal and the live "
+                        "listing photo set could not be reconciled automatically "
+                        "(no live imageUrls or photo count mismatch); operator attention required"
+                    ),
+                }
+
             if not photo_ready:
                 from .workflow.listing_migration import authorize_and_request_item_goal
                 from .workflow.profiles import TGW_EBAY_STAGED
@@ -3092,7 +3142,12 @@ def item_action(
                     operator_identity=operator_identity,
                     surface="http:item-action:resync-photos",
                     provider_identity=migration.get("ebay_provider_identity", ""),
-                    scopes=("upload", "stage"),
+                    # Todo #1967: a photo resync uploads the current ItemData
+                    # photos and nothing more — never a full content restage.
+                    # Granting "stage" here let the evaluator push title /
+                    # description / price / aspects from a possibly-diverged
+                    # draft on the back of a "resync photos" click.
+                    scopes=("upload",),
                 )
                 dispatched = result.dispatched
                 return {

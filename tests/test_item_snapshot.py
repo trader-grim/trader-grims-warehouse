@@ -164,6 +164,22 @@ def test_inventory_available_requires_explicit_status_restore_and_positive_quant
     assert _result(zero, "inventory_available") == FingerprintResult.FALSE
 
 
+def test_inventory_available_honors_ebay_side_sellout_with_stale_local_status():
+    # Todo #1967: the eBay listing sold but the local status / draft quantity
+    # were never reconciled — the item must still read as unavailable so a
+    # photo resync cannot keep dispatching ebay_upload against a sold SKU.
+    goal = GoalProfile("listable", "1", ("inventory_available",))
+    snap = _snapshot(
+        _make_item(
+            status="In Stock",
+            draft_listing={"quantity": 1},
+            ebay_listing={"listing_id": "227407776039", "status": "Sold"},
+        ),
+        goal=goal,
+    )
+    assert _result(snap, "inventory_available") == FingerprintResult.FALSE
+
+
 # ---------------------------------------------------------------------------
 # item_has_photos
 # ---------------------------------------------------------------------------

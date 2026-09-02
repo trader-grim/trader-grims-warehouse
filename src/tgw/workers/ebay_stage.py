@@ -647,6 +647,20 @@ class EbayStageWorker(QueueWorker):
             ebay_offer['provider_effect_id'] = provider_effect_id
             ebay_offer['stage_content_identity'] = stage_content_identity
 
+        # Todo #1967 / PP-WORKFLOW-001: converge ebay_offer.photo_urls with the
+        # exact image set this stage PUT.  Previously photo_urls was only ever
+        # written by ebay_sync's live mirror, so straight after a stage the
+        # offer's own photo record disagreed with ebay_submitted and
+        # draft_listing.imageUrls until a later sync pass reconciled it — one
+        # of the three photo values the divergence report flagged out of
+        # agreement.  Ground truth is what eBay was actually sent.
+        staged_image_urls = (
+            result.get('inventory_item', {}).get('product', {}).get('imageUrls')
+            or list(image_urls)
+        )
+        if staged_image_urls:
+            ebay_offer['photo_urls'] = list(staged_image_urls)
+
         item['ebay_offer'] = ebay_offer
 
         # PP-EBAY-SNAPSHOT-001: snapshot what we PUT so photo verify and repush

@@ -292,10 +292,25 @@ def inventory_available(item: Mapping[str, Any]) -> bool:
     still carries a positive quantity.  Restocking therefore requires an
     explicit status change as well as a positive quantity; stale draft data
     must never turn a sold item back into a listing candidate.
+
+    An eBay-side completed sale is the same terminal evidence class: when the
+    listing mirror reports ``ebay_listing.status`` Sold/Ended/Completed the
+    item is out of the listing pipeline even if the local ``status`` and
+    ``draft_listing.quantity`` were never reconciled to that sellout (the
+    half-reconciled state that let a sold SKU keep dispatching ``ebay_upload``
+    and diverging its photo set — Todo #1967).  ``mark_item_sold`` /
+    ``_apply_sold_evidence`` set both markers together; a lone
+    ``ebay_listing.status`` Sold with a stale in-stock local status is exactly
+    the case that must still read as unavailable.
     """
     status = str(item.get("status") or "").strip().lower()
     if status in {"sold", "disposed", "archived", "deleted"}:
         return False
+    listing = item.get("ebay_listing")
+    if isinstance(listing, Mapping):
+        listing_status = str(listing.get("status") or "").strip().lower()
+        if listing_status in {"sold", "ended", "completed"}:
+            return False
     draft = item.get("draft_listing")
     draft = draft if isinstance(draft, Mapping) else {}
     raw_quantity = draft.get("quantity", item.get("quantity", 1))
