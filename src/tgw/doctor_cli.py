@@ -6420,6 +6420,57 @@ def check_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
     )
 
 
+def check_main_ref_guard(paths: DoctorPaths) -> dict[str, Any]:
+    """Report the canonical ``refs/heads/main`` ref guard (Todo 1942).
+
+    Read-only and provider-transferable: it inspects the repository's
+    ``reference-transaction`` hook and the guard's recorded config, never a
+    running process or a credential.  The guard keeps an ordinary ``tgw-coders``
+    agent from advancing ``main`` by raw Git so canonical HEAD and the task
+    cursor can only advance together through the sanctioned source publisher.
+    """
+
+    try:
+        from tgw.main_ref_guard import guard_status
+
+        status = guard_status(paths.repository)
+    except Exception as exc:
+        return _check(
+            "source.main-ref-guard",
+            "UNKNOWN",
+            f"main ref guard status could not be read: {exc}",
+            repair=(
+                "python3 -m tgw.main_ref_guard status --repo "
+                f"{paths.repository}"
+            ),
+        )
+
+    integrity = status.get("integrity")
+    if integrity == "ok":
+        state = "PASS"
+        detail = "canonical main ref guard hook is installed and active"
+    elif integrity == "absent":
+        state = "WARN"
+        detail = "canonical main ref guard hook is not installed"
+    elif integrity == "unverifiable":
+        state = "WARN"
+        detail = "main ref guard hook is present but its recorded config is missing"
+    else:
+        state = "FAIL"
+        detail = f"main ref guard hook integrity problem: {integrity}"
+
+    return _check(
+        "source.main-ref-guard",
+        state,
+        detail,
+        evidence=status,
+        repair=(
+            "python3 -m tgw.main_ref_guard install --repo "
+            f"{paths.repository}"
+        ),
+    )
+
+
 def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
     checks = [
         check_host(paths),
@@ -6435,6 +6486,7 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         check_plan_render_worker(paths),
         check_runtime(paths),
         check_obsolete_surfaces(paths),
+        check_main_ref_guard(paths),
     ]
     counts = {state: sum(item["state"] == state for item in checks) for state in _STATES}
     if counts["FAIL"]:
