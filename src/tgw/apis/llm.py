@@ -2,7 +2,7 @@
 tgw.apis.llm — Unified LLM/vision model dispatcher.
 
 Routes calls to OpenRouter, local Ollama, or a direct provider gateway
-(google_direct, deepseek_direct, anthropic_direct, opencode) based on the
+(google_direct, deepseek_direct, anthropic_direct, opencode_zen) based on the
 models config (tgw-models.json, loaded into cfg['models']). Every direct
 path falls back to OpenRouter automatically on any failure.
 
@@ -216,17 +216,17 @@ def call_model(
                     fallback_model, system_prompt, user_prompt, cfg,
                     img_b64_list=_images, messages=messages,
                 )
-        elif provider == 'opencode':
+        elif provider == 'opencode_zen':
             from tgw import quota
 
             oc_exc: Optional[Exception] = None
             try:
-                quota.precheck(cfg, 'llm_opencode')
+                quota.precheck(cfg, 'llm_opencode_zen')
             except quota.QuotaBudgetExceeded as exc:
                 oc_exc = exc
             if oc_exc is None:
                 try:
-                    text, usage = _call_opencode(
+                    text, usage = _call_opencode_zen(
                         model, system_prompt, user_prompt, cfg, messages=messages,
                     )
                 except Exception as exc:
@@ -238,7 +238,7 @@ def call_model(
                 base_id = model[:-5] if model.endswith('-free') else model
                 fallback_model = base_id if base_id.startswith('deepseek/') else f'deepseek/{base_id}'
                 log.warning(
-                    'opencode unavailable for task %r (%s) — falling back to '
+                    'opencode_zen unavailable for task %r (%s) — falling back to '
                     'openrouter/%s: %s', task, model, fallback_model, oc_exc,
                 )
                 text, usage = _call_openrouter(
@@ -527,15 +527,15 @@ def _call_deepseek_direct(
     return text, usage
 
 
-def _load_opencode_key(cfg: Dict[str, Any]) -> str:
-    """Load the OpenCode Zen key via the single-facility OPENCODE_API_KEY env
+def _load_opencode_zen_key(cfg: Dict[str, Any]) -> str:
+    """Load the OpenCode Zen key via the single-facility OPENCODE_ZEN_API_KEY env
     var (tgw.apis.secrets.get_api_key) — see secrets_root/tgw.env."""
     from tgw.apis.secrets import get_api_key
 
-    return get_api_key('opencode')
+    return get_api_key('opencode_zen')
 
 
-def _call_opencode(
+def _call_opencode_zen(
     model: str,
     system_prompt: str,
     user_prompt: str,
@@ -564,7 +564,7 @@ def _call_opencode(
     Raises on any failure; call_model() catches and falls back to OpenRouter
     (deepseek/<model without -free>). Returns (text, usage_dict).
     """
-    api_key = _load_opencode_key(cfg)
+    api_key = _load_opencode_zen_key(cfg)
 
     if messages is not None:
         msg_list: Any = messages
@@ -589,9 +589,9 @@ def _call_opencode(
             json=payload,
             timeout=60,
         )
-        quota.record(cfg, 'llm_opencode')
+        quota.record(cfg, 'llm_opencode_zen')
         if resp.status_code == 429:
-            quota.record_429(cfg, 'llm_opencode', model)
+            quota.record_429(cfg, 'llm_opencode_zen', model)
         if resp.status_code == 429 and attempt < max_retries - 1:
             time.sleep(15 * (attempt + 1))
             continue

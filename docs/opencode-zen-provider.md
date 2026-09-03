@@ -1,6 +1,8 @@
 # OpenCode Zen as an LLM provider
 
-**Added:** 2026-09-03 (Dave). **Provider id:** `opencode`.
+**Added:** 2026-09-03 (Dave). **Provider id:** `opencode_zen`.
+**Key:** `OPENCODE_ZEN_API_KEY` (already present in `/opt/TGW/secrets/tgw.env`
+on tgw-prod — distinct from the separate "opencode go" key).
 
 OpenCode Zen is an OpenAI-compatible model gateway. This adds it as a fourth
 direct provider alongside `google_direct`, `deepseek_direct`, and
@@ -48,48 +50,52 @@ TGW task that routes to a DeepSeek-class model is a small text transform:
 | Aider edits | repo map + a few files |
 
 All of these are far below 256k tokens. **The Zen free tier imposes no
-restriction that affects any TGW use of it.** If a future task needs >256k
-context on a DeepSeek-class model, route that task to `deepseek_direct`
-(native, 1M) in `tgw-models.json` — a config change, not a code change.
+restriction that affects any TGW use of it.** If a future task ever needs
+>256k context on a DeepSeek-class model, route that one task to
+`deepseek_direct` (native, 1M) in `tgw-models.json` — a config change, not a
+code change.
 
 ## Behaviour
 
-- `provider: opencode` → POST to `https://opencode.ai/zen/v1/chat/completions`
-  with `Authorization: Bearer $OPENCODE_API_KEY`, same request shape as
+- `provider: opencode_zen` → POST to `https://opencode.ai/zen/v1/chat/completions`
+  with `Authorization: Bearer $OPENCODE_ZEN_API_KEY`, same request shape as
   `deepseek_direct`.
 - On **any** failure, `call_model()` falls back to
   `openrouter/deepseek/<model without the -free suffix>` — a Zen outage never
   dead-letters a job.
-- Quota pool `llm_opencode` is **count-only** (`None` budget, like
+- Quota pool `llm_opencode_zen` is **count-only** (`None` budget, like
   `llm_openrouter`). It is deliberately not a low-balance pool.
 - No image support (same as `deepseek_direct`).
 
 ## Wiring it live
 
-Both files are on **tgw-prod** (where the workers run):
+The keys already live in `/opt/TGW/secrets/tgw.env` **on tgw-prod** — that is
+where the workers (`pm_intake`, `suggestions_classify`, …) run, and
+`tgw.config.load_config()` sources that file into their environment at
+startup. No key file change is needed.
 
-1. **Key** — add to `/opt/TGW/secrets/tgw.env`:
+Remaining steps, both on tgw-prod:
 
-   ```
-   OPENCODE_API_KEY=<the OpenCode Zen key>
-   ```
+1. **Deploy this code** (the `opencode_zen` provider + the cap removal) as a
+   new release generation.
 
-   `tgw.config.load_config()` sources this into the process environment at
-   startup; real env vars win over the file.
-
-2. **Routing** — in `/opt/TGW/config/tgw-models.json`, point the DeepSeek-class
-   tasks at the new provider:
+2. **Route the tasks** — in `/opt/TGW/config/tgw-models.json`, point the
+   DeepSeek-class tasks at the new provider:
 
    ```json
-   "pm_intake":            { "provider": "opencode", "model": "deepseek-v4-flash-free" },
-   "suggestions_classify": { "provider": "opencode", "model": "deepseek-v4-flash-free" },
-   "simple_llm_jobs":      { "provider": "opencode", "model": "deepseek-v4-flash-free" }
+   "pm_intake":            { "provider": "opencode_zen", "model": "deepseek-v4-flash-free" },
+   "suggestions_classify": { "provider": "opencode_zen", "model": "deepseek-v4-flash-free" },
+   "simple_llm_jobs":      { "provider": "opencode_zen", "model": "deepseek-v4-flash-free" }
    ```
 
-   Update the file's `_comment` to record that `opencode` is the current
+   Update the file's `_comment` to record `opencode_zen` as the current
    DeepSeek-class primary and why.
 
-3. Restart the release-bound workers so they reload config.
+3. **Restart the release-bound workers** so they reload the config.
+
+If the `simple_llm_jobs` MCP tool or the Aider bridge also runs on tgw-lib
+rather than prod, `OPENCODE_ZEN_API_KEY` needs to be in tgw-lib's environment
+too (wherever that host sources it).
 
 The native `deepseek_direct` path and its `DEEPSEEK_API_KEY` stay in place as
 the >256k-context escape hatch and as one more fallback tier.
