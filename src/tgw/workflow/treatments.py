@@ -135,6 +135,20 @@ EBAY_SYNC_TARGETED = TreatmentContract(
     receipt_schema_id=_RECEIPT,
 )
 
+EBAY_WITHDRAW = TreatmentContract(
+    identity="ebay-withdraw",
+    version="1",
+    requires=(
+        Requirement("published", (FingerprintResult.TRUE,)),
+        Requirement("operator_authorized_withdraw", (FingerprintResult.TRUE,)),
+    ),
+    may_establish=("listing_inactive",),
+    must_preserve=("item_data", "listing.provider_projection"),
+    ownership=("listing.withdraw",),
+    effect_class=EffectClass.EXTERNAL,
+    receipt_schema_id=_RECEIPT,
+)
+
 EBAY_ONBOARD_LEGACY_STAGE = TreatmentContract(
     identity="ebay-onboard-legacy-stage",
     version="1",
@@ -172,4 +186,11 @@ LEGACY_STAGE_ONBOARDING_TREATMENTS: tuple[TreatmentContract, ...] = (
     EBAY_ONBOARD_LEGACY_STAGE,
 )
 
-ALL_TREATMENTS: tuple[TreatmentContract, ...] = TGW_TREATMENTS
+# Operator-command withdrawal: dispatched only through the explicit
+# listing-withdraw migration path (never by the ordinary evaluator, which
+# reads TGW_TREATMENTS).  Group kept separate per the branch stream; coding
+# treatments were split out to tgw.development.treatments on main and are NOT
+# re-declared here (no duplicate treatment ids).
+WITHDRAW_TREATMENTS: tuple[TreatmentContract, ...] = (EBAY_WITHDRAW,)
+
+ALL_TREATMENTS: tuple[TreatmentContract, ...] = TGW_TREATMENTS + WITHDRAW_TREATMENTS

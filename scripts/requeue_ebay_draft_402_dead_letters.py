@@ -128,7 +128,7 @@ def main() -> int:
         apply=args.apply, limit=args.limit, max_attempts_per_sku=args.max_attempts_per_sku,
     )
 
-    state_machine.init('dbname=state_machine user=tgw')
+    state_machine.init('dbname=state_machine user=tgw', 'production')
 
     with state_machine._conn() as con:  # noqa: SLF001 — one-shot script, direct query
         with con.cursor() as cur:

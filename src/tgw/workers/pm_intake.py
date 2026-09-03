@@ -52,7 +52,7 @@ import psycopg2.errors
 import tgw.logging as tgw_logging
 from tgw.apis.llm import call_model, get_task_model
 from tgw.apis.ollama import extract_json
-from tgw.config import DEFAULT_CONFIG
+from tgw.config import DEFAULT_CONFIG, configured_ebay_environment
 from tgw.items import atomic_write_text
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -705,7 +705,10 @@ def cmd_admin_file(
             print('No candidate inbox files found (dry run).')
         return {'ok': True, 'dry_run': True, 'candidates': manifest}
 
-    state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+    state_machine.init(
+        cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'),
+        configured_ebay_environment(cfg),
+    )
     files = scan_and_enqueue(cfg, bypass_delay=bypass_delay)
     if files:
         print(f'Enqueued {len(files)} file(s) for pm_intake:')

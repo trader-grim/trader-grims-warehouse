@@ -22,8 +22,8 @@ import json
 from types import SimpleNamespace
 from typing import Any, Dict
 
-import tgw.workers.ebay_stage as ebay_stage_mod
 import tgw.provider_effects as provider_effects
+import tgw.workers.ebay_stage as ebay_stage_mod
 from tgw.workers.ebay_stage import EbayStageWorker
 
 
@@ -78,6 +78,11 @@ def _patch_common(monkeypatch, tmp_path):
         'offer_id': 'off-1',
         'inventory_item': {'product': {'imageUrls': ['http://x/1.jpg']}},
     })
+    monkeypatch.setattr(
+        ebay_stage_mod,
+        'validate_listing_condition_for_stage',
+        lambda *args, **kwargs: 'USED_GOOD',
+    )
     monkeypatch.setattr(
         provider_effects, 'reserve_and_begin_authorized_effect',
         lambda **kwargs: SimpleNamespace(

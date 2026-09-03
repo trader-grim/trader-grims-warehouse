@@ -93,7 +93,29 @@ def test_browse_p25_is_floored(cfg, monkeypatch):
     result = pricing.suggest_price(cfg, 'Acme Widget', 'Widgets', '12345')
     assert result['price'] == 5.0
     assert result['source'].startswith('browse:')
+    assert result['query'] == 'Acme Widget'
     assert result['comps']['count'] == 3
+
+
+def test_exact_winning_query_survives_failed_operator_override(cfg, monkeypatch):
+    calls = []
+
+    def fetch(_cfg, query, limit=20):
+        calls.append(query)
+        return _summaries([10.0, 12.0, 14.0]) if query == 'Acme Widget' else []
+
+    monkeypatch.setattr(pricing, '_fetch_raw', fetch)
+    result = pricing.suggest_price(
+        cfg,
+        'Acme Widget',
+        'Widgets',
+        '12345',
+        search_terms='wrong requested terms',
+    )
+
+    assert calls[:2] == ['wrong requested terms', 'Acme Widget']
+    assert result['source'] == 'browse:full_title'
+    assert result['query'] == 'Acme Widget'
 
 
 def test_group_assumption_floored_and_99(cfg, monkeypatch):
@@ -104,6 +126,7 @@ def test_group_assumption_floored_and_99(cfg, monkeypatch):
                                    item_condition='good')
     assert result['price'] == 16.99
     assert result['source'] == 'group_assumption:Electronics'
+    assert result['query'] is None
     assert result['price_confidence'] == 'low'
 
 
@@ -113,6 +136,7 @@ def test_category_default_is_floored(cfg, monkeypatch):
     result = pricing.suggest_price(cfg, 'Acme Widget', 'Widgets', '99999')
     assert result['price'] == 1.99
     assert result['source'] == 'category_default:99999'
+    assert result['query'] is None
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +148,7 @@ def test_insufficient_comps_price_is_null(cfg, monkeypatch):
     result = pricing.suggest_price(cfg, 'Acme Widget', 'Widgets', '99999')
     assert result['price'] is None
     assert result['source'] == 'insufficient_data'
+    assert result['query'] is None
     assert result['price_confidence'] == 'low'
 
 
@@ -235,6 +260,7 @@ def price_worker(tmp_path, monkeypatch):
 
 def _suggestion(price, comps):
     return {'price': price, 'source': 'browse:full_title', 'comps': comps,
+            'query': 'Acme Thing',
             'price_confidence': 'medium', 'velocity_hint': None,
             'queried_at': '2026-06-10T00:00:00Z'}
 
@@ -264,7 +290,13 @@ def test_price_written_with_full_provenance(price_worker, tmp_path, monkeypatch)
     assert offer['price'] == to_99(100.0 * 1.10)
     assert offer['target_price'] == 50.0
     assert offer['price_source'] == 'browse:full_title'
-    assert offer['price_comps'] == comps
+    assert offer['price_comps'] == {
+        **comps,
+        'query': 'Acme Thing',
+        'source': 'browse:full_title',
+        'queried_at': '2026-06-10T00:00:00Z',
+        'requested_search_terms': None,
+    }
     assert offer['priced_at']
 
 

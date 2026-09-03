@@ -52,6 +52,37 @@ def test_is_envelope_distinguishes_from_inventory_record():
     assert not draft_specifics.is_envelope(a_shaped)
 
 
+def test_normalize_legacy_ebay_specifics_returns_full_preserved_draft():
+    item = {
+        "draft_listing": {
+            "title": "Brooch",
+            "item_specifics": {"Type": "Brooch"},
+            "item_specifics_history": [{"key": "Type", "value": "Brooch"}],
+        }
+    }
+    normalized = draft_specifics.normalize_legacy_ebay_specifics(
+        item, source="publish_projection",
+    )
+    assert normalized is not None
+    assert normalized["title"] == "Brooch"
+    assert normalized["item_specifics"]["_set"] == "ebay_draft"
+    assert normalized["item_specifics"]["fields"] == {"Type": "Brooch"}
+    assert normalized["item_specifics_history"] == [
+        {"key": "Type", "value": "Brooch"}
+    ]
+    assert item["draft_listing"]["item_specifics"] == {"Type": "Brooch"}
+
+
+def test_normalize_legacy_ebay_specifics_skips_envelope_and_missing_set():
+    envelope = draft_specifics.wrap_ebay_specifics({"Type": "Brooch"})
+    assert draft_specifics.normalize_legacy_ebay_specifics(
+        {"draft_listing": {"item_specifics": envelope}}, source="test",
+    ) is None
+    assert draft_specifics.normalize_legacy_ebay_specifics(
+        {"draft_listing": {}}, source="test",
+    ) is None
+
+
 def test_set_ebay_aspects_records_history():
     item = {"draft_listing": {"item_specifics": {"Type": "Lapel Pin"}}}
     patch = draft_specifics.set_ebay_aspects(item, {"Type": "Brooch"}, source="ebay_draft")

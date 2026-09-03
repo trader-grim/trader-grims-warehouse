@@ -38,6 +38,7 @@ from tgw.item_mutation import (
     mutate_item,
     operation_identity,
     reconcile_mutation,
+    resolve_item_mutation_journal_root,
 )
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -122,9 +123,7 @@ class EbayPriceWorker(QueueWorker):
             return result
 
         data_root = Path(self.config.get("data_root", "/opt/TGW/data"))
-        journal_root = Path(self.config.get(
-            "item_mutation_journal_root", data_root.parent / "var/item-mutations",
-        ))
+        journal_root = resolve_item_mutation_journal_root(self.config)
         result = mutate_item(
             item_path=json_path,
             archive_root=Path(self.config.get("archive_root", data_root / "ItemArchive")),
@@ -189,6 +188,12 @@ class EbayPriceWorker(QueueWorker):
         self, *, job: Dict[str, Any], payload: Dict[str, Any], sku: str,
         json_path: Path, fields: Dict[str, Any],
     ) -> Dict[str, Any]:
+        # A published operator pricing request makes ``priced`` deliberately
+        # false so the evaluator can select this exact local treatment even
+        # when the draft already has an operator price.  Clear that durable
+        # request only in the same governed commit as the fresh observation;
+        # failures therefore remain truthful and retryable.
+        fields = {**fields, "ai_reprice_requested": None}
         mutation_payload = {
             "schema": "ebay-price-observation/v1",
             "job_id": job["job_id"], "graph_id": payload["graph_id"],
@@ -270,10 +275,9 @@ class EbayPriceWorker(QueueWorker):
         # gated. The draft→price auto-chain (no origin stamp) must never
         # overwrite a price the operator explicitly typed in — even if
         # ebay_offer.price has since gone missing (e.g. a redraft cleared
-        # other offer fields). Only a job carrying origin='operator' — the
-        # Re-price button, which clears ebay_offer.price/draft.price itself
-        # as its consent signal (invariant C10) — may compute a fresh price
-        # over an operator's last price_history entry.
+        # other offer fields). A published operator pricing request may
+        # refresh the comparison observation, but the existing-price guard
+        # below keeps that refresh suggest-only and preserves the draft price.
         price_history = item.get('price_history') or []
         suggest_only = False
         if (payload.get('origin') != 'operator' and price_history
@@ -359,10 +363,20 @@ class EbayPriceWorker(QueueWorker):
 
         ebay_offer = dict(existing)
         ebay_offer['price_source'] = result['source']
+        result_query = str(result.get('query') or '').strip()
         # Only overwrite price_comps when we have real data — preserve existing
         # comps if the new search returned nothing (avoids wiping on re-price)
-        new_comps = result['comps']
+        new_comps = dict(result['comps'] or {})
         if new_comps and (new_comps.get('count') or 0) > 0:
+            if result_query:
+                # Keep the query beside the protected comparable observation.
+                # The operator object can now publish what
+                # actually priced the item instead of reconstructing a guess
+                # from whichever title happens to be current later.
+                new_comps['query'] = result_query
+                new_comps['source'] = result['source']
+                new_comps['queried_at'] = result['queried_at']
+                new_comps['requested_search_terms'] = search_terms or None
             if result.get('comp_items'):
                 new_comps['items'] = result['comp_items']
             ebay_offer['price_comps'] = new_comps
@@ -389,7 +403,8 @@ class EbayPriceWorker(QueueWorker):
                      sku, suggested, (result['comps'] or {}).get('count', 0))
             tgw_logging.log_event('ebay_price_suggested', sku=sku,
                                   suggested_price=suggested,
-                                  source=result['source'])
+                                  source=result['source'],
+                                  query=result_query or None)
             try:
                 state_machine.enqueue_catalog_rebuild(f'ebay_price_suggest:{sku}')
             except psycopg2.errors.UniqueViolation:
@@ -454,6 +469,7 @@ class EbayPriceWorker(QueueWorker):
                                   price=launch,
                                   target_price=suggested,
                                   source=result['source'],
+                                  query=result_query or None,
                                   price_confidence=result.get('price_confidence'),
                                   comps=comps)
         else:

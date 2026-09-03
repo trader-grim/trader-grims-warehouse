@@ -18,6 +18,174 @@ from urllib.parse import urlsplit
 DEFAULT_CONFIG = Path("/opt/TGW/config/tgw-api-config.json")
 
 
+# eBay provider environments are a closed selector, not configurable URLs.
+# Keeping the endpoint set here prevents a misspelled or injected provider
+# root from turning a development process into an arbitrary-token client.
+_EBAY_ENVIRONMENTS: Dict[str, Dict[str, str]] = {
+    "production": {
+        "rest_api_root": "https://api.ebay.com",
+        "auth_root": "https://auth.ebay.com",
+        "trading_api_endpoint": "https://api.ebay.com/ws/api.dll",
+        "token_filename": "ebay-token.json",
+    },
+    "sandbox": {
+        "rest_api_root": "https://api.sandbox.ebay.com",
+        "auth_root": "https://auth.sandbox.ebay.com",
+        "trading_api_endpoint": "https://api.sandbox.ebay.com/ws/api.dll",
+        "token_filename": "ebay-sandbox-token.json",
+    },
+}
+
+_DEFAULT_EBAY_OAUTH_SCOPES = (
+    "https://api.ebay.com/oauth/api_scope "
+    "https://api.ebay.com/oauth/api_scope/sell.account "
+    "https://api.ebay.com/oauth/api_scope/sell.inventory "
+    "https://api.ebay.com/oauth/api_scope/sell.fulfillment"
+)
+
+
+def normalize_ebay_environment(value: Any = None) -> str:
+    """Return an exact eBay environment name or reject it.
+
+    Production remains the compatibility default. Provider URLs are never
+    accepted here; callers select only one of the two eBay-owned environments.
+    """
+    environment = "production" if value is None else value
+    if not isinstance(environment, str) or environment not in _EBAY_ENVIRONMENTS:
+        raise ValueError("ebay_environment must be exactly 'production' or 'sandbox'")
+    return environment
+
+
+def ebay_environment_settings(environment: Any = None) -> Dict[str, str]:
+    """Return a copy of the closed endpoint/token contract for *environment*."""
+    return dict(_EBAY_ENVIRONMENTS[normalize_ebay_environment(environment)])
+
+
+def configured_ebay_environment(cfg: Dict[str, Any]) -> str:
+    """Resolve the closed eBay selector from a normalized or raw config.
+
+    Normalized worker configs expose ``ebay_environment`` directly.  Small
+    library/test configs may retain it only under ``raw``; both forms are
+    accepted, but provider URLs are deliberately ignored as selectors.
+    """
+    value = cfg.get("ebay_environment")
+    if value is None and isinstance(cfg.get("raw"), dict):
+        value = cfg["raw"].get("ebay_environment")
+    return normalize_ebay_environment(value)
+
+
+def bind_ebay_provider_identity(identity: Any, environment: Any) -> str:
+    """Bind an account identity to one closed provider environment.
+
+    Operator authorities have a provider-identity field but no separate
+    environment column.  The environment therefore belongs in that identity;
+    otherwise the same authority could be replayed after a production/sandbox
+    config switch.
+    """
+    if not isinstance(identity, str) or not identity.strip():
+        return ""
+    selected = normalize_ebay_environment(environment)
+    value = identity.strip()
+    marker = "|ebay-environment="
+    if marker in value:
+        base, bound = value.rsplit(marker, 1)
+        if not base or bound != selected:
+            raise ValueError("eBay provider identity environment binding is invalid")
+        return base if selected == "production" else value
+    # Preserve the installed production identity namespace so existing
+    # authoritative receipts remain usable.  Sandbox is the new, explicitly
+    # disjoint namespace.
+    if selected == "production":
+        return value
+    return f"{value}{marker}{selected}"
+
+
+def ebay_oauth_settings(raw: Dict[str, Any], environment: Any = None) -> Dict[str, str]:
+    """Return the OAuth settings for exactly one closed eBay environment.
+
+    New configuration is environment-specific::
+
+        {"ebay": {"oauth": {
+            "production": {"ru_name": "...", "scopes": "..."},
+            "sandbox": {"ru_name": "...", "scopes": "..."}
+        }}}
+
+    eBay calls its registered OAuth redirect value a RuName while the OAuth
+    protocol names the request parameter ``redirect_uri``.  ``ru_name`` and
+    ``redirect_uri`` are therefore aliases and, when both are supplied, must
+    be identical.  Legacy top-level ``ebay.redirect_uri``/``scopes`` remain a
+    production-only compatibility input; sandbox never inherits them.
+    """
+    selected = normalize_ebay_environment(environment)
+    ebay = raw.get("ebay", {})
+    if ebay is None:
+        ebay = {}
+    if not isinstance(ebay, dict):
+        raise ValueError("ebay config must be an object")
+    oauth = ebay.get("oauth", {})
+    if oauth is None:
+        oauth = {}
+    if not isinstance(oauth, dict):
+        raise ValueError("ebay.oauth must be an object")
+    unknown_environments = set(oauth) - set(_EBAY_ENVIRONMENTS)
+    if unknown_environments:
+        raise ValueError(
+            "ebay.oauth contains unknown environment(s): "
+            + ", ".join(sorted(str(value) for value in unknown_environments))
+        )
+    selected_config = oauth.get(selected, {})
+    if selected_config is None:
+        selected_config = {}
+    if not isinstance(selected_config, dict):
+        raise ValueError(f"ebay.oauth.{selected} must be an object")
+    allowed = {"redirect_uri", "ru_name", "scopes"}
+    unknown = set(selected_config) - allowed
+    if unknown:
+        raise ValueError(
+            f"ebay.oauth.{selected} contains unknown field(s): "
+            + ", ".join(sorted(str(value) for value in unknown))
+        )
+
+    legacy = ebay if selected == "production" else {}
+    redirect_uri = selected_config.get(
+        "redirect_uri", legacy.get("redirect_uri", "http://localhost")
+    )
+    ru_name = selected_config.get("ru_name", legacy.get("ru_name"))
+    if ru_name is not None:
+        if redirect_uri not in (None, "http://localhost", ru_name):
+            raise ValueError(
+                f"ebay.oauth.{selected}.ru_name and redirect_uri must be identical"
+            )
+        redirect_uri = ru_name
+    scopes = selected_config.get(
+        "scopes", legacy.get("scopes", _DEFAULT_EBAY_OAUTH_SCOPES)
+    )
+    if isinstance(scopes, (list, tuple)):
+        if not all(isinstance(value, str) and value.strip() for value in scopes):
+            raise ValueError(f"ebay.oauth.{selected}.scopes must contain non-empty strings")
+        scopes = " ".join(value.strip() for value in scopes)
+    if not isinstance(redirect_uri, str) or not redirect_uri.strip():
+        raise ValueError(f"ebay.oauth.{selected}.redirect_uri/RuName must be non-empty")
+    if not isinstance(scopes, str) or not scopes.strip():
+        raise ValueError(f"ebay.oauth.{selected}.scopes must be non-empty")
+    return {
+        "environment": selected,
+        "redirect_uri": redirect_uri.strip(),
+        "ru_name": redirect_uri.strip(),
+        "scopes": scopes.strip(),
+    }
+
+
+def ebay_cache_filename(cfg: Dict[str, Any], production_filename: str) -> str:
+    """Namespace an eBay cache without moving the existing production file."""
+    environment = configured_ebay_environment(cfg)
+    if environment == "production":
+        return production_filename
+    if production_filename.startswith("ebay-"):
+        return f"ebay-{environment}-{production_filename[len('ebay-') :]}"
+    return f"{environment}-{production_filename}"
+
+
 # ---------------------------------------------------------------------------
 # JSON helpers used by config loading
 # ---------------------------------------------------------------------------
@@ -83,6 +251,12 @@ def load_config(path: Path) -> Dict[str, Any]:
     secrets_root = p("secrets_root", "/opt/TGW/secrets")
     _load_secrets_env(secrets_root)
     itemdata_root = p("itemdata_root", "/opt/TGW/data/ItemData")
+    # Branch added first-class data_root config (consumed by item_mutation
+    # resolve and worker archive fallbacks).  item_mutation_journal_root is a
+    # genuine same-key conflict: keep main's fixed default (both default to
+    # /opt/TGW/var/item-mutations; the runtime resolver prefers data_root when
+    # the raw config overrides it).
+    data_root = p("data_root", str(itemdata_root.parent))
     item_mutation_journal_root = p(
         "item_mutation_journal_root",
         "/opt/TGW/var/item-mutations",
@@ -234,7 +408,12 @@ def load_config(path: Path) -> Dict[str, Any]:
         if not (root.resolve() == legacy_vault or legacy_vault in root.resolve().parents)
     ]
 
-    ebay_token_path = secrets_root / "ebay-token.json"
+    ebay_environment = normalize_ebay_environment(raw.get("ebay_environment"))
+    ebay_settings = ebay_environment_settings(ebay_environment)
+    ebay_oauth = ebay_oauth_settings(raw, ebay_environment)
+    ebay_token_path = secrets_root / ebay_settings["token_filename"]
+    ebay_production_token_path = secrets_root / _EBAY_ENVIRONMENTS["production"]["token_filename"]
+    ebay_sandbox_token_path = secrets_root / _EBAY_ENVIRONMENTS["sandbox"]["token_filename"]
     ebay_credentials_path = secrets_root / "ebay-credentials.json"
 
     _api_key_path = secrets_root / "tgw-api-key.json"
@@ -315,12 +494,22 @@ def load_config(path: Path) -> Dict[str, Any]:
         "models_config_path": models_config_path,
         "models": models,
         "secrets_root": secrets_root,
+        "ebay_environment": ebay_environment,
+        "ebay_rest_api_root": ebay_settings["rest_api_root"],
+        "ebay_auth_root": ebay_settings["auth_root"],
+        "ebay_trading_api_endpoint": ebay_settings["trading_api_endpoint"],
+        "ebay_oauth_redirect_uri": ebay_oauth["redirect_uri"],
+        "ebay_oauth_ru_name": ebay_oauth["ru_name"],
+        "ebay_oauth_scopes": ebay_oauth["scopes"],
         "ebay_token_path": ebay_token_path,
+        "ebay_production_token_path": ebay_production_token_path,
+        "ebay_sandbox_token_path": ebay_sandbox_token_path,
         "ebay_credentials_path": ebay_credentials_path,
         "ebay_draft_csv_path": ebay_draft_csv_path,
         "api_key": _api_key,
         "machine_api_key": _machine_api_key,
         "postgres_dsn": postgres_dsn,
+        "data_root": data_root,
         "itemdata_root": itemdata_root,
         "item_mutation_journal_root": item_mutation_journal_root,
         "catalog_root": catalog_root,

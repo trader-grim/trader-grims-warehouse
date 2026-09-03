@@ -3,6 +3,7 @@ tgw.apis.ebay.trading — eBay Trading API client (XML/IAF-token).
 
 Used for operations not available in the REST Inventory API:
   - GetMyeBaySelling: all active listings regardless of how they were created
+  - EndFixedPriceItem: withdraw a legacy Trading listing after governed admission
   - revise_item_sku: update the custom label (SKU) on a live listing in place
   - get_best_offers: poll incoming Best Offer requests
   - respond_to_best_offer: Accept / Decline / Counter a Best Offer
@@ -23,7 +24,8 @@ from xml.sax.saxutils import escape as _xml_escape
 import requests
 
 from tgw import quota
-from tgw.apis.ebay.client import capture_response, load_token
+from tgw.apis.ebay.client import _environment, capture_response, load_token
+from tgw.config import ebay_environment_settings
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +34,12 @@ _API_VERSION      = '1155'
 _SITE_ID          = '0'       # EBAY_US
 _NS               = 'urn:ebay:apis:eBLBaseComponents'
 _SESSION          = requests.Session()
+
+
+def _trading_endpoint(cfg: Dict[str, Any]) -> str:
+    # Like REST, Trading accepts only the closed production/sandbox selector.
+    # Arbitrary provider endpoints in caller configuration are ignored.
+    return ebay_environment_settings(_environment(cfg))['trading_api_endpoint']
 
 # eBay Motors is a distinct Trading API SiteID from EBAY_US, even though (per
 # PP-EBAY-MOTORS-001 scoping) it shares the EBAY_US category tree. Public
@@ -78,7 +86,7 @@ def trading_call(cfg: Dict[str, Any], call_name: str,
         'Content-Type':                  'text/xml;charset=utf-8',
     }
     quota.precheck(cfg, 'ebay_trading')
-    resp = _SESSION.post(_TRADING_ENDPOINT, headers=headers,
+    resp = _SESSION.post(_trading_endpoint(cfg), headers=headers,
                          data=xml_body.encode('utf-8'), timeout=timeout)
     quota.record(cfg, 'ebay_trading')
     if resp.status_code == 429:
@@ -247,6 +255,35 @@ def _item_from_xml(item_el: ET.Element) -> Dict[str, Any]:
         'quantity':     int(txt('Quantity') or '1'),
         'quantity_sold': int(txt('QuantitySold') or '0'),
     }
+
+
+def end_item(
+    cfg: Dict[str, Any],
+    listing_id: str,
+    reason: str = "NotAvailable",
+    marketplace_id: Optional[str] = None,
+) -> None:
+    """End one legacy listing after the caller's governed effect admission.
+
+    This provider primitive carries no ambient operator authority of its own;
+    the only production caller is the operator-object withdrawal effect, which
+    reserves the exact operation before invoking it.
+    """
+    xml_body = (
+        f'<?xml version="1.0" encoding="utf-8"?>\n'
+        f'<EndFixedPriceItemRequest xmlns="{_NS}">\n'
+        f'  <ItemID>{_xml_escape(listing_id)}</ItemID>\n'
+        f'  <EndingReason>{_xml_escape(reason)}</EndingReason>\n'
+        f'</EndFixedPriceItemRequest>'
+    )
+    trading_call(
+        cfg,
+        "EndFixedPriceItem",
+        xml_body,
+        timeout=30,
+        site_id=_resolve_site_id(marketplace_id),
+    )
+    log.info("EndFixedPriceItem: listing %s ended (reason=%s)", listing_id, reason)
 
 
 def get_my_ebay_selling(cfg: Dict[str, Any],

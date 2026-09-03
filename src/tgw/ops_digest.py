@@ -166,6 +166,7 @@ def _oldest_inbox_note(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def collect(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Gather the digest and compute deltas vs the previous run's snapshot."""
     from tgw import health, quota
+    from tgw.config import configured_ebay_environment
     from tgw.queue import state_machine
 
     snap_path = _snapshot_path(cfg)
@@ -180,7 +181,10 @@ def collect(cfg: Dict[str, Any]) -> Dict[str, Any]:
                   for c in h['checks'] if not c['ok'] or c.get('warn')]
 
     try:
-        state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+        state_machine.init(
+            cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'),
+            configured_ebay_environment(cfg),
+        )
         dl = state_machine.dead_letter_breakdown()
         queues = state_machine.queue_state_summary()
         retry_wait = state_machine.retry_wait_breakdown()

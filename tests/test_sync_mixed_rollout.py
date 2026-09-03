@@ -35,23 +35,26 @@ def test_payload_classifier_never_reinterprets_partial_or_unknown_schema():
 
 
 def test_producer_defaults_governed_and_never_falls_back():
-    with patch("tgw.ebay.sync.state_machine.enqueue_job") as legacy, \
-         pytest.raises(ValueError, match="binding is incomplete"):
+    with pytest.raises(ValueError, match="binding is incomplete"):
         enqueue_post_push_sync("SKU-1", config={})
-    legacy.assert_not_called()
-    config = {"itemdata_root": "/items", "workflow_migration": {
+    config = {"itemdata_root": "/items", "ebay_environment": "sandbox", "workflow_migration": {
         "ebay_post_push_sync_producer": "workflow",
         "ebay_provider_identity": "ebay:account",
     }}
     with patch("tgw.config.sku_json", return_value="/items/SKU-1/SKU-1.json"), \
          patch("tgw.workflow.post_push_sync.dispatch_targeted_sync",
-               return_value=SimpleNamespace(enqueued=True, outcome="dispatched")) as dispatch, \
-         patch("tgw.ebay.sync.state_machine.enqueue_job") as legacy:
+               return_value=SimpleNamespace(enqueued=True, outcome="dispatched")) as dispatch:
         assert enqueue_post_push_sync(
             "SKU-1", config=config, source_provider_effect_id="effect-1",
         ) is True
     dispatch.assert_called_once()
-    legacy.assert_not_called()
+    assert dispatch.call_args.kwargs["provider_identity"] == (
+        "ebay:account|ebay-environment=sandbox"
+    )
+    assert dispatch.call_args.kwargs["ebay_environment"] == "sandbox"
+    assert dispatch.call_args.kwargs["ebay_endpoint"] == (
+        "https://api.sandbox.ebay.com"
+    )
 
 
 def test_governed_enqueue_failure_propagates_without_legacy_fallback():
@@ -62,12 +65,10 @@ def test_governed_enqueue_failure_propagates_without_legacy_fallback():
     with patch("tgw.config.sku_json", return_value="/items/SKU-1/SKU-1.json"), \
          patch("tgw.workflow.post_push_sync.dispatch_targeted_sync",
                side_effect=RuntimeError("queue unavailable")), \
-         patch("tgw.ebay.sync.state_machine.enqueue_job") as legacy, \
          pytest.raises(RuntimeError):
         enqueue_post_push_sync(
             "SKU-1", config=config, source_provider_effect_id="effect-1",
         )
-    legacy.assert_not_called()
 
 
 def test_read_only_inventory_counts_mixed_shapes():

@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from tgw import quota
 from tgw.apis.ebay.client import ebay_get
 from tgw.catalog import atomic_write_json as _atomic_write_cache_json
+from tgw.config import configured_ebay_environment, ebay_cache_filename
 
 log = logging.getLogger(__name__)
 
@@ -45,8 +46,10 @@ _TREE_ID_CACHE_MAX_AGE = 365 * 86400  # tree ID for a marketplace is effectively
 _EBAY_US_DEFAULT_TREE_ID = '0'
 
 _tree_id_cache: Optional[str] = None
+_tree_id_cache_environment: Optional[str] = None
 _tree_index_cache: Optional[Dict[str, Dict[str, Any]]] = None
 _tree_roots_cache: Optional[List[str]] = None
+_tree_index_cache_environment: Optional[str] = None
 
 # eBay Motors US — a genuinely SEPARATE category tree from EBAY_US's tree 0,
 # confirmed live 2026-07-09 (todo #1254): a real Motors category 404s
@@ -59,11 +62,23 @@ _tree_roots_cache: Optional[List[str]] = None
 # different spelling per eBay API family).
 _MOTORS_TREE_ID = '100'
 _motors_tree_index_cache: Optional[Dict[str, Dict[str, Any]]] = None
+_motors_tree_roots_cache: Optional[List[str]] = None
+_motors_tree_index_cache_environment: Optional[str] = None
+
+
+class CategoryTaxonomySnapshotUnavailable(RuntimeError):
+    """The operator taxonomy snapshot is not available locally.
+
+    Operator reads must never turn a missing cache into an implicit provider
+    call.  The explicit taxonomy refresh command remains the only path that is
+    allowed to fetch a replacement tree.
+    """
 
 
 def _tree_id_cache_path(cfg: Dict[str, Any]) -> Optional[Path]:
     root = cfg.get('catalog_root')
-    return Path(root) / 'ebay-category-tree-id.json' if root else None
+    return (Path(root) / ebay_cache_filename(cfg, 'ebay-category-tree-id.json')
+            if root else None)
 
 
 def get_category_tree_id(cfg: Dict[str, Any]) -> str:
@@ -75,8 +90,10 @@ def get_category_tree_id(cfg: Dict[str, Any]) -> str:
     Taxonomy API doesn't also block every aspects/condition/search call that only
     needs this ID, not a fresh confirmation of it.
     """
-    global _tree_id_cache
-    if _tree_id_cache is not None:
+    global _tree_id_cache, _tree_id_cache_environment
+    environment = configured_ebay_environment(cfg)
+    if (_tree_id_cache is not None
+            and _tree_id_cache_environment == environment):
         return _tree_id_cache
 
     cache_path = _tree_id_cache_path(cfg)
@@ -85,6 +102,7 @@ def get_category_tree_id(cfg: Dict[str, Any]) -> str:
             wrapper = json.loads(cache_path.read_text(encoding='utf-8'))
             if time.time() - wrapper.get('_cached_at', 0) < _TREE_ID_CACHE_MAX_AGE:
                 _tree_id_cache = wrapper['tree_id']
+                _tree_id_cache_environment = environment
                 return _tree_id_cache
         except (OSError, ValueError, KeyError) as exc:
             log.warning('tree-id cache unreadable, refetching: %s', exc)
@@ -94,6 +112,7 @@ def get_category_tree_id(cfg: Dict[str, Any]) -> str:
                         '/commerce/taxonomy/v1/get_default_category_tree_id',
                         params={'marketplace_id': MARKETPLACE_ID})
         _tree_id_cache = data['categoryTreeId']
+        _tree_id_cache_environment = environment
         log.debug('eBay category tree ID: %s', _tree_id_cache)
         if cache_path:
             try:
@@ -112,6 +131,7 @@ def get_category_tree_id(cfg: Dict[str, Any]) -> str:
         log.warning('tree-id live lookup failed (%s) — using documented EBAY_US default %r',
                     exc, _EBAY_US_DEFAULT_TREE_ID)
         _tree_id_cache = _EBAY_US_DEFAULT_TREE_ID
+        _tree_id_cache_environment = environment
 
     return _tree_id_cache
 
@@ -172,7 +192,8 @@ def best_category(cfg: Dict[str, Any],
 
 def _tree_cache_path(cfg: Dict[str, Any]) -> Optional[Path]:
     root = cfg.get('catalog_root')
-    return Path(root) / 'ebay-category-tree.json' if root else None
+    return (Path(root) / ebay_cache_filename(cfg, 'ebay-category-tree.json')
+            if root else None)
 
 
 def _flatten_tree(node: Dict[str, Any], parent_id: Optional[str],
@@ -257,8 +278,10 @@ def _ensure_tree_index(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     ``_TREE_ID_CACHE_MAX_AGE`` for why. Use ``refresh_category_tree_cache()`` to
     force a re-fetch when eBay announces an actual taxonomy change.
     """
-    global _tree_index_cache, _tree_roots_cache
-    if _tree_index_cache is not None:
+    global _tree_index_cache, _tree_roots_cache, _tree_index_cache_environment
+    environment = configured_ebay_environment(cfg)
+    if (_tree_index_cache is not None
+            and _tree_index_cache_environment == environment):
         return _tree_index_cache
 
     tree_id = get_category_tree_id(cfg)
@@ -267,6 +290,7 @@ def _ensure_tree_index(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     index = _build_index(cfg, tree_data)
     _tree_index_cache = index
     _tree_roots_cache = [nid for nid, n in index.items() if n['parent_id'] is None]
+    _tree_index_cache_environment = environment
     log.info('eBay category tree loaded: %d categories', len(index))
     return index
 
@@ -279,12 +303,14 @@ def refresh_category_tree_cache(cfg: Dict[str, Any]) -> int:
 
     Returns the number of categories in the newly cached tree.
     """
-    global _tree_index_cache, _tree_roots_cache
+    global _tree_index_cache, _tree_roots_cache, _tree_index_cache_environment
+    environment = configured_ebay_environment(cfg)
     tree_id = get_category_tree_id(cfg)
     tree_data = _fetch_tree_live(cfg, tree_id, _tree_cache_path(cfg))
     index = _build_index(cfg, tree_data)
     _tree_index_cache = index
     _tree_roots_cache = [nid for nid, n in index.items() if n['parent_id'] is None]
+    _tree_index_cache_environment = environment
     log.info('eBay category tree cache refreshed: %d categories', len(index))
     return len(index)
 
@@ -302,7 +328,8 @@ def refresh_category_tree_cache(cfg: Dict[str, Any]) -> int:
 
 def _motors_tree_cache_path(cfg: Dict[str, Any]) -> Optional[Path]:
     root = cfg.get('catalog_root')
-    return Path(root) / 'ebay-motors-category-tree.json' if root else None
+    return (Path(root) / ebay_cache_filename(cfg, 'ebay-motors-category-tree.json')
+            if root else None)
 
 
 def _ensure_motors_tree_index(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -311,14 +338,21 @@ def _ensure_motors_tree_index(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     Same never-auto-expires contract as _ensure_tree_index — use
     refresh_motors_category_tree_cache() to force a re-fetch.
     """
-    global _motors_tree_index_cache
-    if _motors_tree_index_cache is not None:
+    global _motors_tree_index_cache, _motors_tree_roots_cache
+    global _motors_tree_index_cache_environment
+    environment = configured_ebay_environment(cfg)
+    if (_motors_tree_index_cache is not None
+            and _motors_tree_index_cache_environment == environment):
         return _motors_tree_index_cache
 
     tree_data = _load_or_fetch_tree(cfg, _MOTORS_TREE_ID, _motors_tree_cache_path(cfg),
                                     'Motors category tree')
     index = _build_index(cfg, tree_data)
     _motors_tree_index_cache = index
+    _motors_tree_roots_cache = [
+        nid for nid, node in index.items() if node['parent_id'] is None
+    ]
+    _motors_tree_index_cache_environment = environment
     log.info('eBay Motors category tree loaded: %d categories', len(index))
     return index
 
@@ -327,10 +361,16 @@ def refresh_motors_category_tree_cache(cfg: Dict[str, Any]) -> int:
     """Force a live re-fetch of the Motors category tree (mirrors
     refresh_category_tree_cache for the EBAY_US tree). Returns the number
     of categories in the newly cached tree."""
-    global _motors_tree_index_cache
+    global _motors_tree_index_cache, _motors_tree_roots_cache
+    global _motors_tree_index_cache_environment
+    environment = configured_ebay_environment(cfg)
     tree_data = _fetch_tree_live(cfg, _MOTORS_TREE_ID, _motors_tree_cache_path(cfg))
     index = _build_index(cfg, tree_data)
     _motors_tree_index_cache = index
+    _motors_tree_roots_cache = [
+        nid for nid, node in index.items() if node['parent_id'] is None
+    ]
+    _motors_tree_index_cache_environment = environment
     log.info('eBay Motors category tree cache refreshed: %d categories', len(index))
     return len(index)
 
@@ -375,6 +415,169 @@ def _breadcrumb(index: Dict[str, Dict[str, Any]], category_id: str) -> str:
     return ' > '.join(reversed(parts))
 
 
+def _snapshot_tree_index(
+        cfg: Dict[str, Any], *, motors: bool = False,
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Load one taxonomy index from memory/disk only.
+
+    Unlike ``_ensure_tree_index`` this helper deliberately has no live fallback
+    and does not resolve a tree ID.  The snapshot filenames are stable platform
+    data, so operator page reads can remain quota-free and deterministic.
+    """
+    global _tree_index_cache, _tree_roots_cache
+    global _motors_tree_index_cache, _motors_tree_roots_cache
+    global _tree_index_cache_environment, _motors_tree_index_cache_environment
+
+    environment = configured_ebay_environment(cfg)
+    cached = _motors_tree_index_cache if motors else _tree_index_cache
+    cached_environment = (
+        _motors_tree_index_cache_environment
+        if motors else _tree_index_cache_environment
+    )
+    if cached is not None and cached_environment == environment:
+        return cached
+
+    cache_path = _motors_tree_cache_path(cfg) if motors else _tree_cache_path(cfg)
+    if cache_path is None or not cache_path.exists():
+        return None
+    try:
+        wrapper = json.loads(cache_path.read_text(encoding='utf-8'))
+        if not isinstance(wrapper, dict):
+            raise ValueError('tree snapshot wrapper is not an object')
+        tree_data = wrapper.get('tree')
+        if not isinstance(tree_data, dict):
+            raise ValueError('tree snapshot has no tree object')
+        index = _build_index(cfg, tree_data)
+    except (OSError, ValueError) as exc:
+        log.warning('%s snapshot unavailable: %s',
+                    'Motors category tree' if motors else 'category tree', exc)
+        return None
+
+    roots = [nid for nid, node in index.items() if node['parent_id'] is None]
+    if motors:
+        _motors_tree_index_cache = index
+        _motors_tree_roots_cache = roots
+        _motors_tree_index_cache_environment = environment
+    else:
+        _tree_index_cache = index
+        _tree_roots_cache = roots
+        _tree_index_cache_environment = environment
+    return index
+
+
+def _category_projection(
+        index: Dict[str, Dict[str, Any]], category_id: str, marketplace_id: str,
+) -> Optional[Dict[str, Any]]:
+    node = index.get(str(category_id).strip())
+    if not node:
+        return None
+    return {
+        'id': node['id'],
+        'name': node['name'],
+        'path': _breadcrumb(index, node['id']),
+        'leaf': node['leaf'],
+        'marketplace_id': marketplace_id,
+        'source': 'taxonomy-snapshot',
+    }
+
+
+def _available_snapshot_indexes(
+        cfg: Dict[str, Any],
+) -> List[Tuple[str, Dict[str, Dict[str, Any]]]]:
+    available: List[Tuple[str, Dict[str, Dict[str, Any]]]] = []
+    us_index = _snapshot_tree_index(cfg)
+    if us_index is not None:
+        available.append((MARKETPLACE_ID, us_index))
+    motors_index = _snapshot_tree_index(cfg, motors=True)
+    if motors_index is not None:
+        available.append(('EBAY_MOTORS_US', motors_index))
+    return available
+
+
+def get_cached_category_node(
+        cfg: Dict[str, Any], category_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Resolve an ID through local US/Motors snapshots, never the provider."""
+    value = str(category_id).strip()
+    if not value:
+        return None
+    for marketplace_id, index in _available_snapshot_indexes(cfg):
+        projected = _category_projection(index, value, marketplace_id)
+        if projected is not None:
+            return projected
+    return None
+
+
+def search_categories_cached(cfg: Dict[str, Any], query: str,
+                             limit: int = 20) -> List[Dict[str, Any]]:
+    """Search local US/Motors taxonomy snapshots by human name or numeric ID."""
+    indexes = _available_snapshot_indexes(cfg)
+    if not indexes:
+        raise CategoryTaxonomySnapshotUnavailable('category taxonomy snapshot is unavailable')
+    q = query.strip().lower()
+    if not q:
+        return []
+
+    exact: List[Tuple[str, Dict[str, Any], Dict[str, Dict[str, Any]]]] = []
+    starts: List[Tuple[str, Dict[str, Any], Dict[str, Dict[str, Any]]]] = []
+    contains: List[Tuple[str, Dict[str, Any], Dict[str, Dict[str, Any]]]] = []
+    numeric = q.isdigit()
+    for marketplace_id, index in indexes:
+        for node in index.values():
+            if not node['leaf']:
+                continue
+            candidate = node['id'] if numeric else node['name'].lower()
+            row = (marketplace_id, node, index)
+            if candidate == q:
+                exact.append(row)
+            elif candidate.startswith(q):
+                starts.append(row)
+            elif not numeric and q in candidate:
+                contains.append(row)
+
+    ranked = exact + starts + contains
+    ranked.sort(key=lambda row: (
+        0 if (row[1]['id'] if numeric else row[1]['name'].lower()) == q else
+        1 if (row[1]['id'] if numeric else row[1]['name'].lower()).startswith(q) else 2,
+        _breadcrumb(row[2], row[1]['id']).casefold(),
+        row[1]['id'],
+    ))
+    return [
+        _category_projection(index, node['id'], marketplace_id)
+        for marketplace_id, node, index in ranked[:limit]
+    ]
+
+
+def get_cached_category_children(
+        cfg: Dict[str, Any], parent_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Return snapshot-only browse children with full human taxonomy paths."""
+    indexes = _available_snapshot_indexes(cfg)
+    if not indexes:
+        raise CategoryTaxonomySnapshotUnavailable('category taxonomy snapshot is unavailable')
+
+    value = str(parent_id or '').strip()
+    out: List[Dict[str, Any]] = []
+    for marketplace_id, index in indexes:
+        if value:
+            parent = index.get(value)
+            if parent is None:
+                continue
+            child_ids = parent['children']
+        elif marketplace_id == MARKETPLACE_ID:
+            child_ids = _tree_roots_cache or []
+        else:
+            child_ids = _motors_tree_roots_cache or []
+        for category_id in child_ids:
+            projected = _category_projection(index, category_id, marketplace_id)
+            if projected is not None:
+                out.append(projected)
+        if value:
+            break
+    out.sort(key=lambda node: (node['path'].casefold(), node['id']))
+    return out
+
+
 def search_categories_local(cfg: Dict[str, Any], query: str,
                              limit: int = 20) -> List[Dict[str, Any]]:
     """Search the cached local tree by name — no live API call, no quota risk."""
@@ -385,13 +588,14 @@ def search_categories_local(cfg: Dict[str, Any], query: str,
     exact, starts, contains = [], [], []
     for node in index.values():
         name_l = node['name'].lower()
+        candidate = node['id'] if q.isdigit() else name_l
         if not node['leaf']:
             continue  # only leaf categories are assignable
-        if name_l == q:
+        if candidate == q:
             exact.append(node)
-        elif name_l.startswith(q):
+        elif candidate.startswith(q):
             starts.append(node)
-        elif q in name_l:
+        elif not q.isdigit() and q in name_l:
             contains.append(node)
     ranked = exact + starts + contains
     results = []
@@ -399,7 +603,7 @@ def search_categories_local(cfg: Dict[str, Any], query: str,
         results.append({
             'id': node['id'],
             'name': node['name'],
-            'path': _breadcrumb(index, node['parent_id']) if node['parent_id'] else '',
+            'path': _breadcrumb(index, node['id']),
         })
     return results
 
@@ -432,6 +636,11 @@ def get_category_children(cfg: Dict[str, Any],
         node = index.get(cid)
         if not node:
             continue
-        out.append({'id': node['id'], 'name': node['name'], 'leaf': node['leaf']})
+        out.append({
+            'id': node['id'],
+            'name': node['name'],
+            'path': _breadcrumb(index, node['id']),
+            'leaf': node['leaf'],
+        })
     out.sort(key=lambda n: n['name'])
     return out

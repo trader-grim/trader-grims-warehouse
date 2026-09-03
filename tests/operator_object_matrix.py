@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tgw.item_mutation import item_generation
 from tgw.operator_objects import build_item_operator_object
 
 
@@ -14,6 +13,7 @@ def _item(state: str) -> dict:
         "sku": f"sku-{state}",
         "title": f"{state.replace('_', ' ').title()} item",
         "draft_listing": {
+            "title": f"{state.replace('_', ' ').title()} item",
             "category_id": "123",
             "condition_enum": "USED_GOOD",
             "condition_label": "Used - Good",
@@ -32,7 +32,7 @@ def _item(state: str) -> dict:
     return item
 
 
-def _workflow(state: str, item: dict) -> dict:
+def _workflow(state: str) -> dict:
     enabled = {
         "ready": {"save-draft", "list-item"},
         "staged": {"save-draft", "list-item", "update-item"},
@@ -49,7 +49,7 @@ def _workflow(state: str, item: dict) -> dict:
     }.get(state)
     return {
         "entity_id": f"sku-{state}",
-        "object_generation": item_generation(item),
+        "object_generation": f"generation-{state}",
         "graph_id": f"graph-{state}",
         "fingerprints": [],
         "attempts": [],
@@ -82,23 +82,44 @@ def _workflow(state: str, item: dict) -> dict:
 
 def generated_matrix() -> list[dict]:
     context = {
+        "item_condition_required": True,
         "conditions": [{"enum": "USED_GOOD", "label": "Used - Good"}],
         "aspects": [{"name": "Brand", "required": True, "allowed_values": []}],
+        "category_groups": [
+            {"value": "parts", "label": "Parts"},
+            {"value": "books", "label": "Books"},
+        ],
     }
     expectations = {
-        "ready": ["save-inventory", "save-listing-draft", "list-item"],
-        "staged": ["save-inventory", "save-listing-draft", "list-item", "update-item"],
-        "published": ["save-inventory", "save-listing-draft", "update-item"],
-        "held": ["save-inventory", "save-listing-draft"],
+        "ready": [
+            "save-inventory", "save-listing-draft", "list-item", "reidentify",
+            "reprice-item", "mark-sold", "archive-item", "delete-item",
+        ],
+        "staged": [
+            "save-inventory", "save-listing-draft", "list-item", "update-item",
+            "reidentify", "reprice-item", "sync-from-ebay", "mark-sold",
+            "archive-item", "delete-item",
+        ],
+        "published": [
+            "save-inventory", "save-listing-draft", "update-item", "reidentify",
+            "reprice-item", "sync-from-ebay", "end-listing", "mark-sold",
+            "archive-item", "delete-item",
+        ],
+        "held": [
+            "save-inventory", "save-listing-draft", "reidentify", "mark-sold",
+            "archive-item", "delete-item",
+        ],
         "in_progress": [],
-        "reconciliation_required": ["save-inventory", "save-listing-draft"],
+        "reconciliation_required": [
+            "save-inventory", "save-listing-draft", "reidentify", "reprice-item",
+            "mark-sold", "archive-item", "delete-item",
+        ],
     }
     rows = []
     for requested_state, enabled in expectations.items():
-        item = _item(requested_state)
         published = build_item_operator_object(
-            item=item,
-            workflow_card=_workflow(requested_state, item),
+            item=_item(requested_state),
+            workflow_card=_workflow(requested_state),
             category_context=context,
         )
         assert published["workflow"]["state"] == requested_state

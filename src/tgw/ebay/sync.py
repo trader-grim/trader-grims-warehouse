@@ -30,13 +30,19 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from tgw.apis.ebay.client import ebay_get, ebay_post, ebay_put
+from tgw.apis.ebay.conditions import (
+    allowed_conditions_for_category,
+    condition_policy_for_category,
+    is_known_condition_enum,
+)
+from tgw.config import configured_ebay_environment
 from tgw.ebay.draft_specifics import get_ebay_aspects
-from tgw.queue import state_machine
 
 log = logging.getLogger(__name__)
 
 
 _TARGETED_SYNC_SCHEMA = "ebay-sync-targeted/v1"
+_OPERATOR_SYNC_SCHEMA = "ebay-sync-operator/v1"
 _GOVERNED_SYNC_KEYS = frozenset({
     "treatment_id", "graph_id", "object_generation", "provider_effect_id",
 })
@@ -49,6 +55,22 @@ def classify_targeted_sync_payload(payload: object) -> str:
     schema = payload.get("payload_schema_id")
     if schema == _TARGETED_SYNC_SCHEMA:
         return "governed"
+    if schema == _OPERATOR_SYNC_SCHEMA and (
+        set(payload) == {
+            "payload_schema_id", "sku", "reason", "origin",
+            "object_generation", "ebay_environment", "ebay_endpoint",
+        }
+        and isinstance(payload.get("sku"), str)
+        and bool(payload["sku"].strip())
+        and payload.get("reason") == "manual"
+        and payload.get("origin") == "operator"
+        and isinstance(payload.get("object_generation"), str)
+        and bool(payload["object_generation"].strip())
+        and payload.get("ebay_environment") in {"production", "sandbox"}
+        and isinstance(payload.get("ebay_endpoint"), str)
+        and bool(payload["ebay_endpoint"].strip())
+    ):
+        return "operator"
     if schema is not None or _GOVERNED_SYNC_KEYS.intersection(payload):
         return "ambiguous"
     if set(payload) == {"reason"} and payload["reason"] in {"startup", "scheduled"}:
@@ -100,7 +122,12 @@ def enqueue_post_push_sync(
     config = config or {}
     _post_push_producer_mode(config)
     try:
-        from tgw.config import sku_json
+        from tgw.config import (
+            bind_ebay_provider_identity,
+            configured_ebay_environment,
+            ebay_environment_settings,
+            sku_json,
+        )
         from tgw.workflow.post_push_sync import dispatch_targeted_sync
         migration = config.get("workflow_migration")
         if migration is None and isinstance(config.get("raw"), dict):
@@ -109,10 +136,18 @@ def enqueue_post_push_sync(
         provider_identity = migration.get("ebay_provider_identity", "")
         if not source_provider_effect_id or not provider_identity:
             raise ValueError("governed post-push sync binding is incomplete")
+        ebay_environment = configured_ebay_environment(config)
+        provider_identity = bind_ebay_provider_identity(
+            provider_identity,
+            ebay_environment,
+        )
+        ebay_endpoint = ebay_environment_settings(ebay_environment)["rest_api_root"]
         result = dispatch_targeted_sync(
             sku_json(config, sku),
             source_provider_effect_id=source_provider_effect_id,
             provider_identity=provider_identity,
+            ebay_environment=ebay_environment,
+            ebay_endpoint=ebay_endpoint,
         )
         return result.enqueued or result.outcome == "already_dispatched"
     except Exception as exc:
@@ -177,6 +212,8 @@ def extract_ebay_error_field(body: str) -> Optional[str]:
         return None
     _bracket_re = re.compile(r'\[(\w+)\]')
     for e in errs:
+        if e.get('errorId') == 25021:
+            return 'condition_enum'
         for p in (e.get('parameters') or []):
             pname = (p.get('name') or '').lower()
             pval = p.get('value') or ''
@@ -256,51 +293,12 @@ def _is_motors_category(cfg: Dict[str, Any], category_id: str) -> bool:
     return is_motors_category(cfg, category_id)
 
 # ---------------------------------------------------------------------------
-# Condition mapping  (AI string → eBay Inventory API enum)
-# ---------------------------------------------------------------------------
-
-_CONDITION_MAP: Dict[str, str] = {
-    'new':                      'NEW',
-    'new in box':               'NEW',
-    'brand new':                'NEW',
-    'new old stock':            'NEW_OTHER',
-    'nos':                      'NEW_OTHER',
-    'open box':                 'NEW_OTHER',
-    'like new':                 'LIKE_NEW',
-    'manufacturer refurbished': 'MANUFACTURER_REFURBISHED',
-    'seller refurbished':       'SELLER_REFURBISHED',
-    'refurbished':              'SELLER_REFURBISHED',
-    '3000':                     'USED_EXCELLENT',  # Trading API conditionId for generic "Used"
-    'used: excellent':          'USED_EXCELLENT',
-    'excellent':                'USED_EXCELLENT',
-    'used: very good':          'USED_VERY_GOOD',
-    'very good':                'USED_VERY_GOOD',
-    'used: good':               'USED_GOOD',
-    'good':                     'USED_GOOD',
-    'used':                     'USED_GOOD',
-    'pre-owned':                'USED_GOOD',
-    'pre owned':                'USED_GOOD',
-    'used: acceptable':         'USED_ACCEPTABLE',
-    'acceptable':               'USED_ACCEPTABLE',
-    'fair':                     'USED_ACCEPTABLE',
-    'for parts':                'FOR_PARTS_OR_NOT_WORKING',
-    'for parts or not working': 'FOR_PARTS_OR_NOT_WORKING',
-    'not working':              'FOR_PARTS_OR_NOT_WORKING',
-    'parts only':               'FOR_PARTS_OR_NOT_WORKING',
-}
-
-
-def _map_condition(condition: str) -> str:
-    return _CONDITION_MAP.get(condition.lower().strip(), 'USED_GOOD')
-
-
-# ---------------------------------------------------------------------------
 # Per-process caches for account-level data that rarely changes
 # ---------------------------------------------------------------------------
 
-_policies_cache: Dict[str, Dict[str, str]] = {}
-_location_cache: Optional[str] = None
-_store_categories_cache: Optional[List[Dict[str, Any]]] = None
+_policies_cache: Dict[tuple[str, str], Dict[str, str]] = {}
+_location_cache: Dict[str, str] = {}
+_store_categories_cache: Dict[str, List[Dict[str, Any]]] = {}
 
 
 def _get_policies(cfg: Dict[str, Any], marketplace_id: str = MARKETPLACE_ID) -> Dict[str, str]:
@@ -310,8 +308,9 @@ def _get_policies(cfg: Dict[str, Any], marketplace_id: str = MARKETPLACE_ID) -> 
     hardcode EBAY_US unconditionally, so a Motors offer could get an
     EBAY_US policy id attached, which eBay would reject as invalid for
     that marketplace). Cached per marketplace_id, not a single global."""
-    if marketplace_id in _policies_cache:
-        return _policies_cache[marketplace_id]
+    cache_key = (configured_ebay_environment(cfg), marketplace_id)
+    if cache_key in _policies_cache:
+        return _policies_cache[cache_key]
 
     account_marketplace_id = _ACCOUNT_API_MARKETPLACE_ID.get(marketplace_id, marketplace_id)
 
@@ -333,7 +332,7 @@ def _get_policies(cfg: Dict[str, Any], marketplace_id: str = MARKETPLACE_ID) -> 
         'returnPolicyId':      _first('/sell/account/v1/return_policy',
                                       'returnPolicies', 'returnPolicyId'),
     }
-    _policies_cache[marketplace_id] = policies
+    _policies_cache[cache_key] = policies
     log.info('eBay account policies for %s: %s', marketplace_id, policies)
     return policies
 
@@ -356,11 +355,29 @@ def get_fulfillment_policies_full(cfg: Dict[str, Any],
     ]
 
 
+def get_return_policies_full(cfg: Dict[str, Any],
+                             marketplace_id: str = MARKETPLACE_ID) -> List[Dict[str, str]]:
+    """Return the account's complete return-policy list for a marketplace.
+
+    This is the provider-authoritative source used by the explicit selector
+    reference-data refresh.  Routine item rendering reads only the persisted
+    last-known-good snapshot and never calls the Account API.
+    """
+    account_marketplace_id = _ACCOUNT_API_MARKETPLACE_ID.get(marketplace_id, marketplace_id)
+    data = ebay_get(cfg, '/sell/account/v1/return_policy',
+                    params={'marketplace_id': account_marketplace_id})
+    return [
+        {'id': p['returnPolicyId'], 'name': p.get('name', p['returnPolicyId'])}
+        for p in data.get('returnPolicies', [])
+        if p.get('returnPolicyId')
+    ]
+
+
 def _get_merchant_location(cfg: Dict[str, Any]) -> str:
     """Return the first enabled merchant location key for the account."""
-    global _location_cache
-    if _location_cache is not None:
-        return _location_cache
+    environment = configured_ebay_environment(cfg)
+    if environment in _location_cache:
+        return _location_cache[environment]
 
     data = ebay_get(cfg, '/sell/inventory/v1/location')
     locations: List[Dict[str, Any]] = data.get('locations', [])
@@ -371,9 +388,10 @@ def _get_merchant_location(cfg: Dict[str, Any]) -> str:
         raise RuntimeError(
             'No merchant locations found — create one in eBay Seller Hub > Account > Business Policies'
         )
-    _location_cache = chosen[0]['merchantLocationKey']
-    log.info('eBay merchant location: %s', _location_cache)
-    return _location_cache
+    location = chosen[0]['merchantLocationKey']
+    _location_cache[environment] = location
+    log.info('eBay merchant location for %s: %s', environment, location)
+    return location
 
 
 # ---------------------------------------------------------------------------
@@ -515,17 +533,20 @@ def _get_listing_policies(cfg: Dict[str, Any], ebay_category_id: str, *,
 # ---------------------------------------------------------------------------
 
 def _get_store_categories_cached(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-    global _store_categories_cache
-    if _store_categories_cache is not None:
-        return _store_categories_cache
+    environment = configured_ebay_environment(cfg)
+    if environment in _store_categories_cache:
+        return _store_categories_cache[environment]
     try:
         from tgw.apis.ebay.trading import get_store_categories
-        _store_categories_cache = get_store_categories(cfg)
-        log.info('store categories loaded: %d', len(_store_categories_cache))
+        categories = get_store_categories(cfg)
+        _store_categories_cache[environment] = categories
+        log.info(
+            'store categories loaded for %s: %d', environment, len(categories),
+        )
     except Exception as exc:
         log.warning('GetStore failed (%s) — store category injection disabled', exc)
-        _store_categories_cache = []
-    return _store_categories_cache
+        _store_categories_cache[environment] = []
+    return _store_categories_cache[environment]
 
 
 def _resolve_store_category_names(cfg: Dict[str, Any],
@@ -591,6 +612,69 @@ def _find_offer(cfg: Dict[str, Any], sku: str) -> Optional[Dict[str, Any]]:
 # Publish
 # ---------------------------------------------------------------------------
 
+def validate_listing_condition_for_stage(
+    cfg: Dict[str, Any], sku: str, item: Dict[str, Any]
+) -> Optional[str]:
+    """Return the exact operator-selected condition, or fail before staging.
+
+    A TGW inventory grade is not an eBay listing selection.  Staging may use
+    only a real enum explicitly stored in ``draft_listing.condition_enum`` and
+    published by the selected category's current policy.  A resolved optional
+    category is valid only after the operator has explicitly cleared the prior
+    listing condition.  Policy lookup failure is unresolved, never permission
+    to reconstruct an enum from the inventory record.
+    """
+    draft = item.get('draft_listing', {})
+    category_id = str(draft.get('category_id') or '').strip()
+    selected = str(draft.get('condition_enum') or '').strip()
+    try:
+        # conditions.py (main stream) exposes the policy dict; the legacy
+        # item_condition_required_for_category helper was removed on main.
+        policy = condition_policy_for_category(cfg, category_id)
+        required = policy["item_condition_required"]
+        allowed = allowed_conditions_for_category(cfg, category_id)
+    except Exception as exc:
+        raise ValueError(
+            f'{sku}: eBay condition policy is unresolved for category '
+            f'{category_id or "<unset>"}; staging is held'
+        ) from exc
+
+    allowed_enums = {
+        str(condition.get('condition_enum') or '').strip()
+        for condition in allowed
+        if isinstance(condition, dict)
+    }
+    allowed_enums.discard('')
+    if not isinstance(required, bool):
+        raise ValueError(
+            f'{sku}: eBay condition policy is unresolved for category '
+            f'{category_id or "<unset>"}; staging is held'
+        )
+    if required is False:
+        if selected:
+            raise ValueError(
+                f'{sku}: category {category_id} does not require condition; '
+                'explicitly choose the blank listing-condition option before staging'
+            )
+        return None
+    if not selected:
+        raise ValueError(
+            f'{sku}: select an eBay condition explicitly for category '
+            f'{category_id or "<unset>"} before staging'
+        )
+    if not is_known_condition_enum(selected):
+        raise ValueError(
+            f'{sku}: draft_listing.condition_enum {selected!r} is not an eBay '
+            'condition enum; select a displayed category-legal value explicitly'
+        )
+    if selected not in allowed_enums:
+        raise ValueError(
+            f'{sku}: condition {selected!r} is not valid for eBay category '
+            f'{category_id}; select a displayed category-legal value explicitly'
+        )
+    return selected
+
+
 def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
                         item: Dict[str, Any], *,
                         known_marketplace_id: Optional[str] = None) -> tuple:
@@ -639,11 +723,19 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         k: [str(v)] for k, v in get_ebay_aspects(item).items() if v not in (None, '')
     }
 
-    # Prefer the pre-resolved condition_enum written by ebay_draft (already
-    # validated against the category's allowed conditions). Fall back to the
-    # legacy enum map for items drafted before condition resolution was added.
-    condition_enum = (draft.get('condition_enum')
-                      or _map_condition(item.get('condition', 'used')))
+    category_id_str = str(draft.get('category_id', ''))
+
+    # Body composition is kept pure for callers that inspect an offer without
+    # dispatching it.  The only effecting caller, stage_draft(), runs the exact
+    # category-policy preflight first, and the governed worker runs it again
+    # before provider-effect reservation.  Never synthesize from Set A here.
+    selected_condition = str(draft.get('condition_enum') or '').strip()
+    if selected_condition and not is_known_condition_enum(selected_condition):
+        raise ValueError(
+            f'{sku}: draft_listing.condition_enum {selected_condition!r} is not '
+            'an eBay condition enum; select a displayed category-legal value explicitly'
+        )
+    condition_enum = selected_condition or None
     title       = draft.get('title') or item.get('title', '')
     description = draft.get('description') or item.get('description', '')
     # Use the full listing description (AI text + boilerplate + picklist line) if available
@@ -658,8 +750,6 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
     epid = str(item.get('epid') or '').strip()
     if epid:
         product_block['epid'] = epid
-
-    category_id_str = str(draft.get('category_id', ''))
 
     # Never assume EBAY_US — a genuinely new item in a Motors-tree category
     # (todo #1254/PP-EBAY-MOTORS-001) needs marketplaceId=EBAY_MOTORS or
@@ -695,23 +785,23 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         policies = dict(policies)
         policies['returnPolicyId'] = str(draft['return_policy_id'])
 
-    # PP-OFFER-001 follow-up (todo #1256): offer.listingPolicies.bestOfferTerms
-    # is a per-item Inventory API field, not an account default — only send it
-    # when the operator has made an explicit choice (draft_listing.best_offer_enabled
-    # is not None); leaving it unset means "don't touch, let eBay use whatever
-    # the category default is" rather than silently forcing it off.
-    if draft.get('best_offer_enabled') is not None:
-        policies = dict(policies)
-        best_offer_terms: Dict[str, Any] = {
-            'bestOfferEnabled': bool(draft['best_offer_enabled']),
-        }
-        auto_accept = draft.get('best_offer_auto_accept_price')
-        if auto_accept not in (None, ''):
-            best_offer_terms['autoAcceptPrice'] = {'currency': 'USD', 'value': f'{float(auto_accept):.2f}'}
-        auto_decline = draft.get('best_offer_auto_decline_price')
-        if auto_decline not in (None, ''):
-            best_offer_terms['autoDeclinePrice'] = {'currency': 'USD', 'value': f'{float(auto_decline):.2f}'}
-        policies['bestOfferTerms'] = best_offer_terms
+    # Best Offer is enabled by default for this rollout.  This provider
+    # boundary covers older drafts which predate the canonical field, while an
+    # explicit operator/provider-observed False remains authoritative.
+    raw_best_offer_enabled = draft.get('best_offer_enabled')
+    policies = dict(policies)
+    best_offer_terms: Dict[str, Any] = {
+        'bestOfferEnabled': (
+            True if raw_best_offer_enabled is None else bool(raw_best_offer_enabled)
+        ),
+    }
+    auto_accept = draft.get('best_offer_auto_accept_price')
+    if auto_accept not in (None, ''):
+        best_offer_terms['autoAcceptPrice'] = {'currency': 'USD', 'value': f'{float(auto_accept):.2f}'}
+    auto_decline = draft.get('best_offer_auto_decline_price')
+    if auto_decline not in (None, ''):
+        best_offer_terms['autoDeclinePrice'] = {'currency': 'USD', 'value': f'{float(auto_decline):.2f}'}
+    policies['bestOfferTerms'] = best_offer_terms
 
     location_key = _get_merchant_location(cfg)
     qty          = draft.get('quantity', 1)
@@ -722,7 +812,6 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
     # Omitting it causes errorId 25002 "No Item.Country exists" for those categories.
     inv_body: Dict[str, Any] = {
         'product': product_block,
-        'condition': condition_enum,
         'availability': {
             'shipToLocationAvailability': {
                 'availabilityDistributions': [
@@ -732,8 +821,10 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
             },
         },
     }
+    if condition_enum is not None:
+        inv_body['condition'] = condition_enum
     cond_desc = draft.get('condition_description', '').strip()
-    if cond_desc:
+    if cond_desc and condition_enum is not None:
         inv_body['conditionDescription'] = cond_desc
 
     # PP-GLOBALS-001: pass the operator-captured shipping weight through to the
@@ -805,7 +896,11 @@ def _build_offer_bodies(cfg: Dict[str, Any], sku: str,
         if m2:
             store_names.append(m2['name'])
 
-    if not store_names:
+    explicit_store_selection = (
+        str(draft.get('store_category_source') or '').strip() == 'operator'
+        or str(draft.get('secondary_store_category_source') or '').strip() == 'operator'
+    )
+    if not store_names and not explicit_store_selection:
         store_names = _resolve_store_category_names(cfg, category_id_str)
 
     if store_names:
@@ -833,29 +928,17 @@ def stage_draft(cfg: Dict[str, Any], sku: str,
     # _build_offer_bodies never needs to guess via the Motors category-tree
     # check at all — skipping that work on the common path (most stage_draft
     # calls are updates to an already-staged item, not brand-new creates).
+    # Validate before even resolving the target offer.  More importantly, the
+    # governed worker invokes the same pure check before reserving a provider
+    # effect, so an invalid/unknown condition cannot create ambiguous dispatch
+    # evidence without any provider write having occurred.
+    validate_listing_condition_for_stage(cfg, sku, item)
     existing = _find_offer(cfg, sku)
     known_marketplace_id = existing.get('marketplaceId') if existing else None
     inv_body, offer_body = _build_offer_bodies(
         cfg, sku, item, known_marketplace_id=known_marketplace_id)
 
-    try:
-        ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body)
-    except requests.exceptions.HTTPError as exc:
-        if exc.response is not None and exc.response.status_code == 400:
-            body = exc.response.json()
-            errors = body.get('errors', [])
-            if any(e.get('errorId') == 25021 for e in errors):
-                # Category doesn't support this condition granularity — fall back
-                # to USED_EXCELLENT (conditionId 3000 "Used") which is universally
-                # accepted in categories that allow used items.
-                log.warning('%s: condition %r rejected by category — retrying with USED_EXCELLENT',
-                            sku, inv_body['condition'])
-                inv_body['condition'] = 'USED_EXCELLENT'
-                ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body)
-            else:
-                raise
-        else:
-            raise
+    ebay_put(cfg, f'/sell/inventory/v1/inventory_item/{sku}', inv_body)
     log.info('inventory item upserted for %s', sku)
 
     if existing:

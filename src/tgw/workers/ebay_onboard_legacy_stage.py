@@ -14,6 +14,7 @@ from typing import Any, Dict
 
 from tgw.config import DEFAULT_CONFIG, load_config
 from tgw.errors import HardFailure, TreatmentFailure
+from tgw.item_mutation import resolve_item_mutation_journal_root
 from tgw.legacy_stage_corroboration import (
     build_and_record_legacy_stage_observation,
     compare_legacy_stage_observation,
@@ -271,10 +272,7 @@ class EbayOnboardLegacyStageWorker(QueueWorker):
         )
 
     def _journal_root(self):
-        data_root = Path(self.config.get("data_root", Path(self.config["itemdata_root"]).parent))
-        return Path(self.config.get(
-            "item_mutation_journal_root", data_root.parent / "var/item-mutations",
-        ))
+        return resolve_item_mutation_journal_root(self.config)
 
     def _project(self, _sku, document):
         from tgw.sqlite_catalog import upsert_catalog_row

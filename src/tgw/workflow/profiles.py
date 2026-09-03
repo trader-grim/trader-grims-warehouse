@@ -73,6 +73,11 @@ TGW_EBAY_RECONCILED = GoalProfile(
     required=("provider_projection_current",),
 )
 
+TGW_EBAY_WITHDRAWN = GoalProfile(
+    identity="tgw.ebay_withdrawn", version="1",
+    required=("listing_inactive",),
+)
+
 TGW_EBAY_LEGACY_STAGE_ONBOARDED = GoalProfile(
     identity="tgw.ebay_legacy_stage_onboarded", version="1",
     required=("staged", "staged_content_current"),
@@ -96,6 +101,7 @@ PROFILE: dict[str, GoalProfile] = {
         TGW_EBAY_STAGED,
         TGW_EBAY_LISTABLE,
         TGW_EBAY_RECONCILED,
+        TGW_EBAY_WITHDRAWN,
     )
 }
 
@@ -132,6 +138,10 @@ PROFILE_META: dict[str, ProfileMeta] = {
     ),
     "tgw.ebay_reconciled": ProfileMeta(
         description="Provider projection matches one exact successful source effect.",
+        evidence_source_class="provider_effect_receipt",
+    ),
+    "tgw.ebay_withdrawn": ProfileMeta(
+        description="The exact active eBay listing has been withdrawn by operator command.",
         evidence_source_class="provider_effect_receipt",
     ),
 }

@@ -24,8 +24,8 @@ from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import patch
 
-import tgw.workers.ebay_publish as ebay_publish_mod
 import tgw.provider_effects as provider_effects
+import tgw.workers.ebay_publish as ebay_publish_mod
 from tgw.workers.ebay_publish import EbayPublishWorker
 
 
@@ -60,6 +60,66 @@ def _job(tmp_path, sku):
     )
 
 
+def _write_exact_governed_active_item(tmp_path, sku, published_at):
+    """Write the exact fully projected state for one governed publish replay."""
+    from tgw.item_mutation import item_generation
+    from tgw.workflow.operator_authority import listing_content_identity
+
+    dispatched = {
+        'sku': sku,
+        'title': 'Widget',
+        'draft_listing': {'title': 'Widget', 'price': 29.99},
+        'ebay_offer': {
+            'offer_id': 'off-1', 'staged_price': 29.99, 'price_comps': {},
+        },
+        'ebay_listing': {},
+    }
+    dispatch_generation = item_generation(dispatched)
+    dispatch_identity = listing_content_identity(dispatched)
+    item = {
+        **dispatched,
+        'draft_listing': {
+            **dispatched['draft_listing'], 'listing_description': 'desc',
+        },
+        'draft_listing_state': 'baseline',
+        'baseline_at': published_at,
+        'ebay_offer': {
+            **dispatched['ebay_offer'],
+            'status': 'PUBLISHED',
+            'published_at': published_at,
+            'ebay_environment': 'production',
+            'price': 29.99,
+        },
+        'ebay_listing': {
+            'offer_id': 'off-1',
+            'status': 'Active',
+            'listing_id': 'L1',
+            'listing_url': 'http://x',
+            'api': 'inventory',
+            'published_at': published_at,
+            'ebay_environment': 'production',
+            'provider_effect_id': 'publish-effect-1',
+            'publish_content_identity': dispatch_identity,
+        },
+        'reprice_schedule': [],
+        'price_history': [{
+            'ts': published_at,
+            'price': 29.99,
+            'previous_price': None,
+            'stage': 'launch',
+            'label': 'Published to eBay',
+            'source': 'ebay_publish',
+        }],
+    }
+    item['ebay_listing']['projected_content_identity'] = (
+        listing_content_identity(item)
+    )
+    _write_item(tmp_path, sku, item)
+    job = _job(tmp_path, sku)
+    job['payload_json']['object_generation'] = dispatch_generation
+    return job
+
+
 def _capture_sync(monkeypatch):
     calls = []
     monkeypatch.setattr(
@@ -72,6 +132,11 @@ def _capture_sync(monkeypatch):
 def _patch_common(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ebay_publish_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
+    monkeypatch.setattr(
+        ebay_publish_mod,
+        'validate_listing_condition_for_stage',
+        lambda *args, **kwargs: 'USED_GOOD',
+    )
     from tests.conftest import make_fake_fence_write, make_fake_patch_item
     monkeypatch.setattr(
         ebay_publish_mod, 'fence_ebay_write', make_fake_fence_write(tmp_path))
@@ -95,7 +160,12 @@ def _patch_common(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         provider_effects, 'validate_succeeded_authorized_effect',
-        lambda **kwargs: SimpleNamespace(result={'listing_id': 'L1'}),
+        lambda **kwargs: SimpleNamespace(result={
+            'listing_id': 'L1',
+            'listing_url': 'http://x',
+            'ebay_environment': 'production',
+            'endpoint': 'https://api.ebay.com',
+        }),
     )
     import tgw.ebay.description as description
     monkeypatch.setattr(description, 'build_listing_description', lambda *a, **k: 'desc')
@@ -128,7 +198,10 @@ def test_governed_sync_failure_replay_completes_outbox_without_republish(
 ):
     sku = 'tgw-sync-repair'
     _write_item(tmp_path, sku, {
-        'sku': sku, 'draft_listing': {'title': 'Widget', 'price': 29.99},
+        'sku': sku, 'draft_listing': {
+            'title': 'Widget', 'price': 29.99,
+            'item_specifics': {'Brand': 'Acme'},
+        },
         'ebay_offer': {'offer_id': 'off-1', 'staged_price': 29.99, 'price_comps': {}},
         'ebay_listing': {},
     })
@@ -181,29 +254,26 @@ def test_governed_sync_failure_replay_completes_outbox_without_republish(
     assert receipt['condition_hash'] == job['payload_json']['condition_hash']
     assert receipt['outcome'] == 'satisfied'
     ordinary.assert_not_called()
+    from tgw.workflow.operator_authority import listing_content_identity
+    item = json.loads(
+        (tmp_path / sku / f'{sku}.json').read_text(encoding='utf-8')
+    )
+    assert (
+        item['ebay_listing']['projected_content_identity']
+        == listing_content_identity(item)
+    )
+    assert item['draft_listing']['item_specifics']['_set'] == 'ebay_draft'
 
 
 def test_already_active_skip_still_enqueues_post_publish_sync(tmp_path, monkeypatch):
     sku = 'tgw2'
     published_at = '2026-08-20T00:00:00+00:00'
-    _write_item(tmp_path, sku, {
-        'sku': sku,
-        'draft_listing': {'title': 'Widget', 'price': 29.99},
-        'draft_listing_state': 'baseline', 'baseline_at': published_at,
-        'ebay_offer': {
-            'offer_id': 'off-1', 'staged_price': 29.99, 'price_comps': {},
-            'published_at': published_at,
-        },
-        'ebay_listing': {
-            'status': 'Active', 'listing_id': 'L1',
-            'published_at': published_at, 'provider_effect_id': 'publish-effect-1',
-        },
-    })
+    job = _write_exact_governed_active_item(tmp_path, sku, published_at)
     calls = _capture_sync(monkeypatch)
     _patch_common(tmp_path, monkeypatch)
 
     worker = _worker(_cfg(tmp_path))
-    receipt = worker.handle(_job(tmp_path, sku))
+    receipt = worker.handle(job)
 
     assert calls[0][1]['source_provider_effect_id'] == 'publish-effect-1'
     assert receipt['outcome'] == 'satisfied'
@@ -213,22 +283,10 @@ def test_post_publish_sync_governed_dedupe_success_is_non_fatal(tmp_path, monkey
     """The governed dispatcher represents exact dedupe as successful."""
     sku = 'tgw3'
     published_at = '2026-08-20T00:00:00+00:00'
-    _write_item(tmp_path, sku, {
-        'sku': sku,
-        'draft_listing': {'title': 'Widget', 'price': 29.99},
-        'draft_listing_state': 'baseline', 'baseline_at': published_at,
-        'ebay_offer': {
-            'offer_id': 'off-1', 'staged_price': 29.99, 'price_comps': {},
-            'published_at': published_at,
-        },
-        'ebay_listing': {
-            'status': 'Active', 'listing_id': 'L1',
-            'published_at': published_at, 'provider_effect_id': 'publish-effect-1',
-        },
-    })
+    job = _write_exact_governed_active_item(tmp_path, sku, published_at)
     calls = _capture_sync(monkeypatch)
     _patch_common(tmp_path, monkeypatch)
 
     worker = _worker(_cfg(tmp_path))
-    worker.handle(_job(tmp_path, sku))
+    worker.handle(job)
     assert len(calls) == 1

@@ -43,6 +43,7 @@ from tgw.apis.ebay._cache_io import locked_merge_cache_json
 from tgw.apis.ebay.client import ebay_get, ebay_get_bytes
 from tgw.apis.ebay.taxonomy import get_category_tree_id
 from tgw.catalog import atomic_write_json as _atomic_write_cache_json
+from tgw.config import configured_ebay_environment, ebay_cache_filename
 
 log = logging.getLogger(__name__)
 
@@ -59,9 +60,14 @@ _ASPECT_FILTER_REVISION = "identity-aspects-v2"
 _aspects_mem_cache: Dict[str, List[Dict[str, Any]]] = {}
 
 
+def _aspects_cache_key(cfg: Dict[str, Any], category_id: str) -> str:
+    return f'{configured_ebay_environment(cfg)}:{category_id}'
+
+
 def _aspects_cache_path(cfg: Dict[str, Any]) -> Optional[Path]:
     root = cfg.get('catalog_root')
-    return Path(root) / 'ebay-aspects-cache.json' if root else None
+    return (Path(root) / ebay_cache_filename(cfg, 'ebay-aspects-cache.json')
+            if root else None)
 
 
 def _load_aspects_disk_cache(cache_path: Optional[Path]) -> Dict[str, Dict[str, Any]]:
@@ -153,7 +159,8 @@ def _fetch_aspects_live(cfg: Dict[str, Any], category_id: str,
 
 def _bulk_dir(cfg: Dict[str, Any]) -> Optional[Path]:
     root = cfg.get('catalog_root')
-    return Path(root) / 'ebay-aspects-bulk' if root else None
+    return (Path(root) / ebay_cache_filename(cfg, 'ebay-aspects-bulk')
+            if root else None)
 
 
 def _load_bulk_shard(cfg: Dict[str, Any], category_id: str) -> Optional[List[Dict[str, Any]]]:
@@ -234,8 +241,9 @@ def get_aspects(cfg: Dict[str, Any], category_id: str) -> List[Dict[str, Any]]:
     warm-ebay-aspects`) — no auto-expiry, matching the category-tree policy.
     """
     category_id = str(category_id)
-    if category_id in _aspects_mem_cache:
-        return _aspects_mem_cache[category_id]
+    memory_key = _aspects_cache_key(cfg, category_id)
+    if memory_key in _aspects_mem_cache:
+        return _aspects_mem_cache[memory_key]
 
     cache_path = _aspects_cache_path(cfg)
     disk_cache = _load_aspects_disk_cache(cache_path)
@@ -244,16 +252,16 @@ def get_aspects(cfg: Dict[str, Any], category_id: str) -> List[Dict[str, Any]]:
         entry and 'aspects' in entry
         and entry.get('_aspect_filter_revision') == _ASPECT_FILTER_REVISION
     ):
-        _aspects_mem_cache[category_id] = entry['aspects']
+        _aspects_mem_cache[memory_key] = entry['aspects']
         return entry['aspects']
 
     shard = _load_bulk_shard(cfg, category_id)
     if shard is not None:
-        _aspects_mem_cache[category_id] = shard
+        _aspects_mem_cache[memory_key] = shard
         return shard
 
     results = _fetch_aspects_live(cfg, category_id)
-    _aspects_mem_cache[category_id] = results
+    _aspects_mem_cache[memory_key] = results
     if cache_path:
         # audit#1143 #1239: previously read-modify-wrote the whole disk_cache
         # dict with a plain write_text — unlocked, so two concurrent
@@ -335,7 +343,7 @@ def warm_missing_aspects(cfg: Dict[str, Any], category_ids: List[str],
         if not cid or cid in seen:
             continue
         seen.add(cid)
-        if cid in _aspects_mem_cache:
+        if _aspects_cache_key(cfg, cid) in _aspects_mem_cache:
             continue
         entry = disk_cache.get(cid)
         if (

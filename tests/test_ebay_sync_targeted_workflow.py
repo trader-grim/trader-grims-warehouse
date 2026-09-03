@@ -28,7 +28,11 @@ def _worker(tmp_path):
                      "data_root": tmp_path, "archive_root": tmp_path / "archive",
                      "item_mutation_journal_root": tmp_path / "journal",
                      "sqlite_catalog_path": tmp_path / "catalog.db",
-                     "workflow_migration": {"ebay_sync_targeted": "workflow"}}
+                     "ebay_environment": "production",
+                     "workflow_migration": {
+                         "ebay_sync_targeted": "workflow",
+                         "ebay_provider_identity": "ebay:account",
+                     }}
     return worker, path
 
 
@@ -46,6 +50,7 @@ def _job():
         "goal_profile_id": "tgw.ebay_reconciled", "goal_profile_version": "1",
         "object_generation": "generation-1", "condition_hash": "condition-1",
         "provider_effect_id": "effect-1", "provider_identity": "ebay:account",
+        "ebay_environment": "production", "ebay_endpoint": "https://api.ebay.com",
         "expected_offer_id": "OFF-1",
         "source_operation": "stage-draft",
     }}
@@ -77,6 +82,158 @@ def _bound_job(path):
         json.loads(path.read_text())
     )
     return job
+
+
+def _operator_job(path, *, environment="production", endpoint="https://api.ebay.com"):
+    from tgw.item_mutation import item_generation
+
+    return {
+        "queue_name": "ebay_sync",
+        "entity_type": "item",
+        "entity_id": "SKU-1",
+        "payload_json": {
+            "payload_schema_id": "ebay-sync-operator/v1",
+            "sku": "SKU-1",
+            "reason": "manual",
+            "origin": "operator",
+            "object_generation": item_generation(json.loads(path.read_text())),
+            "ebay_environment": environment,
+            "ebay_endpoint": endpoint,
+        },
+    }
+
+
+def test_operator_sync_rejects_environment_before_any_provider_read(tmp_path):
+    worker, path = _worker(tmp_path)
+    job = _operator_job(
+        path,
+        environment="sandbox",
+        endpoint="https://api.sandbox.ebay.com",
+    )
+    with patch("tgw.ebay.sync._find_offer") as offer_read, \
+         patch("tgw.workers.ebay_sync.ebay_get") as inventory_read, \
+         pytest.raises(HardFailure, match="environment mismatch"):
+        worker.handle(job)
+    offer_read.assert_not_called()
+    inventory_read.assert_not_called()
+
+
+def test_operator_sync_generation_advance_after_read_cannot_overwrite_item(
+    tmp_path, monkeypatch,
+):
+    worker, path = _worker(tmp_path)
+    job = _operator_job(path)
+    before = json.loads(path.read_text())
+
+    def observe_then_advance(*_args, **_kwargs):
+        newer = json.loads(path.read_text())
+        newer["operator_note"] = "newer"
+        path.write_text(json.dumps(newer))
+        return {
+            "sku": "SKU-1",
+            "offerId": "OFF-1",
+            "status": "PUBLISHED",
+            "listing": {"listingId": "LIST-1", "listingStatus": "ACTIVE"},
+        }
+
+    projections = []
+    monkeypatch.setattr(
+        "tgw.sqlite_catalog.upsert_catalog_row",
+        lambda *args: projections.append(args) or {"ok": True},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_sync_one",
+        lambda *_: (_ for _ in ()).throw(AssertionError("legacy path called")),
+    )
+    with patch("tgw.ebay.sync._find_offer", side_effect=observe_then_advance), \
+         patch("tgw.workers.ebay_sync.ebay_get", return_value={"product": {}}), \
+         pytest.raises(HardFailure, match="generation advanced"):
+        worker.handle(job)
+
+    current = json.loads(path.read_text())
+    assert current == {**before, "operator_note": "newer"}
+    assert projections == []
+
+
+def test_operator_sync_projects_offer_and_inventory_in_one_durable_cas(
+    tmp_path, monkeypatch,
+):
+    worker, path = _worker(tmp_path)
+    job = _operator_job(path)
+    monkeypatch.setattr(
+        worker,
+        "_sync_one",
+        lambda *_: (_ for _ in ()).throw(AssertionError("legacy path called")),
+    )
+    monkeypatch.setattr(
+        "tgw.sqlite_catalog.upsert_catalog_row", lambda *args: {"ok": True},
+    )
+    monkeypatch.setattr(
+        "tgw.workers.ebay_sync.state_machine.enqueue_catalog_rebuild",
+        lambda *args, **kwargs: None,
+    )
+    offer = {
+        "sku": "SKU-1",
+        "offerId": "OFF-1",
+        "status": "PUBLISHED",
+        "listing": {"listingId": "LIST-1", "listingStatus": "ACTIVE"},
+        "pricingSummary": {"price": {"value": "24.50"}},
+        "categoryId": "123",
+        "availableQuantity": 2,
+        "marketplaceId": "EBAY_US",
+        "listingPolicies": {"fulfillmentPolicyId": "FULFILL-1"},
+    }
+    inventory = {
+        "product": {
+            "title": "Observed title",
+            "imageUrls": ["https://i.ebayimg.com/one.jpg"],
+            "aspects": {"Brand": ["Observed brand"]},
+        },
+        "condition": "USED_EXCELLENT",
+    }
+    with patch("tgw.ebay.sync._find_offer", return_value=offer), \
+         patch("tgw.workers.ebay_sync.ebay_get", return_value=inventory):
+        assert worker.handle(job) is None
+
+    current = json.loads(path.read_text())
+    assert current["ebay_listing"]["listing_id"] == "LIST-1"
+    assert current["ebay_offer"]["price"] == 24.5
+    assert current["ebay_offer"]["photo_urls"] == inventory["product"]["imageUrls"]
+    assert current["ebay_live"]["offer"] == offer
+    assert current["ebay_live"]["inventory_item"] == inventory
+    assert current["marketplace_id"] == "EBAY_US"
+    assert current["brand"] == "Observed brand"
+    intents = list((tmp_path / "journal" / "operations").glob("*/*/intent.json"))
+    publications = list(
+        (tmp_path / "journal" / "operations").glob("*/*/publication.json")
+    )
+    assert len(intents) == 1
+    assert len(publications) == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("ebay_environment", "sandbox"),
+        ("ebay_endpoint", "https://api.sandbox.ebay.com"),
+        ("provider_identity", "ebay:other-account"),
+    ],
+)
+def test_governed_sync_rejects_environment_drift_before_ledger_or_provider(
+    tmp_path, field, value,
+):
+    worker, path = _worker(tmp_path)
+    job = _bound_job(path)
+    job["payload_json"][field] = value
+    with patch("tgw.provider_effects.lookup_succeeded_provider_effect") as ledger, \
+         patch("tgw.workers.ebay_sync.ebay_get") as provider, \
+         pytest.raises(HardFailure, match="(environment|endpoint|identity) mismatch"):
+        worker._handle_governed_targeted(
+            job["payload_json"], "SKU-1", job,
+        )
+    ledger.assert_not_called()
+    provider.assert_not_called()
 
 
 def test_workflow_targeted_success_is_fully_bound(tmp_path, monkeypatch):

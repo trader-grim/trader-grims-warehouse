@@ -31,12 +31,26 @@ import requests
 import tgw.logging as tgw_logging
 from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
-from tgw.config import DEFAULT_CONFIG, load_config
-from tgw.ebay.sync import enqueue_post_push_sync, stage_draft
+from tgw.config import (
+    DEFAULT_CONFIG,
+    bind_ebay_provider_identity,
+    configured_ebay_environment,
+    ebay_environment_settings,
+    load_config,
+)
+from tgw.ebay.sync import (
+    enqueue_post_push_sync,
+    stage_draft,
+    validate_listing_condition_for_stage,
+)
 from tgw.ebay.sync import extract_ebay_error_field as _extract_ebay_error_field
 from tgw.ebay.sync import format_ebay_error as _format_ebay_error
 from tgw.errors import TreatmentFailure
-from tgw.item_mutation import item_generation
+from tgw.item_mutation import (
+    item_generation,
+    item_write_lock,
+    resolve_item_mutation_journal_root,
+)
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.workflow.item_snapshot import inventory_available
@@ -70,6 +84,22 @@ def _defer_stage_sync(payload: Dict[str, Any], effect_mode: str) -> bool:
 
 class EbayStageWorker(QueueWorker):
 
+    def _item_write_lock(self, sku: str):
+        return item_write_lock(resolve_item_mutation_journal_root(self.config), sku)
+
+    def _bind_job_environment(self, payload: Dict[str, Any]) -> tuple[str, str]:
+        environment = configured_ebay_environment(self.config)
+        endpoint = ebay_environment_settings(environment)['rest_api_root']
+        if payload.get('ebay_environment') not in (None, environment):
+            raise HardFailure(
+                'ebay_stage job environment differs from worker configuration'
+            )
+        if payload.get('ebay_endpoint') not in (None, endpoint):
+            raise HardFailure('ebay_stage job endpoint differs from closed provider root')
+        payload['ebay_environment'] = environment
+        payload['ebay_endpoint'] = endpoint
+        return environment, endpoint
+
     def _provider_effect_mode(self) -> str:
         migration = self.config.get('workflow_migration')
         if migration is None and isinstance(self.config.get('raw'), dict):
@@ -88,7 +118,9 @@ class EbayStageWorker(QueueWorker):
             migration = self.config['raw'].get('workflow_migration')
         migration = migration if isinstance(migration, dict) else {}
         value = migration.get('ebay_provider_identity')
-        return value if isinstance(value, str) else ''
+        return bind_ebay_provider_identity(
+            value, configured_ebay_environment(self.config),
+        )
 
     @staticmethod
     def _require_provider_binding(payload: Dict[str, Any]) -> None:
@@ -116,10 +148,13 @@ class EbayStageWorker(QueueWorker):
             'goal_profile_version': payload['goal_profile_version'],
             'object_generation': payload['object_generation'],
             'condition_hash': payload['condition_hash'],
+            'ebay_environment': payload['ebay_environment'],
             'entity_id': sku,
             'established_conditions': ['staged'] if outcome == 'satisfied' else [],
             'artifacts': [f'item:{sku}'],
             'evidence': {'reason_code': reason_code, 'provider': 'ebay',
+                         'ebay_environment': payload['ebay_environment'],
+                         'ebay_endpoint': payload['ebay_endpoint'],
                          'provider_effect_id': effect_id,
                          'provider_result': result,
                          **({'resulting_generation': resulting_generation}
@@ -137,26 +172,55 @@ class EbayStageWorker(QueueWorker):
         )
         from tgw.workflow.operator_authority import listing_content_identity
 
+        # This must precede provider-effect reservation.  Invalid, blank, or
+        # policy-unresolved listing condition state is a local operator hold,
+        # not an attempted/ambiguous external dispatch.
+        validate_listing_condition_for_stage(self.config, sku, item)
+        self._bind_job_environment(payload)
         content_identity = listing_content_identity(item)
+        environment = payload['ebay_environment']
+        endpoint = payload['ebay_endpoint']
         try:
-            effect = reserve_and_begin_authorized_effect(
-                authority_id=payload['operator_authority_id'],
-                authority_scope='force-restage' if force else 'stage',
-                authority_binding={
-                    'entity_id': sku, 'goal_profile_id': payload['goal_profile_id'],
-                    'goal_profile_version': payload['goal_profile_version'],
-                    'object_generation': payload['object_generation'],
-                    'pre_authority_condition_hash': payload['pre_authority_condition_hash'],
-                    'content_identity': content_identity,
-                    'provider_identity': self._provider_identity(),
-                }, provider='ebay', operation='stage-draft', entity_type='item',
-                entity_id=sku, object_generation=payload['object_generation'],
-                graph_id=payload['graph_id'], treatment_id=payload['treatment_id'],
-                treatment_version=payload['treatment_version'],
-                condition_hash=payload['condition_hash'],
-                request={'sku': sku, 'content_identity': content_identity,
-                         'force': force},
-            )
+            json_path = Path(self.config['itemdata_root']) / sku / f'{sku}.json'
+            # Linearize the exact canonical generation check with durable
+            # provider-effect reservation. External dispatch happens after the
+            # lock is released; any subsequent edit is caught by projection CAS.
+            with self._item_write_lock(sku):
+                current_item = json.loads(json_path.read_text(encoding='utf-8'))
+                observed_generation = item_generation(current_item)
+                if observed_generation != payload['object_generation']:
+                    raise HardFailure(
+                        f'{sku}: stage generation conflict before effect reservation: '
+                        f'expected {payload["object_generation"]}, '
+                        f'observed {observed_generation}'
+                    )
+                current_identity = listing_content_identity(current_item)
+                if current_identity != content_identity:
+                    raise HardFailure(
+                        f'{sku}: stage content changed before effect reservation'
+                    )
+                effect = reserve_and_begin_authorized_effect(
+                    authority_id=payload['operator_authority_id'],
+                    authority_scope='force-restage' if force else 'stage',
+                    authority_binding={
+                        'entity_id': sku,
+                        'goal_profile_id': payload['goal_profile_id'],
+                        'goal_profile_version': payload['goal_profile_version'],
+                        'object_generation': payload['object_generation'],
+                        'pre_authority_condition_hash': payload[
+                            'pre_authority_condition_hash'
+                        ],
+                        'content_identity': content_identity,
+                        'provider_identity': self._provider_identity(),
+                    }, provider='ebay', operation='stage-draft', entity_type='item',
+                    entity_id=sku, object_generation=payload['object_generation'],
+                    graph_id=payload['graph_id'], treatment_id=payload['treatment_id'],
+                    treatment_version=payload['treatment_version'],
+                    condition_hash=payload['condition_hash'],
+                    request={'sku': sku, 'content_identity': content_identity,
+                             'force': force, 'ebay_environment': environment,
+                             'endpoint': endpoint},
+                )
         except ProviderEffectConflict as exc:
             raise HardFailure(f'{sku}: provider effect admission failed: {exc}') from exc
         except ProviderEffectReconciliationRequired as exc:
@@ -168,6 +232,9 @@ class EbayStageWorker(QueueWorker):
                               result=exc.record.result),
             ) from exc
         if effect.state == 'succeeded' and effect.result:
+            if (effect.result.get('ebay_environment') != environment
+                    or effect.result.get('endpoint') != endpoint):
+                raise HardFailure('succeeded stage effect environment evidence mismatch')
             return effect.result, effect.effect_id, content_identity
         if effect.state == 'rejected':
             raise TreatmentFailure(
@@ -206,8 +273,15 @@ class EbayStageWorker(QueueWorker):
                               effect_id=finished.effect_id,
                               reason_code='PROVIDER_EFFECT_AMBIGUOUS'),
             ) from exc
-        finish_provider_effect(effect.effect_id, state='succeeded', result=result)
-        return result, effect.effect_id, content_identity
+        durable_result = {
+            **result,
+            'ebay_environment': environment,
+            'endpoint': endpoint,
+        }
+        finish_provider_effect(
+            effect.effect_id, state='succeeded', result=durable_result,
+        )
+        return durable_result, effect.effect_id, content_identity
 
     def handle(self, job: Dict[str, Any]) -> None:
         payload = job.get('payload_json') or {}
@@ -215,6 +289,7 @@ class EbayStageWorker(QueueWorker):
         force = bool(payload.get('force'))  # bypass guards — update a live listing in place
         if not sku:
             raise HardFailure('ebay_stage job missing sku in payload')
+        environment, _endpoint = self._bind_job_environment(payload)
         effect_mode = self._provider_effect_mode()
         if effect_mode == 'workflow':
             self._require_provider_binding(payload)
@@ -238,6 +313,7 @@ class EbayStageWorker(QueueWorker):
                 f'— stage waits for them (will retry)')
 
         item = json.loads(json_path.read_text(encoding='utf-8'))
+        expected_generation = payload['object_generation']
         if not inventory_available(item):
             raise HardFailure(
                 f'{sku}: inventory is sold, terminal, or zero quantity; '
@@ -309,22 +385,38 @@ class EbayStageWorker(QueueWorker):
                             'proceeding via standard path', sku, legacy_item_number)
                     tgw_logging.log_event('ebay_stage_legacy_resolved_no_duplicate',
                                           sku=sku, listing_id=legacy_blocked['listing_id'])
-                    fence_patch_item(self.config, sku, {
-                        'legacy_listing_blocked':  legacy_blocked,
-                        'legacy_listing_resolved': True,
-                    })
-                    # Deliberately no `return` — falls through to the normal
-                    # staging path below with legacy_listing_resolved now set.
+                    response = fence_patch_item(
+                        self.config,
+                        sku,
+                        {
+                            'legacy_listing_blocked': legacy_blocked,
+                            'legacy_listing_resolved': True,
+                        },
+                        expected_generation=expected_generation,
+                    )
+                    return self._receipt(
+                        payload, sku, outcome='partial', effect_id='',
+                        reason_code='LEGACY_LISTING_RESOLVED',
+                        resulting_generation=_committed_generation(response),
+                    )
                 else:
                     log.warning('ebay_stage: %s legacy listing %s — duplicate '
                                'risk detected or unverifiable, NOT resolving: %s',
                                sku, legacy_item_number, dup)
                     tgw_logging.log_event('ebay_stage_legacy_duplicate_risk',
                                           sku=sku, detail=dup)
-                    fence_patch_item(self.config, sku, {'legacy_listing_blocked': legacy_blocked})
+                    fence_patch_item(
+                        self.config, sku,
+                        {'legacy_listing_blocked': legacy_blocked},
+                        expected_generation=expected_generation,
+                    )
                     return
             else:
-                fence_patch_item(self.config, sku, {'legacy_listing_blocked': legacy_blocked})
+                fence_patch_item(
+                    self.config, sku,
+                    {'legacy_listing_blocked': legacy_blocked},
+                    expected_generation=expected_generation,
+                )
                 return
 
         # Guard (invariant C9, session 42): uninspected AI-regenerated content
@@ -408,11 +500,25 @@ class EbayStageWorker(QueueWorker):
                             'condition_hash': payload['condition_hash'],
                             'request': {'sku': sku,
                                         'content_identity': content_identity,
-                                        'force': False},
+                                        'force': False,
+                                        'ebay_environment': payload['ebay_environment'],
+                                        'endpoint': payload['ebay_endpoint']},
                         },
                     )
-                    if (offer.get('stage_content_identity') != content_identity
-                            or record.result.get('offer_id') != existing_offer_id):
+                    submitted = item.get('ebay_submitted') or {}
+                    if (
+                        offer.get('stage_content_identity') != content_identity
+                        or offer.get('status') != 'UNPUBLISHED'
+                        or offer.get('ebay_environment') != environment
+                        or not isinstance(offer.get('staged_at'), str)
+                        or not offer['staged_at'].strip()
+                        or submitted.get('staged_at') != offer.get('staged_at')
+                        or submitted.get('inventory_item')
+                        != record.result.get('inventory_item')
+                        or record.result.get('offer_id') != existing_offer_id
+                        or record.result.get('ebay_environment') != environment
+                        or record.result.get('endpoint') != payload['ebay_endpoint']
+                    ):
                         raise ProviderEffectConflict('canonical stage evidence mismatch')
                 except (ProviderEffectConflict,
                         ProviderEffectReconciliationRequired) as exc:
@@ -439,6 +545,16 @@ class EbayStageWorker(QueueWorker):
                                   offer_id=existing_offer_id)
             return
 
+        # A post-projection lease-expiry replay is handled above using the exact
+        # succeeded effect and canonical stage evidence. Every path that could
+        # still dispatch must remain bound to the original pre-stage generation.
+        observed_generation = item_generation(item)
+        if observed_generation != expected_generation:
+            raise HardFailure(
+                f'{sku}: stage generation conflict before provider dispatch: '
+                f'expected {expected_generation}, observed {observed_generation}'
+            )
+
         draft = item.get('draft_listing', {})
         if not draft:
             # Retryable — item may still be working through ai_identify/ebay_draft
@@ -459,15 +575,17 @@ class EbayStageWorker(QueueWorker):
         # C11) instead, same shape as the price/title guards below.
         category_id = draft.get('category_id')
         if category_id == '99':
-            fence_patch_item(self.config, sku, {'pipeline_error': {
-                'code':   'category_not_leaf',
-                'detail': ("draft_listing.category_id is the '99' Everything "
-                           "Else fallback (non-leaf) — eBay always rejects "
-                           "staging/publishing with it. Operator must select "
-                           "a real leaf category in the editor before listing."),
-                'ts':     datetime.now(timezone.utc).isoformat(),
-                'source': 'ebay_stage',
-            }})
+            fence_patch_item(
+                self.config, sku, {'pipeline_error': {
+                    'code':   'category_not_leaf',
+                    'detail': ("draft_listing.category_id is the '99' Everything "
+                               "Else fallback (non-leaf) — eBay always rejects "
+                               "staging/publishing with it. Operator must select "
+                               "a real leaf category in the editor before listing."),
+                    'ts':     datetime.now(timezone.utc).isoformat(),
+                    'source': 'ebay_stage',
+                }}, expected_generation=expected_generation,
+            )
             tgw_logging.log_event('ebay_stage_category_not_leaf', sku=sku)
             raise HardFailure(
                 f"{sku}: draft_listing.category_id is fallback '99' (Everything "
@@ -491,15 +609,17 @@ class EbayStageWorker(QueueWorker):
                 # Operator pressed List on an unpriced item: fail loudly and
                 # persist the finding so the editor can render "needs price"
                 # (invariant C11 — a finding, not a log line).
-                fence_patch_item(self.config, sku, {'pipeline_error': {
-                    'code':   'no_price_set',
-                    'detail': ('draft_listing.price is empty — set a price in '
-                               'the editor before listing'
-                               + (f' (ignored stale ebay_offer.price={stale}'
-                                  f' from disabled auto-pricer)' if stale is not None else '')),
-                    'ts':     datetime.now(timezone.utc).isoformat(),
-                    'source': 'ebay_stage',
-                }})
+                fence_patch_item(
+                    self.config, sku, {'pipeline_error': {
+                        'code':   'no_price_set',
+                        'detail': ('draft_listing.price is empty — set a price in '
+                                   'the editor before listing'
+                                   + (f' (ignored stale ebay_offer.price={stale}'
+                                      f' from disabled auto-pricer)' if stale is not None else '')),
+                        'ts':     datetime.now(timezone.utc).isoformat(),
+                        'source': 'ebay_stage',
+                    }}, expected_generation=expected_generation,
+                )
                 raise HardFailure(
                     f'{sku}: no price set in draft_listing — operator must price '
                     f'the item in the editor (stale ebay_offer.price={stale} ignored)'
@@ -523,13 +643,15 @@ class EbayStageWorker(QueueWorker):
         # C11/no_price_set shape, blocks staging until the operator trims it.
         title = draft.get('title') or ''
         if len(title) > 80:
-            fence_patch_item(self.config, sku, {'pipeline_error': {
-                'code':   'title_too_long',
-                'detail': (f'draft_listing.title is {len(title)} chars — eBay '
-                           f'allows at most 80. Trim it in the editor before listing.'),
-                'ts':     datetime.now(timezone.utc).isoformat(),
-                'source': 'ebay_stage',
-            }})
+            fence_patch_item(
+                self.config, sku, {'pipeline_error': {
+                    'code':   'title_too_long',
+                    'detail': (f'draft_listing.title is {len(title)} chars — eBay '
+                               f'allows at most 80. Trim it in the editor before listing.'),
+                    'ts':     datetime.now(timezone.utc).isoformat(),
+                    'source': 'ebay_stage',
+                }}, expected_generation=expected_generation,
+            )
             raise HardFailure(
                 f'{sku}: title is {len(title)} chars, over eBay\'s 80-char limit — '
                 f'operator must trim it in the editor'
@@ -563,10 +685,17 @@ class EbayStageWorker(QueueWorker):
                 'stage': None, 'label': 'never_raise_clamp',
                 'source': 'ebay_stage_guard',
             })
-            fence_patch_item(self.config, sku, {
-                'draft_listing': {'price': float(offer_price)},
-                'price_history': item['price_history'],
-            })
+            response = fence_patch_item(
+                self.config, sku, {
+                    'draft_listing': {'price': float(offer_price)},
+                    'price_history': item['price_history'],
+                }, expected_generation=expected_generation,
+            )
+            return self._receipt(
+                payload, sku, outcome='partial', effect_id='',
+                reason_code='NEVER_RAISE_CLAMP_APPLIED',
+                resulting_generation=_committed_generation(response),
+            )
 
         # Photos must be uploaded — retryable if ebay_upload hasn't finished yet
         image_urls = draft.get('imageUrls') or [e['url'] for e in item.get('ebay_photos', [])]
@@ -586,10 +715,18 @@ class EbayStageWorker(QueueWorker):
                 epid = lookup_epid(self.config, barcode)
                 if epid:
                     item['epid'] = epid
-                    fence_patch_item(self.config, sku, {'epid': epid})
+                    response = fence_patch_item(
+                        self.config, sku, {'epid': epid},
+                        expected_generation=expected_generation,
+                    )
                     log.info('%s: EPID %s cached (barcode %s)', sku, epid, barcode)
                     tgw_logging.log_event('ebay_epid_found', sku=sku,
                                           epid=epid, barcode=barcode)
+                    return self._receipt(
+                        payload, sku, outcome='partial', effect_id='',
+                        reason_code='EPID_CACHED',
+                        resulting_generation=_committed_generation(response),
+                    )
 
         log.info('ebay_stage: staging %s as UNPUBLISHED offer (price=$%s)', sku, price)
         tgw_logging.log_event('ebay_stage_start', sku=sku, price=price)
@@ -628,7 +765,10 @@ class EbayStageWorker(QueueWorker):
                     # name a field — never forced.
                     'field':  _extract_ebay_error_field(raw),
                 }
-                fence_patch_item(self.config, sku, {'pipeline_error': pipeline_error})
+                fence_patch_item(
+                    self.config, sku, {'pipeline_error': pipeline_error},
+                    expected_generation=expected_generation,
+                )
                 raise HardFailure(f'{sku}: eBay rejected staging: {msg}') from exc
             raise  # transient — base class retries
 
@@ -643,6 +783,7 @@ class EbayStageWorker(QueueWorker):
             ebay_offer['status'] = 'UNPUBLISHED'
         ebay_offer['staged_at']   = datetime.now(timezone.utc).isoformat()
         ebay_offer['staged_price'] = float(price)  # what was actually submitted to eBay
+        ebay_offer['ebay_environment'] = environment
         if provider_effect_id:
             ebay_offer['provider_effect_id'] = provider_effect_id
             ebay_offer['stage_content_identity'] = stage_content_identity
@@ -670,13 +811,26 @@ class EbayStageWorker(QueueWorker):
             'staged_at': ebay_offer['staged_at'],
         }
         item['ebay_submitted'] = ebay_submitted
-        fence_response = fence_ebay_write(
-            self.config,
-            sku,
-            ebay_offer=ebay_offer,
-            ebay_submitted=ebay_submitted,
-            allow_protected=["staged_at"],
-        )
+        try:
+            fence_response = fence_ebay_write(
+                self.config,
+                sku,
+                ebay_offer=ebay_offer,
+                ebay_submitted=ebay_submitted,
+                allow_protected=["staged_at"],
+                expected_generation=expected_generation,
+            )
+        except Exception as exc:
+            raise TreatmentFailure(
+                f'{sku}: provider stage succeeded but canonical projection '
+                f'conflicted; reconciliation required',
+                self._receipt(
+                    payload, sku, outcome='reconciliation_required',
+                    effect_id=provider_effect_id,
+                    reason_code='CANONICAL_PROJECTION_AFTER_STAGE_FAILED',
+                    result={**result, 'projection_error': f'{type(exc).__name__}: {exc}'},
+                ),
+            ) from exc
 
         log.info('ebay_stage: %s staged → offerId=%s (visible in Seller Hub)',
                  sku, result['offer_id'])

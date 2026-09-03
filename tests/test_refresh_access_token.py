@@ -1,12 +1,8 @@
 """audit#1143 #1211-followup — refresh_access_token.py's get_ebay_config()
 gains an explicit is_sandbox parameter.
 
-Previously the only way to select sandbox vs production was the EBAY_ENV
-env var, which forced get_access_token.py's auto-refresh path to bridge its
-explicit is_sandbox intent by mutating process-global os.environ['EBAY_ENV']
-with no restore afterward — a leak into any later call in the same process.
-is_sandbox=None (default) still falls back to EBAY_ENV so token_refresh.py's
-worker call (refresh_access_token(force=True), no is_sandbox) is unaffected.
+The default selection now follows the exact ``ebay_environment`` config value;
+an absent value remains production and an explicit OAuth CLI flag still wins.
 """
 
 import json
@@ -45,13 +41,15 @@ class TestGetEbayConfigIsSandboxParameter:
         assert cfg['app_id'] == 'prod-app-id'
         assert cfg['api_root_ebay'] == 'https://api.ebay.com'
 
-    def test_is_sandbox_none_falls_back_to_ebay_env_sandbox(self, _creds, monkeypatch):
-        monkeypatch.setenv('EBAY_ENV', 'sandbox')
+    def test_is_sandbox_none_follows_config_sandbox(self, _creds, monkeypatch):
+        monkeypatch.setattr(rat, '_load_raw_config', lambda: {
+            'secrets_root': str(_creds), 'ebay_environment': 'sandbox', 'ebay': {},
+        })
         cfg = rat.get_ebay_config(is_sandbox=None)
         assert cfg['app_id'] == 'sbx-app-id'
+        assert cfg['environment'] == 'sandbox'
 
-    def test_is_sandbox_none_falls_back_to_ebay_env_default_production(self, _creds, monkeypatch):
-        monkeypatch.delenv('EBAY_ENV', raising=False)
+    def test_is_sandbox_none_defaults_to_production(self, _creds, monkeypatch):
         cfg = rat.get_ebay_config(is_sandbox=None)
         assert cfg['app_id'] == 'prod-app-id'
 
@@ -59,12 +57,11 @@ class TestGetEbayConfigIsSandboxParameter:
 class TestRefreshAccessTokenIsSandboxPassthrough:
     def test_default_call_unaffected_matches_token_refresh_worker_usage(self, _creds, monkeypatch):
         # token_refresh.py calls refresh_access_token(force=True) with no
-        # is_sandbox — must remain env-var-driven, unchanged.
-        monkeypatch.delenv('EBAY_ENV', raising=False)
-        monkeypatch.setattr(rat, 'load_token_state', lambda: {
+        # is_sandbox; absent config remains production.
+        monkeypatch.setattr(rat, 'load_token_state', lambda _sandbox=False: {
             'access_token': 'old', 'refresh_token': 'rt', 'expiry': 0,
         })
-        monkeypatch.setattr(rat, 'save_token_state', lambda state: None)
+        monkeypatch.setattr(rat, 'save_token_state', lambda state, _sandbox=False: None)
         fake_resp = type('R', (), {
             'raise_for_status': lambda self: None,
             'json': lambda self: {'access_token': 'new', 'expires_in': 7200},
@@ -76,10 +73,10 @@ class TestRefreshAccessTokenIsSandboxPassthrough:
 
     def test_explicit_is_sandbox_overrides_env(self, _creds, monkeypatch):
         monkeypatch.setenv('EBAY_ENV', 'production')
-        monkeypatch.setattr(rat, 'load_token_state', lambda: {
+        monkeypatch.setattr(rat, 'load_token_state', lambda _sandbox=False: {
             'access_token': 'old', 'refresh_token': 'rt', 'expiry': 0,
         })
-        monkeypatch.setattr(rat, 'save_token_state', lambda state: None)
+        monkeypatch.setattr(rat, 'save_token_state', lambda state, _sandbox=False: None)
         fake_resp = type('R', (), {
             'raise_for_status': lambda self: None,
             'json': lambda self: {'access_token': 'new', 'expires_in': 7200},

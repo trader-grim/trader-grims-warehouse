@@ -43,7 +43,11 @@ def _fake_conn(rows):
 
 
 def _mock_common(monkeypatch, rows, enqueue_side_effect=None):
-    monkeypatch.setattr(requeue_mod.state_machine, 'init', lambda dsn: None)
+    def _init(dsn, ebay_environment):
+        assert dsn == 'dbname=state_machine user=tgw'
+        assert ebay_environment == 'production'
+
+    monkeypatch.setattr(requeue_mod.state_machine, 'init', _init)
     monkeypatch.setattr(requeue_mod.state_machine, '_conn', lambda: _fake_conn(rows))
     calls = []
 

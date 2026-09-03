@@ -32,16 +32,32 @@ from typing import Any, Dict, Optional
 import requests
 
 from tgw import quota
+from tgw.apis.ebay._token_io import validate_token_environment
+from tgw.config import ebay_environment_settings, normalize_ebay_environment
 
 log = logging.getLogger(__name__)
 
 _SESSION = requests.Session()
-_BASE    = 'https://api.ebay.com'
+_BASE    = 'https://api.ebay.com'  # compatibility name; production default
 
 _CAPTURE_MAX_BYTES = 5 * 1024 * 1024
 # Dave's directive (s42): ALL inbound data lives under /opt/TGW/incoming — its own
 # top-level structure, group-only permissions. See /opt/TGW/incoming/README.md.
 _DEFAULT_CAPTURE_ROOT = '/opt/TGW/incoming/ebay'
+
+
+def _environment(cfg: Dict[str, Any]) -> str:
+    raw = cfg.get('raw', {}) if isinstance(cfg, dict) else {}
+    value = cfg.get('ebay_environment')
+    if value is None and isinstance(raw, dict):
+        value = raw.get('ebay_environment')
+    return normalize_ebay_environment(value)
+
+
+def _rest_api_root(cfg: Dict[str, Any]) -> str:
+    # Deliberately derive the root from the closed selector. Do not consume a
+    # caller-supplied URL, even if one is present in raw configuration.
+    return ebay_environment_settings(_environment(cfg))['rest_api_root']
 
 
 def capture_response(cfg: Dict[str, Any], api: str, name: str,
@@ -86,7 +102,7 @@ def _counted(cfg: Dict[str, Any], method: str, path: str, **kwargs: Any) -> requ
     capture the raw response."""
     pool = quota.pool_for_rest_path(path)
     quota.precheck(cfg, pool)
-    resp = getattr(_SESSION, method)(f'{_BASE}{path}', **kwargs)
+    resp = getattr(_SESSION, method)(f'{_rest_api_root(cfg)}{path}', **kwargs)
     quota.record(cfg, pool)
     if resp.status_code == 429:
         quota.record_429(cfg, pool, f'{method.upper()} {path}')
@@ -98,10 +114,23 @@ def _counted(cfg: Dict[str, Any], method: str, path: str, **kwargs: Any) -> requ
 
 def load_token(cfg: Dict[str, Any]) -> str:
     """Return the current eBay OAuth access token, raising if missing or expired."""
-    token_path: Path = cfg['ebay_token_path']
+    environment = _environment(cfg)
+    expected_name = ebay_environment_settings(environment)['token_filename']
+    if environment == 'sandbox':
+        token_path_value = cfg.get('ebay_sandbox_token_path', cfg.get('ebay_token_path'))
+        if token_path_value is None:
+            raise ValueError('sandbox eBay configuration has no sandbox token path')
+        token_path = Path(token_path_value)
+    else:
+        token_path = Path(cfg['ebay_token_path'])
+    if token_path.name != expected_name:
+        raise ValueError(
+            f'{environment} eBay configuration must use {expected_name}'
+        )
     if not token_path.exists():
         raise FileNotFoundError(f'eBay token not found: {token_path}')
     state = json.loads(token_path.read_text(encoding='utf-8'))
+    validate_token_environment(state, environment)
     if time.time() >= state.get('expiry', 0):
         raise RuntimeError('eBay access token is expired — token_refresh worker should fix this')
     return state['access_token']

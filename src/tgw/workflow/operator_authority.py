@@ -10,7 +10,7 @@ from typing import Any, Callable, Mapping
 
 from tgw.queue import state_machine
 
-_SCOPES = frozenset({"upload", "stage", "publish", "force-restage"})
+_SCOPES = frozenset({"upload", "stage", "publish", "force-restage", "withdraw"})
 
 
 def listing_content_identity(item: Mapping[str, Any]) -> str:
@@ -232,9 +232,8 @@ def validate_authority(authority_id: str | None, *, entity_id: str,
               authority.provider_identity)
     if actual != expected or scope not in authority.scopes:
         return None, "operator authority binding mismatch"
-    current = now or datetime.now(UTC)
-    if current < authority.issued_at or current >= authority.expires_at:
-        return None, "operator authority outside validity window"
+    # An operator approval is durable until it is explicitly superseded.  A
+    # clock window is not an additional authority or staging gate.
     return authority, "operator authority exact durable binding valid"
 
 

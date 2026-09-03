@@ -9,6 +9,7 @@ import shutil
 from pathlib import Path
 from typing import Iterable
 
+from tgw.config import configured_ebay_environment
 from tgw.logging import announce_script_run, setup_logging
 from tgw.queue import state_machine
 
@@ -217,7 +218,10 @@ def main() -> int:
         # to fire the coalesced rebuild. Same dedupe key/coalescing every
         # other writer uses (A7).
         try:
-            state_machine.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+            state_machine.init(
+                cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'),
+                configured_ebay_environment(cfg),
+            )
             state_machine.enqueue_catalog_rebuild('photo_history_recovery')
             logging.info('photo_history_recovery: enqueued catalog_rebuild after %d copies', copied)
         except Exception as exc:

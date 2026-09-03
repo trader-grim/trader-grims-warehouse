@@ -103,6 +103,27 @@ def pin_draft_to_live(doc: Dict[str, Any]) -> Dict[str, Any]:
         dl["quantity"] = live_off["availableQuantity"]
     if live_off.get("listingDescription"):
         dl["listing_description"] = live_off["listingDescription"]
+    live_policies = live_off.get("listingPolicies") or {}
+    raw_best_offer_terms = (
+        live_policies.get("bestOfferTerms")
+        if isinstance(live_policies, dict)
+        else None
+    )
+    best_offer_terms = (
+        raw_best_offer_terms if isinstance(raw_best_offer_terms, dict) else {}
+    )
+    live_best_offer_enabled = best_offer_terms.get("bestOfferEnabled")
+    if isinstance(live_best_offer_enabled, bool):
+        dl["best_offer_enabled"] = live_best_offer_enabled
+    for provider_name, draft_name in (
+        ("autoAcceptPrice", "best_offer_auto_accept_price"),
+        ("autoDeclinePrice", "best_offer_auto_decline_price"),
+    ):
+        provider_price = best_offer_terms.get(provider_name)
+        if isinstance(provider_price, dict):
+            provider_price = provider_price.get("value")
+        if provider_price not in (None, ""):
+            dl[draft_name] = provider_price
 
     return {
         "draft_listing": dl,

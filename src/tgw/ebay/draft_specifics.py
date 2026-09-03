@@ -78,6 +78,7 @@ __all__ = [
     "get_ebay_aspects_history",
     "get_ebay_aspects_updated_at",
     "wrap_ebay_specifics",
+    "normalize_legacy_ebay_specifics",
     "set_ebay_aspects",
     "remove_ebay_aspects",
 ]
@@ -170,6 +171,32 @@ def wrap_ebay_specifics(
         "updated_at_backfilled": bool(backfilled),
         "fields": dict(fields),
     }
+
+
+def normalize_legacy_ebay_specifics(
+    item: Dict[str, Any],
+    *,
+    source: str,
+    applied_by: str = "system",
+) -> Optional[Dict[str, Any]]:
+    """Return a full draft with legacy bare specifics wrapped, or ``None``.
+
+    This is the sanctioned shape-inspection boundary for callers that must
+    know whether a subsequent generic item PATCH would normalize Set B.  The
+    returned draft preserves every sibling field and provenance history.  The
+    function is pure; callers remain responsible for a fenced write.
+    """
+    draft = item.get("draft_listing")
+    if not isinstance(draft, dict):
+        return None
+    raw = draft.get("item_specifics")
+    if not isinstance(raw, dict) or is_envelope(raw):
+        return None
+    normalized = dict(draft)
+    normalized.update(set_ebay_aspects(
+        item, raw, source=source, applied_by=applied_by,
+    ))
+    return normalized
 
 
 def set_ebay_aspects(

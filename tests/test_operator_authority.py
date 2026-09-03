@@ -63,7 +63,22 @@ def test_issue_uses_server_opaque_id_and_exact_immutable_insert():
     assert cursor.calls[0][1][0] == authority_id
 
 
-def test_lookup_validation_rejects_binding_scope_expiry_and_supersession():
+def test_issue_accepts_exact_provider_withdrawal_scope():
+    cursor = Cursor()
+    now = datetime.now(UTC)
+    authority_id = issue_authority(
+        operator_identity="operator:dave", surface="web:item", entity_id="SKU-1",
+        goal_profile_id="tgw.ebay_withdrawn", goal_profile_version="1",
+        object_generation="gen", pre_authority_condition_hash="condition",
+        content_identity="content", provider_identity="ebay:account",
+        scopes=("withdraw",), issued_at=now, expires_at=now + timedelta(minutes=5),
+        connection=Connection(cursor),
+    )
+    assert cursor.calls[0][1][0] == authority_id
+    assert cursor.calls[0][1][10] == ["withdraw"]
+
+
+def test_lookup_validation_rejects_binding_scope_and_supersession_but_not_expiry():
     exact = authority()
     assert validate_authority("opaque-id", scope="stage", lookup=lambda _: exact,
                               **binding())[0] == exact
@@ -77,7 +92,7 @@ def test_lookup_validation_rejects_binding_scope_expiry_and_supersession():
                               **binding())[0] is None
     assert validate_authority("opaque-id", scope="stage",
                               lookup=lambda _: authority(expires_at=datetime.now(UTC)),
-                              **binding())[0] is None
+                              **binding())[0] is not None
 
 
 def test_provider_worker_uses_same_authoritative_validation_seam():

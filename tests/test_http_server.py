@@ -26,6 +26,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import psycopg2.errors
 import pytest
@@ -1075,6 +1076,54 @@ def test_generic_patch_cannot_fabricate_workflow_evidence(env, field, value):
     assert response.json()["detail"]["fields"] == [field]
 
 
+def test_generation_bound_machine_patch_commits_once_and_rejects_stale_replay(
+    env, monkeypatch,
+):
+    import tgw.sqlite_catalog as sqlite_catalog
+    from tgw.item_mutation import item_generation
+
+    monkeypatch.setattr(sqlite_catalog, "upsert_catalog_row", lambda *_: {"ok": True})
+
+    sku = "tgw20260401000000010"
+    _seed_live_item(env, sku)
+    path = env["itemdata_root"] / sku / f"{sku}.json"
+    original = json.loads(path.read_text(encoding="utf-8"))
+    expected = item_generation(original)
+
+    committed = env["client"].patch(
+        f"/api/items/{sku}",
+        json={
+            "expected_generation": expected,
+            "fields": {
+                "draft_listing": {"title": "Generation-bound worker title"},
+                "status": "worker-projected",
+            },
+        },
+        headers=WORKER_HEADERS,
+    )
+
+    assert committed.status_code == 200, committed.text
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert committed.json()["resulting_generation"] == item_generation(document)
+    assert document["draft_listing"]["title"] == "Generation-bound worker title"
+    assert document["status"] == "worker-projected"
+
+    stale = env["client"].patch(
+        f"/api/items/{sku}",
+        json={
+            "expected_generation": expected,
+            "fields": {"status": "stale-overwrite"},
+        },
+        headers=WORKER_HEADERS,
+    )
+
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "generation_conflict"
+    assert json.loads(path.read_text(encoding="utf-8"))["status"] == (
+        "worker-projected"
+    )
+
+
 def test_forged_worker_header_does_not_authorize_machine_envelope(env):
     sku = "tgw20260401000000011"
     _seed_live_item(env, sku)
@@ -1130,7 +1179,11 @@ def test_legacy_end_listing_routes_are_rejected_before_provider_effect(env, monk
     )
     from tgw.apis.ebay import trading
 
-    assert not hasattr(trading, "end_item")
+    monkeypatch.setattr(
+        trading,
+        "end_item",
+        lambda *_args, **_kwargs: effects.append("trading-end"),
+    )
     direct = env["client"].post(
         f"/api/items/{sku}/action", json={"action": "ebay_end_listing"}, headers=AUTH_HEADERS,
     )
@@ -1936,7 +1989,7 @@ def test_ebay_write_protects_price_comps_from_worker_overwrite(env):
     doc["ebay_offer"] = {"offer_id": "o1", "price_comps": {"median": 12.5}}
     doc_path.write_text(json.dumps(doc))
 
-    r = client.post(f"/api/items/{SKU_A}/ebay-write", headers=AUTH_HEADERS, json={"ebay_offer": {"offer_id": "o1", "price_comps": {"median": 999}}})
+    r = client.post(f"/api/items/{SKU_A}/ebay-write", headers=WORKER_HEADERS, json={"ebay_offer": {"offer_id": "o1", "price_comps": {"median": 999}}})
     assert r.status_code == 200
     doc = json.loads(doc_path.read_text())
     assert doc["ebay_offer"]["price_comps"]["median"] == 12.5
@@ -1952,7 +2005,7 @@ def test_ebay_write_allow_protected_lets_owner_refresh_price_comps(env):
     doc["ebay_offer"] = {"offer_id": "o1", "price_comps": {"median": 12.5}}
     doc_path.write_text(json.dumps(doc))
 
-    r = client.post(f"/api/items/{SKU_A}/ebay-write", headers=AUTH_HEADERS, json={"ebay_offer": {"offer_id": "o1", "price_comps": {"median": 999}}, "allow_protected": ["price_comps"]})
+    r = client.post(f"/api/items/{SKU_A}/ebay-write", headers=WORKER_HEADERS, json={"ebay_offer": {"offer_id": "o1", "price_comps": {"median": 999}}, "allow_protected": ["price_comps"]})
     assert r.status_code == 200
     doc = json.loads(doc_path.read_text())
     assert doc["ebay_offer"]["price_comps"]["median"] == 999
@@ -2459,11 +2512,11 @@ def test_health_fail_503(client, monkeypatch):
     assert "postgres" in detail["failed"]
 
 
-def test_health_dead_letter_count_in_response(client, monkeypatch, queue_rows):
+def test_health_dead_letter_count_in_response(client, monkeypatch):
     import tgw.health as health
 
     monkeypatch.setattr(health, "check_all", lambda cfg, **kw: dict(_HEALTH_OK))
-    queue_rows.append((7,))  # fetchone() returns (7,) → dead_letter_count = 7
+    monkeypatch.setattr(http_server.state_machine, "dead_letter_count", lambda: 7)
     r = client.get("/api/health", headers=AUTH_HEADERS)
     assert r.status_code == 200
     assert r.json()["dead_letter_count"] == 7
@@ -5674,6 +5727,29 @@ def test_requeue_job_success(env, monkeypatch):
     assert enqueued == {}
 
 
+def test_requeue_job_rejects_other_ebay_environment(env, monkeypatch):
+    env["cfg"]["ebay_environment"] = "sandbox"
+    rows = [{
+        "job_id": "production-job", "queue_name": "ebay_draft",
+        "payload_json": {"sku": SKU_A}, "state": "dead_letter",
+        "max_attempts": 3, "entity_type": "item", "entity_id": SKU_A,
+        "operation": "run", "handler_family": "ebay_draft", "priority": 30,
+    }]
+    monkeypatch.setattr(
+        http_server.psycopg2, "connect", lambda *a, **k: _FakeConn(rows),
+    )
+    enqueue = MagicMock()
+    monkeypatch.setattr(http_server.state_machine, "enqueue_job", enqueue)
+
+    response = env["client"].post(
+        "/api/jobs/production-job/requeue", headers=AUTH_HEADERS,
+    )
+
+    assert response.status_code == 409
+    assert "different configured eBay environment" in response.json()["detail"]
+    enqueue.assert_not_called()
+
+
 def test_every_http_sku_enqueue_uses_canonical_item_identity():
     """Every literal per-SKU HTTP enqueue obeys the queue manifest."""
     source_path = Path(http_server.__file__)
@@ -5749,7 +5825,7 @@ def test_cancel_job_not_found(env, monkeypatch):
 
 def test_cancel_job_wrong_state(env, monkeypatch):
     """Cancel returns 400 when job is running (not cancellable via this endpoint)."""
-    rows = [{"state": "running"}]
+    rows = [{"state": "running", "queue_name": "catalog_rebuild"}]
     monkeypatch.setattr(
         http_server.psycopg2,
         "connect",
@@ -5766,7 +5842,9 @@ def test_cancel_job_success(env, monkeypatch):
 
     def _connect(*a, **k):
         call_count[0] += 1
-        rows = [{"state": "dead_letter"}] if call_count[0] == 1 else []
+        rows = [
+            {"state": "dead_letter", "queue_name": "catalog_rebuild"}
+        ] if call_count[0] == 1 else []
         return _FakeConn(rows)
 
     monkeypatch.setattr(http_server.psycopg2, "connect", _connect)
@@ -5787,7 +5865,9 @@ def test_cancel_job_race_with_worker_lease_returns_409(env, monkeypatch):
     def _connect(*a, **k):
         call_count[0] += 1
         if call_count[0] == 1:
-            return _FakeConn([{"state": "dead_letter"}])
+            return _FakeConn([{
+                "state": "dead_letter", "queue_name": "catalog_rebuild",
+            }])
         return _FakeConn([], rowcount=0)
 
     monkeypatch.setattr(http_server.psycopg2, "connect", _connect)
@@ -5844,7 +5924,10 @@ def test_system_info_returns_disk_token_sync_states(env, monkeypatch):
     monkeypatch.setattr(
         http_server.psycopg2,
         "connect",
-        lambda *a, **k: _FakeConn([("succeeded", 42), ("dead_letter", 3)]),
+        lambda *a, **k: _FakeConn([
+            ("catalog_rebuild", "succeeded", 42),
+            ("catalog_rebuild", "dead_letter", 3),
+        ]),
     )
 
     # Put a fake eBay token in the cfg
@@ -6521,7 +6604,7 @@ def test_store_category_refresh_persists_and_preserves_last_known_good(env, monk
         {"id": "222", "name": "Electronics"},
     ]
     monkeypatch.setattr(trading, "get_store_categories", lambda _cfg: expected)
-    http_server._LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+    http_server._LIVE_STORE_CATS_CACHE.clear()
 
     refreshed, fallback = http_server._live_store_categories(env["cfg"])
     assert refreshed == expected
@@ -6533,21 +6616,21 @@ def test_store_category_refresh_persists_and_preserves_last_known_good(env, monk
     assert before["refreshed_at"]
 
     monkeypatch.setattr(trading, "get_store_categories", lambda _cfg: [{"id": "333", "name": ""}])
-    http_server._LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+    http_server._LIVE_STORE_CATS_CACHE.clear()
     retained, fallback = http_server._live_store_categories(env["cfg"])
     assert retained == expected
     assert fallback is True
     assert json.loads(snapshot.read_text()) == before
 
     monkeypatch.setattr(trading, "get_store_categories", lambda _cfg: [{"id": 333, "name": "Books"}])
-    http_server._LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+    http_server._LIVE_STORE_CATS_CACHE.clear()
     retained, fallback = http_server._live_store_categories(env["cfg"])
     assert retained == expected
     assert fallback is True
     assert json.loads(snapshot.read_text()) == before
 
     monkeypatch.setattr(trading, "get_store_categories", lambda _cfg: (_ for _ in ()).throw(RuntimeError("offline")))
-    http_server._LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
+    http_server._LIVE_STORE_CATS_CACHE.clear()
     retained, fallback = http_server._live_store_categories(env["cfg"])
     assert retained == expected
     assert fallback is True
@@ -6624,7 +6707,7 @@ def test_fulfillment_refresh_persists_and_preserves_last_known_good(env, monkeyp
         {"id": "POLICY-2", "name": "Large parcel"},
     ]
     monkeypatch.setattr(sync, "get_fulfillment_policies_full", lambda _cfg: expected_rows)
-    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.clear()
 
     refreshed, fallback = http_server._live_fulfillment_policies(env["cfg"])
     assert refreshed == {"POLICY-1": "Small parcel", "POLICY-2": "Large parcel"}
@@ -6635,25 +6718,179 @@ def test_fulfillment_refresh_persists_and_preserves_last_known_good(env, monkeyp
     assert before["refreshed_at"]
 
     monkeypatch.setattr(sync, "get_fulfillment_policies_full", lambda _cfg: [{"id": "POLICY-3", "name": ""}])
-    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.clear()
     retained, fallback = http_server._live_fulfillment_policies(env["cfg"])
     assert retained == refreshed
     assert fallback is True
     assert json.loads(snapshot.read_text()) == before
 
     monkeypatch.setattr(sync, "get_fulfillment_policies_full", lambda _cfg: [{"id": ["POLICY-3"], "name": "Bad"}])
-    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.clear()
     retained, fallback = http_server._live_fulfillment_policies(env["cfg"])
     assert retained == refreshed
     assert fallback is True
     assert json.loads(snapshot.read_text()) == before
 
     monkeypatch.setattr(sync, "get_fulfillment_policies_full", lambda _cfg: (_ for _ in ()).throw(RuntimeError("offline")))
-    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    http_server._LIVE_FULFILLMENT_POLICIES_CACHE.clear()
     retained, fallback = http_server._live_fulfillment_policies(env["cfg"])
     assert retained == refreshed
     assert fallback is True
     assert json.loads(snapshot.read_text()) == before
+
+
+def test_return_policy_snapshot_is_validated_independently_from_fulfillment(env):
+    catalog_root = env["groups_path"].parent / "return-policy-snapshot"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    snapshot = catalog_root / "ebay-fulfillment-policies.json"
+    snapshot.write_text(
+        json.dumps(
+            {
+                "refreshed_at": "2026-08-22T12:00:00Z",
+                "fulfillment": {"SHIP-1": "Small parcel"},
+                "return": {"RETURN-1": "Thirty day returns"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    policies, refreshed_at, error = http_server._return_policies_snapshot(env["cfg"])
+    assert policies == {"RETURN-1": "Thirty day returns"}
+    assert refreshed_at == "2026-08-22T12:00:00Z"
+    assert error is None
+
+    snapshot.write_text(
+        json.dumps(
+            {
+                "refreshed_at": "2026-08-22T12:00:00Z",
+                "fulfillment": {"SHIP-1": "Small parcel"},
+                "return": {"RETURN-1": ["not", "a", "name"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    policies, refreshed_at, error = http_server._return_policies_snapshot(env["cfg"])
+    assert policies == {}
+    assert refreshed_at is None
+    assert "valid" in error
+    assert http_server._fulfillment_policies_snapshot(env["cfg"]) == (
+        {"SHIP-1": "Small parcel"},
+        "2026-08-22T12:00:00Z",
+        None,
+    )
+
+
+def test_return_policy_refresh_persists_and_preserves_last_known_good(env, monkeypatch):
+    from tgw.ebay import sync
+
+    catalog_root = env["groups_path"].parent / "return-policy-refresh"
+    catalog_root.mkdir()
+    env["cfg"]["catalog_root"] = catalog_root
+    snapshot = catalog_root / "ebay-fulfillment-policies.json"
+    snapshot.write_text(
+        json.dumps({"fulfillment": {"SHIP-1": "Small parcel"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sync,
+        "get_return_policies_full",
+        lambda _cfg: [
+            {"id": "RETURN-1", "name": "Thirty day returns"},
+            {"id": "RETURN-2", "name": "No returns"},
+        ],
+    )
+    http_server._LIVE_RETURN_POLICIES_CACHE.clear()
+
+    refreshed, fallback = http_server._live_return_policies(env["cfg"])
+    assert refreshed == {
+        "RETURN-1": "Thirty day returns",
+        "RETURN-2": "No returns",
+    }
+    assert fallback is False
+    before = json.loads(snapshot.read_text())
+    assert before["fulfillment"] == {"SHIP-1": "Small parcel"}
+    assert before["return"] == refreshed
+    assert before["return_refreshed_at"]
+
+    monkeypatch.setattr(
+        sync,
+        "get_return_policies_full",
+        lambda _cfg: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+    http_server._LIVE_RETURN_POLICIES_CACHE.clear()
+    retained, fallback = http_server._live_return_policies(env["cfg"])
+    assert retained == refreshed
+    assert fallback is True
+    assert json.loads(snapshot.read_text()) == before
+
+
+def test_operator_object_reads_selector_snapshots_without_provider_calls(env, monkeypatch):
+    _write_item(
+        env["itemdata_root"],
+        SKU_A,
+        {
+            "sku": SKU_A,
+            "title": "Selector-backed item",
+            "draft_listing": {
+                "title": "Selector-backed item",
+                "category_id": "123",
+                "condition_enum": "USED_GOOD",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        http_server,
+        "ebay_category_context",
+        lambda *args, **kwargs: {
+            "conditions": [{"enum": "USED_GOOD", "label": "Used - Good"}],
+            "aspects": [],
+        },
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_store_categories_snapshot",
+        lambda _cfg: ([], None, "snapshot unavailable"),
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_store_categories_from_groups",
+        lambda _cfg: [{"id": "STORE-1", "name": "Books"}],
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_fulfillment_policies_snapshot",
+        lambda _cfg: ({"SHIP-1": "Small parcel"}, "2026-08-22T12:00:00Z", None),
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_return_policies_snapshot",
+        lambda _cfg: ({"RETURN-1": "Thirty day returns"}, "2026-08-22T12:00:00Z", None),
+    )
+    for name in (
+        "_live_store_categories",
+        "_live_fulfillment_policies",
+        "_live_return_policies",
+    ):
+        monkeypatch.setattr(
+            http_server,
+            name,
+            lambda *_args, _name=name, **_kwargs: pytest.fail(
+                f"item rendering called provider refresh {_name}"
+            ),
+        )
+
+    published = http_server._current_item_operator_object(SKU_A)
+    fields = published["field_schema"]["listing_fields"]
+    assert fields["store_category_id"]["options"] == [
+        {"value": "STORE-1", "label": "Books"},
+    ]
+    assert fields["shipping_profile"]["options"] == [
+        {"value": "SHIP-1", "label": "Small parcel"},
+    ]
+    assert fields["return_policy_id"]["options"] == [
+        {"value": "RETURN-1", "label": "Thirty day returns"},
+    ]
 
 
 def test_store_categories_get_reads_snapshot_without_live_fetch(env, monkeypatch):
@@ -6703,7 +6940,7 @@ def test_store_categories_get_reads_snapshot_without_live_fetch(env, monkeypatch
     assert "valid" in response.json()["error"]
 
 
-def test_reference_data_refresh_endpoint_reconciles_both_snapshots_once(env, monkeypatch):
+def test_reference_data_refresh_endpoint_reconciles_all_snapshots_once(env, monkeypatch):
     calls = []
     monkeypatch.setattr(
         http_server,
@@ -6715,6 +6952,11 @@ def test_reference_data_refresh_endpoint_reconciles_both_snapshots_once(env, mon
         "_live_fulfillment_policies",
         lambda _cfg: calls.append("fulfillment") or ({"POLICY-1": "Small parcel"}, False),
     )
+    monkeypatch.setattr(
+        http_server,
+        "_live_return_policies",
+        lambda _cfg: calls.append("return") or ({"RETURN-1": "Thirty day returns"}, False),
+    )
     _login(env["client"])
     response = env["client"].post("/api/ebay/reference-data/refresh")
     assert response.status_code == 200
@@ -6722,8 +6964,9 @@ def test_reference_data_refresh_endpoint_reconciles_both_snapshots_once(env, mon
         "ok": True,
         "store_categories": {"count": 1, "preserved_snapshot": False},
         "fulfillment_policies": {"count": 1, "preserved_snapshot": False},
+        "return_policies": {"count": 1, "preserved_snapshot": False},
     }
-    assert calls == ["store", "fulfillment"]
+    assert calls == ["store", "fulfillment", "return"]
 
 
 def _retired_test_item_detail_preserves_stored_selector_ids_when_snapshot_unavailable(env):

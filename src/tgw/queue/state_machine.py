@@ -14,6 +14,8 @@ from typing import Any, Callable, Dict, Generator, List, Optional
 import psycopg2
 import psycopg2.extras
 
+from tgw.config import normalize_ebay_environment
+
 log = logging.getLogger(__name__)
 
 EVALUATION_EVENT_NOT_REQUIRED = "evaluation-event-not-required"
@@ -21,6 +23,161 @@ _MAX_RUNNING_CHECKPOINT_BYTES = 256 * 1024
 
 # Module-level DSN — set by init() before any worker starts.
 _DSN: str = 'dbname=state_machine user=tgw'
+
+# Production and sandbox intentionally share one state-machine database.  The
+# queue route therefore forms part of the provider boundary: a sandbox worker
+# must never be able to lease a production row merely because both treatments
+# use the logical name ``ebay_stage`` (or another eBay pipeline queue).
+#
+# Production retains every historical queue name and dedupe key unchanged.
+# Sandbox is the opt-in successor route.  The configured environment is
+# process-wide for the same reason as _DSN: one worker process has one exact
+# runtime config and one provider target.
+_EBAY_QUEUE_ENVIRONMENT = 'production'
+_EBAY_SANDBOX_QUEUE_SUFFIX = '@sandbox'
+_EBAY_SANDBOX_DEDUPE_PREFIX = 'ebay-environment:sandbox:'
+
+# These local workflow treatments participate in the eBay listing chain even
+# though their logical queue names do not start with ``ebay_``.  Other queues
+# remain byte-for-byte compatible and are never environment-routed.
+_EBAY_ENVIRONMENT_SCOPED_LOCAL_QUEUES = frozenset({
+    'ai_identify',
+    'normalize_condition',
+    'token_refresh',
+    'workflow_evaluate',
+})
+
+
+class EbayQueueEnvironmentError(ValueError):
+    """An eBay queue manifest conflicts with the process environment."""
+
+
+def logical_queue_name(queue_name: str) -> str:
+    """Return the stable contract name for an environment-routed queue."""
+    if queue_name.endswith(_EBAY_SANDBOX_QUEUE_SUFFIX):
+        candidate = queue_name[:-len(_EBAY_SANDBOX_QUEUE_SUFFIX)]
+        if (
+            candidate.startswith('ebay_')
+            or candidate in _EBAY_ENVIRONMENT_SCOPED_LOCAL_QUEUES
+        ):
+            return candidate
+    return queue_name
+
+
+def is_ebay_environment_scoped_queue(queue_name: str) -> bool:
+    """Whether *queue_name* is part of an eBay provider workflow."""
+    logical_name = logical_queue_name(queue_name)
+    return (
+        logical_name.startswith('ebay_')
+        or logical_name in _EBAY_ENVIRONMENT_SCOPED_LOCAL_QUEUES
+    )
+
+
+def queue_name_for_environment(queue_name: str, environment: str) -> str:
+    """Resolve one logical queue to its closed production/sandbox route.
+
+    Production deliberately remains unsuffixed for installed-state and
+    backlog compatibility.  The helper is idempotent so durable sandbox rows
+    can be inspected or replayed without acquiring a second suffix.
+    """
+    selected = normalize_ebay_environment(environment)
+    logical_name = logical_queue_name(queue_name)
+    if not is_ebay_environment_scoped_queue(logical_name):
+        return logical_name
+    if selected == 'sandbox':
+        return f'{logical_name}{_EBAY_SANDBOX_QUEUE_SUFFIX}'
+    return logical_name
+
+
+def queue_names_equivalent(actual: Any, logical_name: Any) -> bool:
+    """Compare a durable physical queue name with a contract queue name."""
+    return (
+        isinstance(actual, str)
+        and isinstance(logical_name, str)
+        and logical_queue_name(actual) == logical_queue_name(logical_name)
+    )
+
+
+def queue_name_matches_environment(
+    actual: Any, logical_name: Any, environment: Any,
+) -> bool:
+    """Require the exact physical route for a logical queue/environment."""
+    if not isinstance(actual, str) or not isinstance(logical_name, str):
+        return False
+    try:
+        selected = normalize_ebay_environment(environment)
+    except ValueError:
+        return False
+    return actual == queue_name_for_environment(logical_name, selected)
+
+
+def queue_name_visible_in_environment(
+    queue_name: Any, environment: Any = None,
+) -> bool:
+    """Whether one durable queue row belongs to the selected eBay view.
+
+    Non-eBay queues remain shared and visible in both environments.  Only the
+    physical routes owned by the eBay workflow are filtered.
+    """
+    if not isinstance(queue_name, str):
+        return False
+    logical_name = logical_queue_name(queue_name)
+    if not is_ebay_environment_scoped_queue(logical_name):
+        return True
+    selected = (
+        _EBAY_QUEUE_ENVIRONMENT
+        if environment is None
+        else normalize_ebay_environment(environment)
+    )
+    return queue_name_matches_environment(queue_name, logical_name, selected)
+
+
+def _scope_ebay_dedupe_key(
+    dedupe_key: Optional[str], environment: str,
+) -> Optional[str]:
+    if not dedupe_key or environment == 'production':
+        return dedupe_key
+    if dedupe_key.startswith(_EBAY_SANDBOX_DEDUPE_PREFIX):
+        return dedupe_key
+    return f'{_EBAY_SANDBOX_DEDUPE_PREFIX}{dedupe_key}'
+
+
+def _route_queue_manifest(
+    queue_name: str,
+    payload: Dict[str, Any],
+    dedupe_key: Optional[str],
+) -> tuple[str, Dict[str, Any], Optional[str]]:
+    """Bind an eBay manifest to the exact process environment.
+
+    Legacy production callers may omit ``ebay_environment`` and retain their
+    installed queue/dedupe identities.  Sandbox callers are always stamped so
+    their durable row cannot later be interpreted as an unbound production
+    job.  An explicit selector that disagrees with the normalized process
+    configuration is rejected before any database write.
+    """
+    logical_name = logical_queue_name(queue_name)
+    if not is_ebay_environment_scoped_queue(logical_name):
+        return logical_name, payload, dedupe_key
+
+    configured = normalize_ebay_environment(_EBAY_QUEUE_ENVIRONMENT)
+    supplied = payload.get('ebay_environment')
+    if supplied is not None:
+        supplied = normalize_ebay_environment(supplied)
+        if supplied != configured:
+            raise EbayQueueEnvironmentError(
+                f'eBay queue {logical_name!r} targets {supplied!r}, but this '
+                f'process is configured for {configured!r}'
+            )
+    environment = supplied or configured
+    routed_payload = payload
+    if environment == 'sandbox' and payload.get('ebay_environment') != environment:
+        routed_payload = dict(payload)
+        routed_payload['ebay_environment'] = environment
+    return (
+        queue_name_for_environment(logical_name, environment),
+        routed_payload,
+        _scope_ebay_dedupe_key(dedupe_key, environment),
+    )
 
 # PP-STATEMACHINE-001 Phase 2 (todo #1608) — queue-priority config, same
 # 'defaults'/'use_default' shape/convention as tgw-models.json. Loaded lazily
@@ -82,10 +239,12 @@ def resolve_priority(queue_name: str, operation: str) -> int:
     return 100
 
 
-def init(dsn: str) -> None:
-    """Set the PostgreSQL DSN for all state-machine operations."""
-    global _DSN, _ai_usage_table_ready
+def init(dsn: str, ebay_environment: Any = None) -> None:
+    """Set the PostgreSQL DSN and optional closed eBay queue environment."""
+    global _DSN, _ai_usage_table_ready, _EBAY_QUEUE_ENVIRONMENT
     _DSN = dsn
+    if ebay_environment is not None:
+        _EBAY_QUEUE_ENVIRONMENT = normalize_ebay_environment(ebay_environment)
     _ai_usage_table_ready = False
 
 
@@ -328,10 +487,14 @@ def enqueue_job(
             "dedupe_key=, or dedupe_key_exempt=True with a code comment "
             "explaining why this call is a genuine, reviewed exception."
         )
-    handler_family = handler_family or queue_name
-    entity_id = entity_id or queue_name
+    logical_name = logical_queue_name(queue_name)
+    handler_family = handler_family or logical_name
+    entity_id = entity_id or logical_name
     if priority is None:
-        priority = resolve_priority(queue_name, operation)
+        priority = resolve_priority(logical_name, operation)
+    queue_name, payload, dedupe_key = _route_queue_manifest(
+        logical_name, payload, dedupe_key,
+    )
     nb = None
     if not_before is not None:
         from datetime import datetime, timezone
@@ -500,8 +663,16 @@ def claim_queue_jobs(
     lease_owner: str,
     lease_seconds: int = 300,
     limit: int = 1,
+    *,
+    ebay_environment: Any = None,
 ) -> List[Dict[str, Any]]:
-    """Lease up to `limit` queued jobs. Returns list of row dicts."""
+    """Lease up to `limit` queued jobs from one exact environment route."""
+    selected_environment = (
+        _EBAY_QUEUE_ENVIRONMENT
+        if ebay_environment is None
+        else normalize_ebay_environment(ebay_environment)
+    )
+    queue_name = queue_name_for_environment(queue_name, selected_environment)
     with _conn() as con:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -1255,23 +1426,29 @@ def complete_treatment_and_enqueue_evaluation(
             }
             for key in (
                 "operator_authority_id", "operator_identity", "operator_surface",
-                "pre_authority_condition_hash",
+                "pre_authority_condition_hash", "ebay_environment", "ebay_endpoint",
             ):
                 value = payload.get(key)
                 if isinstance(value, str) and value:
                     event_payload[key] = value
+            event_queue, event_payload, event_dedupe_key = _route_queue_manifest(
+                "workflow_evaluate",
+                event_payload,
+                f"workflow-evaluate:{job_id}",
+            )
             cur.execute(
                 """
                 INSERT INTO queue_jobs
                     (queue_name, entity_type, entity_id, operation,
                      handler_family, priority, payload_json, dedupe_key,
                      max_attempts)
-                VALUES ('workflow_evaluate', 'item', %s, 'evidence_changed',
+                VALUES (%s, 'item', %s, 'evidence_changed',
                         'workflow_evaluate', %s, %s::jsonb, %s, 3)
                 RETURNING job_id::text
                 """,
-                (entity_id, resolve_priority("workflow_evaluate", "evidence_changed"),
-                 json.dumps(event_payload), f"workflow-evaluate:{job_id}"),
+                (event_queue, entity_id,
+                 resolve_priority("workflow_evaluate", "evidence_changed"),
+                 json.dumps(event_payload), event_dedupe_key),
             )
             return cur.fetchone()[0]
 
@@ -1323,6 +1500,12 @@ def complete_treatment_and_schedule_timer(
                     f"lost running lease while scheduling timer for job {job_id}"
                 )
             entity_type, entity_id = completed
+            timer_logical_queue = logical_queue_name(timer["queue_name"])
+            timer_queue, timer_payload, timer_dedupe_key = _route_queue_manifest(
+                timer_logical_queue,
+                timer["payload"],
+                timer["dedupe_key"],
+            )
             cur.execute(
                 """
                 INSERT INTO queue_jobs
@@ -1333,11 +1516,11 @@ def complete_treatment_and_schedule_timer(
                         %s, %s, %s)
                 RETURNING job_id::text
                 """,
-                (timer["queue_name"], entity_type, entity_id,
-                 timer["queue_name"],
-                 resolve_priority(timer["queue_name"], "timer_elapsed"),
-                 json.dumps(timer["payload"]), not_before,
-                 timer["dedupe_key"], max_attempts),
+                (timer_queue, entity_type, entity_id,
+                 timer_logical_queue,
+                 resolve_priority(timer_logical_queue, "timer_elapsed"),
+                 json.dumps(timer_payload), not_before,
+                 timer_dedupe_key, max_attempts),
             )
             return cur.fetchone()[0]
 
@@ -1469,8 +1652,19 @@ def recover_expired_jobs() -> int:
             return cur.fetchone()[0]
 
 
-def queue_depths() -> Dict[str, int]:
-    """Return count of queued jobs per queue_name."""
+def queue_depths(*, ebay_environment: Any = None) -> Dict[str, int]:
+    """Return queued depth for the caller's exact environment route.
+
+    Environment-scoped physical names are projected back to their logical
+    contract names so existing recurring-worker startup checks keep working.
+    Rows belonging to the other eBay environment are deliberately invisible.
+    Non-eBay queues remain unfiltered.
+    """
+    selected_environment = (
+        _EBAY_QUEUE_ENVIRONMENT
+        if ebay_environment is None
+        else normalize_ebay_environment(ebay_environment)
+    )
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(
@@ -1481,7 +1675,17 @@ def queue_depths() -> Dict[str, int]:
                  GROUP BY queue_name
                 """
             )
-            return {row[0]: row[1] for row in cur.fetchall()}
+            depths: Dict[str, int] = {}
+            for physical_name, count in cur.fetchall():
+                logical_name = logical_queue_name(physical_name)
+                if is_ebay_environment_scoped_queue(logical_name):
+                    expected = queue_name_for_environment(
+                        logical_name, selected_environment,
+                    )
+                    if physical_name != expected:
+                        continue
+                depths[logical_name] = depths.get(logical_name, 0) + count
+            return depths
 
 
 def has_pending_job_with_payload(
@@ -1490,6 +1694,19 @@ def has_pending_job_with_payload(
     """Return whether an exact pending dedupe identity has an accepted shape."""
     if not accepted_payloads:
         return False
+    routed_manifests = [
+        _route_queue_manifest(queue_name, payload, dedupe_key)
+        for payload in accepted_payloads
+    ]
+    routed_queue_name, _, routed_dedupe_key = routed_manifests[0]
+    if any(
+        routed_queue != routed_queue_name or routed_key != routed_dedupe_key
+        for routed_queue, _, routed_key in routed_manifests[1:]
+    ):
+        raise EbayQueueEnvironmentError(
+            "accepted pending-job payloads span multiple eBay environments"
+        )
+    routed_payloads = [payload for _, payload, _ in routed_manifests]
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(
@@ -1505,12 +1722,12 @@ def has_pending_job_with_payload(
                        )
                 )
                 """,
-                (queue_name, dedupe_key, json.dumps(accepted_payloads)),
+                (routed_queue_name, routed_dedupe_key, json.dumps(routed_payloads)),
             )
             return bool(cur.fetchone()[0])
 
 
-def active_depths() -> Dict[str, int]:
+def active_depths(*, ebay_environment: Any = None) -> Dict[str, int]:
     """Count jobs in any active state (queued/running/leased/retry_wait) per queue.
 
     Used by `tgw quiet-check` (PP-CAPTURE-001) to decide whether the pipeline is
@@ -1526,15 +1743,20 @@ def active_depths() -> Dict[str, int]:
                  GROUP BY queue_name
                 """
             )
-            return {row[0]: row[1] for row in cur.fetchall()}
+            depths: Dict[str, int] = {}
+            for queue_name, count in cur.fetchall():
+                if not queue_name_visible_in_environment(
+                    queue_name, ebay_environment,
+                ):
+                    continue
+                logical_name = logical_queue_name(queue_name)
+                depths[logical_name] = depths.get(logical_name, 0) + count
+            return depths
 
 
 def dead_letter_count() -> int:
     """Return total count of dead_letter jobs."""
-    with _conn() as con:
-        with con.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM queue_jobs WHERE state = 'dead_letter'")
-            return cur.fetchone()[0]
+    return sum(dead_letter_breakdown().values())
 
 
 def queue_state_summary() -> Dict[str, int]:
@@ -1547,15 +1769,19 @@ def queue_state_summary() -> Dict[str, int]:
         with con.cursor() as cur:
             cur.execute(
                 """
-                SELECT
-                    COUNT(*) FILTER (WHERE state = 'queued')                    AS queued,
-                    COUNT(*) FILTER (WHERE state IN ('running', 'leased'))      AS processing,
-                    COUNT(*) FILTER (WHERE state = 'dead_letter')               AS dead_letter
+                SELECT queue_name, state, COUNT(*)
                   FROM queue_jobs
+                 WHERE state IN ('queued', 'running', 'leased', 'dead_letter')
+                 GROUP BY queue_name, state
                 """
             )
-            row = cur.fetchone()
-            return {'queued': row[0], 'processing': row[1], 'dead_letter': row[2]}
+            summary = {'queued': 0, 'processing': 0, 'dead_letter': 0}
+            for queue_name, state, count in cur.fetchall():
+                if not queue_name_visible_in_environment(queue_name):
+                    continue
+                bucket = 'processing' if state in {'running', 'leased'} else state
+                summary[bucket] += count
+            return summary
 
 
 def dead_letter_breakdown() -> Dict[str, int]:
@@ -1571,7 +1797,13 @@ def dead_letter_breakdown() -> Dict[str, int]:
                  ORDER BY n DESC, queue_name
                 """
             )
-            return {row[0]: row[1] for row in cur.fetchall()}
+            breakdown: Dict[str, int] = {}
+            for queue_name, count in cur.fetchall():
+                if not queue_name_visible_in_environment(queue_name):
+                    continue
+                logical_name = logical_queue_name(queue_name)
+                breakdown[logical_name] = breakdown.get(logical_name, 0) + count
+            return breakdown
 
 
 def retry_wait_breakdown() -> List[Dict[str, Any]]:
@@ -1590,9 +1822,15 @@ def retry_wait_breakdown() -> List[Dict[str, Any]]:
                  ORDER BY n DESC, queue_name
                 """
             )
-            return [{'queue_name': r['queue_name'], 'count': r['n'],
-                      'oldest_age_hours': round(r['oldest_age_hours'], 1)}
-                    for r in cur.fetchall()]
+            return [
+                {
+                    'queue_name': logical_queue_name(r['queue_name']),
+                    'count': r['n'],
+                    'oldest_age_hours': round(r['oldest_age_hours'], 1),
+                }
+                for r in cur.fetchall()
+                if queue_name_visible_in_environment(r['queue_name'])
+            ]
 
 
 def morning_exposure(cutoff_hour: int = 6, tz_name: str = 'America/Los_Angeles') -> List[Dict[str, Any]]:
@@ -1616,7 +1854,11 @@ def morning_exposure(cutoff_hour: int = 6, tz_name: str = 'America/Los_Angeles')
                 """,
                 (tz_name, cutoff_hour, tz_name),
             )
-            return [{'queue_name': r['queue_name'], 'count': r['n']} for r in cur.fetchall()]
+            return [
+                {'queue_name': logical_queue_name(r['queue_name']), 'count': r['n']}
+                for r in cur.fetchall()
+                if queue_name_visible_in_environment(r['queue_name'])
+            ]
 
 
 def dead_letter_errors() -> List[Dict[str, Any]]:
@@ -1634,7 +1876,14 @@ def dead_letter_errors() -> List[Dict[str, Any]]:
                  WHERE state = 'dead_letter'
                 """
             )
-            return [{'queue_name': r[0], 'error_detail': r[1]} for r in cur.fetchall()]
+            return [
+                {
+                    'queue_name': logical_queue_name(r[0]),
+                    'error_detail': r[1],
+                }
+                for r in cur.fetchall()
+                if queue_name_visible_in_environment(r[0])
+            ]
 
 
 def zero_work_queues(stall_hours: float) -> List[Dict[str, Any]]:
@@ -1680,13 +1929,23 @@ def zero_work_queues(stall_hours: float) -> List[Dict[str, Any]]:
                 """,
                 (stall_hours, stall_hours),
             )
-            return [dict(r) for r in cur.fetchall()]
+            return [
+                {
+                    **dict(r),
+                    'queue_name': logical_queue_name(r['queue_name']),
+                }
+                for r in cur.fetchall()
+                if queue_name_visible_in_environment(r['queue_name'])
+            ]
 
 
 def cancel_queued(queue_name: str) -> int:
     """Cancel all 'queued' jobs for a given queue_name — for orphan queues with
     no worker consuming them (PP-PHOTOSYNC-001 P6, todo #1121). Returns the
     number of rows affected."""
+    queue_name = queue_name_for_environment(
+        queue_name, _EBAY_QUEUE_ENVIRONMENT,
+    )
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(
@@ -1699,6 +1958,9 @@ def cancel_queued(queue_name: str) -> int:
 
 def clear_dead_letter(queue_name: str) -> int:
     """Cancel all dead_letter jobs for a given queue. Returns the number of rows affected."""
+    queue_name = queue_name_for_environment(
+        queue_name, _EBAY_QUEUE_ENVIRONMENT,
+    )
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(
@@ -1711,6 +1973,10 @@ def clear_dead_letter(queue_name: str) -> int:
 
 def dead_letter_jobs(queue_name: str = '', limit: int = 100) -> List[Dict[str, Any]]:
     """Return dead_letter jobs as dicts, optionally filtered by queue_name."""
+    routed_queue_name = (
+        queue_name_for_environment(queue_name, _EBAY_QUEUE_ENVIRONMENT)
+        if queue_name else ''
+    )
     with _conn() as con:
         with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if queue_name:
@@ -1723,7 +1989,7 @@ def dead_letter_jobs(queue_name: str = '', limit: int = 100) -> List[Dict[str, A
                      ORDER BY finished_at DESC NULLS LAST
                      LIMIT %s
                     """,
-                    (queue_name, limit),
+                    (routed_queue_name, limit),
                 )
             else:
                 cur.execute(
@@ -1733,11 +1999,18 @@ def dead_letter_jobs(queue_name: str = '', limit: int = 100) -> List[Dict[str, A
                       FROM queue_jobs
                      WHERE state = 'dead_letter'
                      ORDER BY queue_name, finished_at DESC NULLS LAST
-                     LIMIT %s
                     """,
-                    (limit,),
                 )
-            return [dict(r) for r in cur.fetchall()]
+            jobs = []
+            for row in cur.fetchall():
+                if not queue_name_visible_in_environment(row['queue_name']):
+                    continue
+                job = dict(row)
+                job['queue_name'] = logical_queue_name(job['queue_name'])
+                jobs.append(job)
+                if len(jobs) >= limit:
+                    break
+            return jobs
 
 
 def job_history(
@@ -1770,14 +2043,19 @@ def job_history(
                     SELECT history_id, job_id::text, queue_name, entity_type, entity_id,
                            operation, current_state, old_state, new_state, transition,
                            worker_id, message, error_code, error_detail, payload_json, created_at
-                      FROM v_job_history
+                     FROM v_job_history
                      WHERE entity_id = %s
                      ORDER BY job_id, history_id ASC
-                     LIMIT %s
                     """,
-                    (sku, limit),
+                    (sku,),
                 )
             else:
+                routed_queue_name = (
+                    queue_name_for_environment(
+                        queue_name, _EBAY_QUEUE_ENVIRONMENT,
+                    )
+                    if queue_name else ''
+                )
                 cur.execute(
                     """
                     SELECT history_id, job_id::text, queue_name, entity_type, entity_id,
@@ -1788,9 +2066,18 @@ def job_history(
                      ORDER BY history_id DESC
                      LIMIT %s
                     """,
-                    (queue_name, queue_name, limit),
+                    (routed_queue_name, routed_queue_name, limit),
                 )
-            return [dict(r) for r in cur.fetchall()]
+            rows = []
+            for row in cur.fetchall():
+                if not queue_name_visible_in_environment(row['queue_name']):
+                    continue
+                value = dict(row)
+                value['queue_name'] = logical_queue_name(value['queue_name'])
+                rows.append(value)
+                if len(rows) >= limit:
+                    break
+            return rows
 
 
 def requeue_dead_letter_job(job_id: str) -> str:
@@ -1813,6 +2100,10 @@ def requeue_dead_letter_job(job_id: str) -> str:
             row = cur.fetchone()
             if row is None:
                 raise ValueError(f'job {job_id!r} not found or not in dead_letter state')
+            if not queue_name_visible_in_environment(row['queue_name']):
+                raise ValueError(
+                    f'job {job_id!r} belongs to a different eBay environment'
+                )
 
         with con.cursor() as cur:
             # Cancel the dead_letter job
@@ -1835,7 +2126,7 @@ def requeue_dead_letter_job(job_id: str) -> str:
                     row['entity_type'],
                     row['entity_id'],
                     row['operation'],
-                    row['queue_name'],
+                    logical_queue_name(row['queue_name']),
                     row['priority'],
                     row['max_attempts'],
                 ),
@@ -2025,12 +2316,23 @@ def requeue_with_backoff(
                 raise RuntimeError("lost running lease while requeueing with backoff")
 
 
-def active_jobs_for_sku(sku: str, queue_names: List[str]) -> List[str]:
+def active_jobs_for_sku(
+    sku: str, queue_names: List[str], *, ebay_environment: Any = None,
+) -> List[str]:
     """Queue names with an active (queued/running/leased) job for this SKU.
 
     Session 42: lets order-sensitive workers (ebay_stage, ebay_publish) wait for
     in-flight upstream stages instead of racing them — 'List on eBay' used to
     publish the OLD staged offer while the fresh draft was still generating."""
+    selected_environment = (
+        _EBAY_QUEUE_ENVIRONMENT
+        if ebay_environment is None
+        else normalize_ebay_environment(ebay_environment)
+    )
+    routed_queue_names = [
+        queue_name_for_environment(name, selected_environment)
+        for name in queue_names
+    ]
     with _conn() as con:
         with con.cursor() as cur:
             cur.execute(
@@ -2038,9 +2340,9 @@ def active_jobs_for_sku(sku: str, queue_names: List[str]) -> List[str]:
                     WHERE payload_json->>'sku' = %s
                       AND queue_name = ANY(%s)
                       AND state IN ('queued', 'running', 'leased')""",
-                (sku, queue_names),
+                (sku, routed_queue_names),
             )
-            return [r[0] for r in cur.fetchall()]
+            return [logical_queue_name(r[0]) for r in cur.fetchall()]
 
 
 # ---------------------------------------------------------------------------

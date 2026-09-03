@@ -57,11 +57,20 @@ def get_item(cfg: Dict[str, Any], sku: str) -> Dict[str, Any]:
     return resp.json()["item"]
 
 
-def patch_item(cfg: Dict[str, Any], sku: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+def patch_item(
+    cfg: Dict[str, Any],
+    sku: str,
+    fields: Dict[str, Any],
+    *,
+    expected_generation: str | None = None,
+) -> Dict[str, Any]:
     """PATCH /api/items/{sku} — update top-level fields."""
+    body: Dict[str, Any] = {"fields": fields}
+    if expected_generation is not None:
+        body["expected_generation"] = expected_generation
     resp = requests.patch(
         f"{_BASE}/api/items/{sku}",
-        json={"fields": fields},
+        json=body,
         headers=_machine_headers(cfg),
         timeout=10,
     )
@@ -103,6 +112,7 @@ def ebay_write(
     ebay_submitted: Optional[Dict[str, Any]] = None,
     ebay_live: Optional[Dict[str, Any]] = None,
     allow_protected: Optional[List[str]] = None,
+    expected_generation: str | None = None,
 ) -> Dict[str, Any]:
     """
     POST /api/items/{sku}/ebay-write — deep-merge eBay blocks.
@@ -128,10 +138,12 @@ def ebay_write(
         body["ebay_live"] = ebay_live
     if allow_protected:
         body["allow_protected"] = list(allow_protected)
+    if expected_generation is not None:
+        body["expected_generation"] = expected_generation
     resp = requests.post(
         f"{_BASE}/api/items/{sku}/ebay-write",
         json=body,
-        headers=_headers(cfg),
+        headers=_machine_headers(cfg),
         timeout=10,
     )
     _raise(resp)

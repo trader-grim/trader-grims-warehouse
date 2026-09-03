@@ -1352,6 +1352,8 @@ def backfill_draft_from_live(item: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
     fulfillment_id  = policies.get('fulfillmentPolicyId', '')
     payment_id      = policies.get('paymentPolicyId', '')
     return_id       = policies.get('returnPolicyId', '')
+    raw_best_offer_terms = policies.get('bestOfferTerms')
+    best_offer_terms = raw_best_offer_terms if isinstance(raw_best_offer_terms, dict) else {}
     store_cats      = offer.get('storeCategoryNames', [])
     qty_avail       = (inv.get('availability', {})
                           .get('shipToLocationAvailability', {})
@@ -1388,6 +1390,18 @@ def backfill_draft_from_live(item: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
         'return_policy_id':      return_id,
         'store_category_names':  store_cats,
     }
+    live_best_offer_enabled = best_offer_terms.get('bestOfferEnabled')
+    if isinstance(live_best_offer_enabled, bool):
+        draft['best_offer_enabled'] = live_best_offer_enabled
+    for provider_name, draft_name in (
+        ('autoAcceptPrice', 'best_offer_auto_accept_price'),
+        ('autoDeclinePrice', 'best_offer_auto_decline_price'),
+    ):
+        provider_price = best_offer_terms.get(provider_name)
+        if isinstance(provider_price, dict):
+            provider_price = provider_price.get('value')
+        if provider_price not in (None, ''):
+            draft[draft_name] = provider_price
     if offer_id:
         draft['offer_id'] = offer_id
     if listing_id:

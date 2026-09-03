@@ -3,11 +3,17 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from tgw.config import DEFAULT_CONFIG, load_config, sku_json
+from tgw.config import (
+    DEFAULT_CONFIG,
+    bind_ebay_provider_identity,
+    configured_ebay_environment,
+    ebay_environment_settings,
+    load_config,
+    sku_json,
+)
 from tgw.errors import TreatmentFailure
 from tgw.item_mutation import item_generation
 from tgw.queue import state_machine
@@ -78,7 +84,20 @@ def _provider_identity(config: Mapping[str, Any]) -> str:
     value = migration.get("ebay_provider_identity")
     if (not isinstance(value, str) or not value.strip() or value != value.strip()):
         raise _fail("INVALID_PROVIDER_IDENTITY")
-    return value
+    return bind_ebay_provider_identity(
+        value,
+        configured_ebay_environment(dict(config)),
+    )
+
+
+def _provider_environment(config: Mapping[str, Any]) -> tuple[str, str, str]:
+    environment = configured_ebay_environment(dict(config))
+    settings = ebay_environment_settings(environment)
+    return (
+        environment,
+        settings["rest_api_root"],
+        settings["trading_api_endpoint"],
+    )
 
 
 def _validate_listing_continuation(
@@ -86,6 +105,7 @@ def _validate_listing_continuation(
     entity_id: str, profile_id: str, profile_version: str,
     graph: Any, item: Mapping[str, Any], provider_identity: str,
     origin_lookup: Callable[[str], Mapping[str, Any] | None] | None,
+    ebay_environment: str = "production",
 ) -> Any:
     """Validate one durable operator listing intent, including retry chains.
 
@@ -127,7 +147,10 @@ def _validate_listing_continuation(
     if (not isinstance(durable, Mapping)
             or str(durable.get("job_id")) != origin_job_id
             or durable.get("state") != "succeeded"
-            or durable.get("queue_name") != queue_name
+            or not state_machine.queue_name_matches_environment(
+                durable.get("queue_name"), queue_name,
+                ebay_environment,
+            )
             or durable.get("entity_type") != "item"
             or durable.get("entity_id") != entity_id
             or not isinstance(durable_payload, Mapping)
@@ -158,10 +181,7 @@ def _validate_listing_continuation(
             or not _LISTING_CONTINUATION_SCOPES.issubset(set(original.scopes))):
         raise _fail("INVALID_OPERATOR_CONTINUATION", origin_job_id=origin_job_id)
 
-    now = datetime.now(UTC)
     if original.superseded_at is None:
-        if now < original.issued_at or now >= original.expires_at:
-            raise _fail("EXPIRED_OPERATOR_CONTINUATION", origin_job_id=origin_job_id)
         return original
 
     # A prior attempt may have durably issued the successor before it crashed.
@@ -193,8 +213,7 @@ def _validate_listing_continuation(
         current.content_identity, current.provider_identity,
     )
     if (actual_current != expected_current
-            or not _LISTING_CONTINUATION_SCOPES.issubset(set(current.scopes))
-            or now < current.issued_at or now >= current.expires_at):
+            or not _LISTING_CONTINUATION_SCOPES.issubset(set(current.scopes))):
         raise _fail("INVALID_SUCCESSOR_CONTINUATION", origin_job_id=origin_job_id)
     return current
 
@@ -262,7 +281,10 @@ def evaluate_event(
         }
         if (not isinstance(durable, Mapping) or str(durable.get("job_id")) != origin_job_id
                 or durable.get("state") != "succeeded"
-                or durable.get("queue_name") != "ebay_onboard_legacy_stage"
+                or not state_machine.queue_name_matches_environment(
+                    durable.get("queue_name"), "ebay_onboard_legacy_stage",
+                    configured_ebay_environment(dict(config)),
+                )
                 or durable.get("entity_type") != "item"
                 or durable.get("entity_id") != entity_id
                 or not isinstance(durable_payload, Mapping)
@@ -288,14 +310,7 @@ def evaluate_event(
         from tgw.workflow.listing_migration import _authoritative_stage_lookup
         item = json.loads(item_path.read_text(encoding="utf-8"))
         marker_generation = item_generation(item)
-        migration = config.get("workflow_migration")
-        if migration is None and isinstance(config.get("raw"), Mapping):
-            migration = config["raw"].get("workflow_migration")
-        migration = migration if isinstance(migration, Mapping) else {}
-        provider_identity = migration.get("ebay_provider_identity")
-        if (not isinstance(provider_identity, str) or not provider_identity.strip()
-                or provider_identity != provider_identity.strip()):
-            raise _fail("INVALID_PROVIDER_IDENTITY")
+        provider_identity = _provider_identity(config)
         stage_lookup = _authoritative_stage_lookup(item, provider_identity)
     snapshot = build_item_snapshot(
         item_path, profile, treatments=treatments,
@@ -330,12 +345,24 @@ def evaluate_event(
     if (not isolated and _listing_continuation_requested(treatment_id, persisted_authority)
             and isinstance(authority_id, str) and authority_id):
         current_item = json.loads(item_path.read_text(encoding="utf-8"))
+        current_generation = item_generation(current_item)
+        if current_generation != graph.object_generation:
+            raise _fail(
+                "CANONICAL_CHANGED_BEFORE_OPERATOR_CONTINUATION",
+                evaluated_generation=graph.object_generation,
+                current_generation=current_generation,
+                origin_job_id=origin_job_id,
+            )
         provider_identity = _provider_identity(config)
+        ebay_environment, ebay_rest_endpoint, ebay_trading_endpoint = (
+            _provider_environment(config)
+        )
         authority = _validate_listing_continuation(
             payload=payload, origin=origin, origin_job_id=origin_job_id,
             entity_id=entity_id, profile_id=profile_id,
             profile_version=profile_version, graph=graph, item=current_item,
             provider_identity=provider_identity, origin_lookup=origin_lookup,
+            ebay_environment=ebay_environment,
         )
 
         from tgw.workflow.listing_migration import (
@@ -347,6 +374,11 @@ def evaluate_event(
                 item_path, operator_identity=authority.operator_identity,
                 surface=authority.surface, provider_identity=authority.provider_identity,
                 enqueue_fn=enqueue_fn,
+                item_document=current_item,
+                expected_generation=current_generation,
+                ebay_environment=ebay_environment,
+                ebay_rest_endpoint=ebay_rest_endpoint,
+                ebay_trading_endpoint=ebay_trading_endpoint,
             )
         )
         if dispatched is None:

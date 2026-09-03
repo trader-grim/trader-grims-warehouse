@@ -11,6 +11,7 @@ from tgw.item_mutation import (
     operation_identity,
     reconcile_mutation,
     reconcile_pending_mutations,
+    resolve_item_mutation_journal_root,
 )
 
 
@@ -40,6 +41,24 @@ def test_operation_identity_exact_json_binding():
     assert operation_identity(**base, payload={"x": True}) != operation_identity(**base, payload={"x": 1})
     assert operation_identity(**base, payload={"x": 1}) != operation_identity(**base, payload={"x": 1.0})
     assert operation_identity(**base, payload={"b": 2, "a": 1}) == operation_identity(**base, payload={"a": 1, "b": 2})
+
+
+def test_mutation_journal_root_has_one_normalized_and_legacy_resolution(tmp_path):
+    data_root = tmp_path / "data"
+    expected = tmp_path / "var/item-mutations"
+    assert resolve_item_mutation_journal_root({
+        "data_root": data_root,
+        "itemdata_root": data_root / "ItemData",
+    }) == expected
+    assert resolve_item_mutation_journal_root({
+        "itemdata_root": data_root / "ItemData",
+        "raw": {"data_root": str(data_root)},
+    }) == expected
+    explicit = tmp_path / "explicit-journal"
+    assert resolve_item_mutation_journal_root({
+        "data_root": data_root,
+        "item_mutation_journal_root": explicit,
+    }) == explicit
 
 
 def test_commit_archives_projects_and_exact_replay_is_inert(tmp_path):

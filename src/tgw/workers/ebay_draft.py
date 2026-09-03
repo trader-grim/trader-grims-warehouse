@@ -42,6 +42,7 @@ from tgw.item_mutation import (
     mutate_item,
     operation_identity,
     reconcile_mutation,
+    resolve_item_mutation_journal_root,
 )
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
@@ -88,25 +89,123 @@ _BROWSE_HINT_SKIP = frozenset({'Does Not Apply', 'Unbranded', 'N/A', 'Unknown', 
 _groups_cache: Dict[str, Any] = {}
 
 
-def _get_store_category_id(item: Dict[str, Any], cfg: Dict[str, Any]) -> Optional[int]:
+def _get_store_category(
+    item: Dict[str, Any],
+    cfg: Dict[str, Any],
+    category_id: str = '',
+) -> Optional[Dict[str, Any]]:
+    """Return the best configured Store-category mapping for an item.
+
+    An explicit TGW category group remains the strongest signal.  Older and
+    newly identified items often do not have one, so fall back to the resolved
+    eBay category's membership in ``category-groups.json``.  This lookup is
+    deliberately best-effort: a missing mapping never blocks draft creation.
     """
-    Return the store_category_id for this item's category group, or None.
-    category-groups.json is cached per path — reloaded only on process restart.
-    """
-    cat_group_key = item.get('category_group', '')
-    if not cat_group_key:
-        return None
     try:
         cg_path_str = cfg['category_groups_path']
         if cg_path_str not in _groups_cache:
             _groups_cache[cg_path_str] = json.loads(
                 Path(cg_path_str).read_text(encoding='utf-8')
             )
-        grp_data = _groups_cache[cg_path_str].get('groups', {}).get(cat_group_key, {})
-        sc_id = grp_data.get('store_category_id')
-        return int(sc_id) if sc_id is not None else None
+        groups = _groups_cache[cg_path_str].get('groups', {})
+        if not isinstance(groups, dict):
+            return None
+
+        cat_group_key = str(item.get('category_group') or '').strip()
+        grp_data = groups.get(cat_group_key) if cat_group_key else None
+        if not isinstance(grp_data, dict):
+            resolved_category_id = str(
+                category_id
+                or item.get('ebay_category_id')
+                or (item.get('draft_listing') or {}).get('category_id')
+                or ''
+            ).strip()
+            if not resolved_category_id:
+                return None
+            grp_data = None
+            for candidate in groups.values():
+                if not isinstance(candidate, dict):
+                    continue
+                raw_categories = (
+                    candidate.get('ebay_categories')
+                    or candidate.get('category_candidates')
+                    or []
+                )
+                candidate_ids = {
+                    str(
+                        raw.get('category_id') or raw.get('id') or ''
+                        if isinstance(raw, dict)
+                        else raw
+                    ).strip()
+                    for raw in raw_categories
+                }
+                if resolved_category_id in candidate_ids:
+                    grp_data = candidate
+                    break
+        if not isinstance(grp_data, dict):
+            return None
+
+        raw_store_category_id = grp_data.get('store_category_id')
+        if raw_store_category_id is None or not str(raw_store_category_id).strip():
+            return None
+        return {
+            'store_category_id': int(raw_store_category_id),
+            'store_category_name': str(
+                grp_data.get('store_category')
+                or grp_data.get('store_category_name')
+                or ''
+            ).strip(),
+        }
     except Exception:
         return None
+
+
+def _get_store_category_id(item: Dict[str, Any], cfg: Dict[str, Any]) -> Optional[int]:
+    """Compatibility wrapper returning only the mapped Store-category ID."""
+    mapped = _get_store_category(item, cfg)
+    return mapped['store_category_id'] if mapped else None
+
+
+def _store_category_draft_fields(
+    previous_draft: Dict[str, Any],
+    item: Dict[str, Any],
+    cfg: Dict[str, Any],
+    category_id: str,
+) -> Dict[str, Any]:
+    """Resolve Store fields for a rebuilt draft without losing operator input."""
+    fields: Dict[str, Any] = {}
+    for field_name in (
+        'secondary_category_id',
+        'secondary_category_name',
+        'secondary_category_path',
+        'secondary_store_category_id',
+        'secondary_store_category_name',
+        'secondary_store_category_source',
+    ):
+        if field_name in previous_draft:
+            fields[field_name] = previous_draft[field_name]
+
+    previous_source = str(
+        previous_draft.get('store_category_source') or ''
+    ).strip()
+    previous_id_present = 'store_category_id' in previous_draft
+    preserve_previous = (
+        previous_source == 'operator'
+        or (previous_id_present and previous_source != 'category_group')
+    )
+    if preserve_previous:
+        fields['store_category_id'] = previous_draft.get('store_category_id')
+        if 'store_category_name' in previous_draft:
+            fields['store_category_name'] = previous_draft.get('store_category_name')
+        if previous_source:
+            fields['store_category_source'] = previous_source
+        return fields
+
+    mapped = _get_store_category(item, cfg, category_id)
+    if mapped:
+        fields.update(mapped)
+        fields['store_category_source'] = 'category_group'
+    return fields
 
 
 def _fetch_browse_aspect_hints(
@@ -158,6 +257,18 @@ def _category_confidence(pl_category: str, ebay_category: str) -> str:
     if ratio >= 0.10:
         return 'medium'
     return 'low'
+
+
+def _best_offer_draft_fields(previous_draft: Dict[str, Any]) -> Dict[str, Any]:
+    """Carry operator Best Offer choices across a full AI draft rebuild."""
+    raw_enabled = previous_draft.get('best_offer_enabled')
+    fields: Dict[str, Any] = {
+        'best_offer_enabled': True if raw_enabled is None else raw_enabled,
+    }
+    for name in ('best_offer_auto_accept_price', 'best_offer_auto_decline_price'):
+        if name in previous_draft:
+            fields[name] = previous_draft[name]
+    return fields
 
 
 def _validate_category_suggestion(
@@ -433,9 +544,7 @@ class EbayDraftWorker(QueueWorker):
             return result
 
         data_root = Path(self.config.get("data_root", "/opt/TGW/data"))
-        journal_root = Path(self.config.get(
-            "item_mutation_journal_root", data_root.parent / "var/item-mutations",
-        ))
+        journal_root = resolve_item_mutation_journal_root(self.config)
         result = mutate_item(
             item_path=json_path,
             archive_root=Path(self.config.get(
@@ -886,12 +995,19 @@ class EbayDraftWorker(QueueWorker):
             'aspects_required_filled':    req_filled_count,
             'aspects_recommended_total':  len(rec_aspects),
             'aspects_recommended_filled': rec_filled_count,
+            **_best_offer_draft_fields(_prev_dl),
         }
         if cat_confidence:
             draft['category_confidence'] = cat_confidence
-        sc_id = _get_store_category_id(item, self.config)
-        if sc_id is not None:
-            draft['store_category_id'] = sc_id
+
+        # Preserve operator-owned category choices across an AI rebuild.  For
+        # a new/unselected draft, derive the primary Store category from the
+        # resolved eBay category (or the stronger explicit TGW category group)
+        # and record its provenance so a later category change may remap only
+        # the automatic choice.
+        draft.update(_store_category_draft_fields(
+            _prev_dl, item, self.config, str(category_id)
+        ))
         if enriched_description:
             draft['description_source'] = 'enriched'
         if browse_hints:

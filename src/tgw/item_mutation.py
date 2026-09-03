@@ -13,6 +13,7 @@ import json
 import math
 import os
 import tempfile
+import threading
 import zipfile
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -28,6 +29,8 @@ ItemPathResolver = Callable[[str], str | Path]
 ProjectionResolver = Callable[[str], ProjectionWriter]
 ArchiveRootResolver = Callable[[str], str | Path]
 
+_WRITE_LOCK_STATE = threading.local()
+
 
 @dataclass(frozen=True)
 class MutationReceipt:
@@ -41,6 +44,34 @@ class MutationReceipt:
     detail: str | None
     recorded_at: str
     changed: bool = True
+
+
+def resolve_item_mutation_journal_root(config: Mapping[str, Any]) -> Path:
+    """Resolve the one durable journal/lock namespace for canonical item writes.
+
+    Operational configuration normally exposes the normalized values at the
+    top level.  Small library callers may still carry custom values only in
+    ``raw``; supporting both forms here prevents those callers from silently
+    selecting a different per-item lock namespace.
+    """
+    raw = config.get("raw")
+    raw = raw if isinstance(raw, Mapping) else {}
+
+    configured_root = config.get("item_mutation_journal_root")
+    if configured_root is None:
+        configured_root = raw.get("item_mutation_journal_root")
+    if configured_root is not None:
+        return Path(configured_root)
+
+    data_root = config.get("data_root")
+    if data_root is None:
+        data_root = raw.get("data_root")
+    if data_root is None:
+        itemdata_root = config.get("itemdata_root")
+        if itemdata_root is None:
+            itemdata_root = raw.get("itemdata_root", "/opt/TGW/data/ItemData")
+        data_root = Path(itemdata_root).parent
+    return Path(data_root).parent / "var/item-mutations"
 
 
 def _json_native(value: Any, path: str = "payload") -> None:
@@ -181,16 +212,53 @@ def _item_lock_path(journal_root: Path, sku: str) -> Path:
 
 
 @contextmanager
-def item_mutation_lock(*, journal_root: str | Path, sku: str) -> Iterator[None]:
-    """Serialize a canonical item read-mutate-write at the shared item lock."""
+def item_write_lock(journal_root: str | Path, sku: str):
+    """Serialize every canonical writer on the durable per-item lock.
+
+    Reentrant within the calling thread: nested acquisitions of the same
+    item lock share one flock hold and are released at depth zero.
+    """
     lock_path = _item_lock_path(Path(journal_root), sku)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+b") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    key = str(lock_path.resolve())
+    held = getattr(_WRITE_LOCK_STATE, "held", None)
+    if held is None:
+        held = {}
+        _WRITE_LOCK_STATE.held = held
+    existing = held.get(key)
+    if existing is not None:
+        lock, depth = existing
+        held[key] = (lock, depth + 1)
         try:
             yield
         finally:
+            current_lock, current_depth = held[key]
+            held[key] = (current_lock, current_depth - 1)
+        return
+
+    lock = lock_path.open("a+b")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        held[key] = (lock, 1)
+        try:
+            yield
+        finally:
+            held.pop(key, None)
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock.close()
+
+
+@contextmanager
+def item_mutation_lock(*, journal_root: str | Path, sku: str) -> Iterator[None]:
+    """Keyword API for the canonical item write lock (main-stream name).
+
+    Same durable per-item lock as :func:`item_write_lock`; kept under the
+    ``item_mutation_lock`` name for the main-side callers that pass
+    ``journal_root=``/``sku=`` by keyword.
+    """
+    with item_write_lock(journal_root, sku):
+        yield
 
 
 def _next_attempt_path(operation_dir: Path) -> Path:
@@ -532,10 +600,7 @@ def mutate_item(
     operation_dir = _operation_dir(journal_root, selected_id)
     intent_path = operation_dir / "intent.json"
     receipt_path = operation_dir / "receipt.json"
-    lock_path = _item_lock_path(journal_root, sku)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+b") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    with item_write_lock(journal_root, sku):
         if receipt_path.exists():
             return MutationReceipt(**_load_json(receipt_path))
 

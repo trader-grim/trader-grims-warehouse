@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from tgw.config import ebay_environment_settings, normalize_ebay_environment
 from tgw.provider_effects import ProviderEffectConflict, resolve_succeeded_provider_effect
 
 from tgw.workflow_kernel.evaluator import evaluate
@@ -15,9 +16,14 @@ from .treatments import EBAY_SYNC_TARGETED
 
 def dispatch_targeted_sync(
     item_path: str | Path, *, source_provider_effect_id: str,
-    provider_identity: str, enqueue_fn=None,
+    provider_identity: str, ebay_environment: str, ebay_endpoint: str,
+    enqueue_fn=None,
 ) -> DispatchResult:
     """Resolve durable source evidence and enqueue one exactly bound sync."""
+    environment = normalize_ebay_environment(ebay_environment)
+    closed_endpoint = ebay_environment_settings(environment)["rest_api_root"]
+    if ebay_endpoint != closed_endpoint:
+        raise ValueError("targeted sync endpoint differs from closed eBay environment")
     path = Path(item_path)
     item = json.loads(path.read_text(encoding="utf-8"))
     sku = item.get("sku")
@@ -63,6 +69,8 @@ def dispatch_targeted_sync(
             "sku": sku, "provider_effect_id": source_provider_effect_id,
             "provider_identity": provider_identity, "expected_offer_id": offer_id,
             "source_operation": source.operation,
+            "ebay_environment": environment,
+            "ebay_endpoint": closed_endpoint,
         },
         enqueue_fn=enqueue_fn,
     )

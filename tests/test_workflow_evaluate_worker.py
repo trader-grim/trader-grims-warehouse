@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tgw.config import bind_ebay_provider_identity
 from tgw.errors import TreatmentFailure
 from tgw.item_mutation import item_generation
 from tgw.queue import state_machine
@@ -257,7 +258,7 @@ def test_rebuilds_new_generation_and_dispatches_evaluator_selected_local_treatme
         ("ebay-stage", "ebay_stage"),
     ],
 )
-def test_successful_governed_predecessor_durably_continues_listing(
+def test_expired_unsuperseded_direct_authority_durably_continues_listing(
     tmp_path, treatment_id, queue_name,
 ):
     item_root = _item(tmp_path)
@@ -284,6 +285,7 @@ def test_successful_governed_predecessor_durably_continues_listing(
         operator_surface="http:item-action:ebay-publish",
         pre_authority_condition_hash="pre-condition",
     )
+    config["ebay_environment"] = "sandbox"
     config["workflow_migration"] = {"ebay_provider_identity": "ebay:account"}
     durable_payload = {
         "operator_authority_id": "authority-1",
@@ -297,7 +299,8 @@ def test_successful_governed_predecessor_durably_continues_listing(
         "result": origin,
     }
     durable = {
-        "job_id": "origin-1", "state": "succeeded", "queue_name": queue_name,
+        "job_id": "origin-1", "state": "succeeded",
+        "queue_name": state_machine.queue_name_for_environment(queue_name, "sandbox"),
         "entity_type": "item", "entity_id": "SKU-1", "payload_json": durable_payload,
     }
     now = datetime.now(UTC)
@@ -308,10 +311,11 @@ def test_successful_governed_predecessor_durably_continues_listing(
         entity_id="SKU-1", goal_profile_id="tgw.ebay_listable",
         goal_profile_version="1", object_generation="old-generation",
         pre_authority_condition_hash="pre-condition",
-        content_identity="old-content", provider_identity="ebay:account",
+        content_identity="old-content",
+        provider_identity=bind_ebay_provider_identity("ebay:account", "sandbox"),
         scopes=("upload", "stage", "publish"),
         issued_at=now - timedelta(seconds=5),
-        expires_at=now + timedelta(minutes=5), superseded_at=None,
+        expires_at=now - timedelta(seconds=1), superseded_at=None,
         superseded_by=None,
     )
     continued = SimpleNamespace(
@@ -335,9 +339,22 @@ def test_successful_governed_predecessor_durably_continues_listing(
     assert receipt["evidence"]["next_job_id"] == "publish-job"
     assert receipt["evidence"]["successor_authority_id"] == "authority-2"
     assert continuation.call_args.kwargs["enqueue_fn"] is enqueue
+    assert continuation.call_args.kwargs["provider_identity"] == (
+        "ebay:account|ebay-environment=sandbox"
+    )
+    assert continuation.call_args.kwargs["ebay_environment"] == "sandbox"
+    assert continuation.call_args.kwargs["ebay_rest_endpoint"] == (
+        "https://api.sandbox.ebay.com"
+    )
+    assert continuation.call_args.kwargs["ebay_trading_endpoint"] == (
+        "https://api.sandbox.ebay.com/ws/api.dll"
+    )
+    assert continuation.call_args.kwargs["expected_generation"] == (
+        resulting_generation
+    )
 
 
-def test_listing_continuation_reuses_exact_committed_successor_after_crash():
+def test_listing_continuation_reuses_exact_expired_successor_after_crash():
     now = datetime.now(UTC)
     original = SimpleNamespace(
         authority_id="authority-1", operator_identity="operator:authenticated",
@@ -360,7 +377,7 @@ def test_listing_continuation_reuses_exact_committed_successor_after_crash():
         pre_authority_condition_hash=graph.condition_hash,
         content_identity=listing_content_identity(item),
         provider_identity="ebay:account", scopes=("upload", "stage", "publish"),
-        issued_at=now - timedelta(seconds=1), expires_at=now + timedelta(minutes=5),
+        issued_at=now - timedelta(minutes=2), expires_at=now - timedelta(minutes=1),
         superseded_at=None, superseded_by=None,
     )
     origin = {
@@ -734,6 +751,8 @@ def test_waiting_receipt_rejects_invalid_timer_attempt_budget(max_attempts):
         ("condition_hash", "condition-other", "TIMER_CONDITION_HASH_MISMATCH"),
         ("provider_effect_id", "effect-other", "TIMER_PROVIDER_EFFECT_ID_MISMATCH"),
         ("provider_identity", "ebay:other", "TIMER_PROVIDER_IDENTITY_MISMATCH"),
+        ("ebay_environment", "sandbox", "TIMER_EBAY_ENVIRONMENT_MISMATCH"),
+        ("ebay_endpoint", "https://api.sandbox.ebay.com", "TIMER_EBAY_ENDPOINT_MISMATCH"),
         ("expected_offer_id", "offer-other", "TIMER_EXPECTED_OFFER_ID_MISMATCH"),
         ("source_operation", "publish-offer", "TIMER_SOURCE_OPERATION_MISMATCH"),
     ],
@@ -749,6 +768,7 @@ def test_waiting_receipt_rejects_rebound_treatment_or_source_identity(
         "goal_profile_id": "tgw.ebay_reconciled", "goal_profile_version": "1",
         "object_generation": "gen-1", "condition_hash": "condition-1",
         "provider_effect_id": "effect-1", "provider_identity": "ebay:account",
+        "ebay_environment": "production", "ebay_endpoint": "https://api.ebay.com",
         "expected_offer_id": "offer-1", "source_operation": "stage-draft",
     }
     timer_payload = {**payload, key: changed, "sync_retry": 1}
@@ -901,7 +921,9 @@ def test_atomic_completion_writes_receipt_then_durable_event():
         )
     assert event_id == "event-job"
     assert cursor.execute.call_count == 2
-    inserted = json.loads(cursor.execute.call_args_list[1].args[1][2])
+    insert_params = cursor.execute.call_args_list[1].args[1]
+    assert insert_params[0] == "workflow_evaluate"
+    inserted = json.loads(insert_params[3])
     assert inserted["origin_receipt"] == receipt
     assert inserted["prior_object_generation"] == "gen-1"
     assert inserted["operator_authority_id"] == "authority-1"

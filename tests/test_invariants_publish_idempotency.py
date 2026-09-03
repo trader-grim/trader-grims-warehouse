@@ -16,8 +16,8 @@ from unittest.mock import patch
 
 import pytest
 
-import tgw.workers.ebay_publish as publish_mod
 import tgw.provider_effects as provider_effects
+import tgw.workers.ebay_publish as publish_mod
 from tgw.ebay.pricing import to_99
 from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
@@ -50,6 +50,11 @@ def publisher(tmp_path, monkeypatch):
                 'status': 'PUBLISHED'}
 
     monkeypatch.setattr(publish_mod, 'publish_offer', fake_publish_offer)
+    monkeypatch.setattr(
+        publish_mod,
+        'validate_listing_condition_for_stage',
+        lambda *args, **kwargs: 'USED_GOOD',
+    )
     monkeypatch.setattr(publish_mod, 'enqueue_post_push_sync', lambda *a, **k: True)
     monkeypatch.setattr(
         provider_effects, 'reserve_and_begin_authorized_effect',
@@ -63,7 +68,12 @@ def publisher(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         provider_effects, 'validate_succeeded_authorized_effect',
-        lambda **kwargs: SimpleNamespace(result={'listing_id': '110555'}),
+        lambda **kwargs: SimpleNamespace(result={
+            'listing_id': '110555',
+            'listing_url': 'https://www.ebay.com/itm/110555',
+            'ebay_environment': 'production',
+            'endpoint': 'https://api.ebay.com',
+        }),
     )
     # build_listing_description is imported lazily inside handle()
     import tgw.ebay.description as desc
@@ -114,9 +124,20 @@ def _staged_item(**extra):
 def _complete_active_projection(item):
     published_at = item['ebay_listing']['published_at']
     item['ebay_listing']['provider_effect_id'] = 'test-publish-effect'
+    item['ebay_listing']['ebay_environment'] = 'production'
+    item['ebay_listing'].setdefault(
+        'listing_url',
+        f"https://www.ebay.com/itm/{item['ebay_listing']['listing_id']}",
+    )
     item['ebay_offer']['published_at'] = published_at
+    item['ebay_offer']['ebay_environment'] = 'production'
     item['draft_listing_state'] = 'baseline'
     item['baseline_at'] = published_at
+    from tgw.workflow.operator_authority import listing_content_identity
+
+    content_identity = listing_content_identity(item)
+    item['ebay_listing']['publish_content_identity'] = content_identity
+    item['ebay_listing']['projected_content_identity'] = content_identity
     return item
 
 
@@ -159,7 +180,12 @@ def test_already_active_item_is_not_republished(publisher, tmp_path, monkeypatch
     _complete_active_projection(item)
     monkeypatch.setattr(
         provider_effects, 'validate_succeeded_authorized_effect',
-        lambda **kwargs: SimpleNamespace(result={'listing_id': '110001'}),
+        lambda **kwargs: SimpleNamespace(result={
+            'listing_id': '110001',
+            'listing_url': 'https://www.ebay.com/itm/110001',
+            'ebay_environment': 'production',
+            'endpoint': 'https://api.ebay.com',
+        }),
     )
     path = _write(tmp_path, 'tgw1', item)
     before = path.read_text()
@@ -186,7 +212,12 @@ def test_already_active_item_refreshes_photo_verify(publisher, tmp_path, monkeyp
     _complete_active_projection(item)
     monkeypatch.setattr(
         provider_effects, 'validate_succeeded_authorized_effect',
-        lambda **kwargs: SimpleNamespace(result={'listing_id': '110001'}),
+        lambda **kwargs: SimpleNamespace(result={
+            'listing_id': '110001',
+            'listing_url': 'https://www.ebay.com/itm/110001',
+            'ebay_environment': 'production',
+            'endpoint': 'https://api.ebay.com',
+        }),
     )
     _write(tmp_path, 'tgw1', item)
     _run(publisher, 'tgw1')
@@ -297,6 +328,7 @@ def test_governed_fresh_publish_completes_through_atomic_evaluation_outbox(
             'goal_profile_version': '1',
             'object_generation': job['payload_json']['object_generation'],
             'condition_hash': 'condition-1',
+            'ebay_environment': 'production',
             'entity_id': sku,
             'established_conditions': ['published'],
         'artifacts': [f'item:{sku}'],
@@ -553,14 +585,18 @@ def test_provider_effect_ambiguous_restart_never_blind_replays(
 
 
 def test_provider_effect_definitive_rejection_is_terminal_not_fallback(
-    publisher, monkeypatch,
+    publisher, tmp_path, monkeypatch,
 ):
     import requests
 
     import tgw.provider_effects as effects
     from tgw.provider_effects import ProviderEffect
 
+    item = {'sku': 'SKU-1'}
+    _write(tmp_path, 'SKU-1', item)
     payload = _governed_job('SKU-1')['payload_json']
+    from tgw.item_mutation import item_generation
+    payload['object_generation'] = item_generation(item)
     payload.update({'condition_hash': 'condition-1',
                     'pre_authority_condition_hash': 'pre-1'})
     effect = ProviderEffect(
@@ -591,12 +627,12 @@ def test_provider_effect_definitive_rejection_is_terminal_not_fallback(
     findings = []
     monkeypatch.setattr(
         publish_mod, 'fence_patch_item',
-        lambda cfg, sku, patch: findings.append((cfg, sku, patch)),
+        lambda cfg, sku, patch, **kwargs: findings.append((cfg, sku, patch)),
     )
 
     with pytest.raises(TreatmentFailure) as caught:
         publisher._publish_with_provider_effect(
-            payload, 'SKU-1', 'OFF1', {'sku': 'SKU-1'},
+            payload, 'SKU-1', 'OFF1', item,
         )
 
     assert outcomes[0]['state'] == 'rejected'
@@ -612,13 +648,19 @@ def test_provider_effect_definitive_rejection_is_terminal_not_fallback(
     assert findings[0][2]['pipeline_error']['code'] == 'ebay_rejected'
 
 
-def test_governed_publish_rejection_persists_exact_aspect_field(publisher, monkeypatch):
+def test_governed_publish_rejection_persists_exact_aspect_field(
+    publisher, tmp_path, monkeypatch,
+):
     import requests
 
     import tgw.provider_effects as effects
     from tgw.provider_effects import ProviderEffect
 
+    item = {'sku': 'SKU-1'}
+    _write(tmp_path, 'SKU-1', item)
     payload = _governed_job('SKU-1')['payload_json']
+    from tgw.item_mutation import item_generation
+    payload['object_generation'] = item_generation(item)
     payload.update({'condition_hash': 'condition-1',
                     'pre_authority_condition_hash': 'pre-1'})
     effect = ProviderEffect(
@@ -647,22 +689,28 @@ def test_governed_publish_rejection_persists_exact_aspect_field(publisher, monke
     findings = []
     monkeypatch.setattr(
         publish_mod, 'fence_patch_item',
-        lambda cfg, sku, patch: findings.append((sku, patch)),
+        lambda cfg, sku, patch, **kwargs: findings.append((sku, patch)),
     )
 
     with pytest.raises(TreatmentFailure):
-        publisher._publish_with_provider_effect(payload, 'SKU-1', 'OFF1', {'sku': 'SKU-1'})
+        publisher._publish_with_provider_effect(payload, 'SKU-1', 'OFF1', item)
 
     finding = findings[0][1]['pipeline_error']
     assert finding['field'] == 'Release Title'
     assert finding['code'] == 'ebay_rejected'
 
 
-def test_provider_effect_rejected_replay_never_posts_again(publisher, monkeypatch):
+def test_provider_effect_rejected_replay_never_posts_again(
+    publisher, tmp_path, monkeypatch,
+):
     import tgw.provider_effects as effects
     from tgw.provider_effects import ProviderEffect
 
+    item = {'sku': 'SKU-1'}
+    _write(tmp_path, 'SKU-1', item)
     payload = _governed_job('SKU-1')['payload_json']
+    from tgw.item_mutation import item_generation
+    payload['object_generation'] = item_generation(item)
     payload.update({'condition_hash': 'condition-1',
                     'pre_authority_condition_hash': 'pre-1'})
     rejected = ProviderEffect(
@@ -683,7 +731,7 @@ def test_provider_effect_rejected_replay_never_posts_again(publisher, monkeypatc
 
     with pytest.raises(TreatmentFailure) as caught:
         publisher._publish_with_provider_effect(
-            payload, 'SKU-1', 'OFF1', {'sku': 'SKU-1'},
+            payload, 'SKU-1', 'OFF1', item,
         )
 
     assert calls == []
@@ -717,6 +765,8 @@ def test_governed_active_missing_or_forged_effect_requires_reconciliation(
         }, draft_listing_state='baseline', baseline_at=published_at,
     )
     item['ebay_offer'].update({'status': 'PUBLISHED', 'published_at': published_at})
+    _complete_active_projection(item)
+    item['ebay_listing']['provider_effect_id'] = 'd' * 64
     _write(tmp_path, sku, item)
     publisher.config['workflow_migration'] = {
         'ebay_publish_provider_effect': 'workflow',
@@ -753,6 +803,92 @@ def test_replayed_job_after_publish_is_noop(publisher, tmp_path):
     _run(publisher, 'tgw4')
     assert publisher._published == ['OFF1']    # exactly once
     assert path.read_text() == first
+
+
+def test_fully_projected_publish_crash_replays_satisfied_without_redispatch(
+    publisher, tmp_path, monkeypatch,
+):
+    from tests.conftest import make_governed_ebay_job
+    from tgw.workflow.operator_authority import listing_content_identity
+
+    sku = 'tgw-publish-crash-replay'
+    path = _write(tmp_path, sku, _staged_item())
+    job = make_governed_ebay_job(
+        tmp_path, sku, treatment_id='ebay-publish',
+    )
+    reservations = []
+    finished = []
+    validations = []
+
+    def reserve(**kwargs):
+        reservations.append(kwargs)
+        return SimpleNamespace(
+            effect_id='test-publish-effect', state='dispatched', result=None,
+        )
+
+    def finish(effect_id, **kwargs):
+        record = SimpleNamespace(
+            effect_id=effect_id, state=kwargs['state'], result=kwargs.get('result'),
+        )
+        finished.append(record)
+        return record
+
+    def validate(**kwargs):
+        validations.append(kwargs)
+        expected = {
+            key: reservations[0][key]
+            for key in (
+                'provider', 'operation', 'entity_type', 'entity_id',
+                'object_generation', 'graph_id', 'treatment_id',
+                'treatment_version', 'condition_hash', 'request',
+            )
+        }
+        assert kwargs['authority_binding'] == reservations[0]['authority_binding']
+        assert kwargs['expected_binding'] == expected
+        return finished[0]
+
+    monkeypatch.setattr(
+        provider_effects, 'reserve_and_begin_authorized_effect', reserve,
+    )
+    monkeypatch.setattr(provider_effects, 'finish_provider_effect', finish)
+    monkeypatch.setattr(
+        provider_effects, 'validate_succeeded_authorized_effect', validate,
+    )
+
+    first = publisher.handle(job)
+    projected = json.loads(path.read_text(encoding='utf-8'))
+    second = publisher.handle(job)
+
+    assert first['outcome'] == second['outcome'] == 'satisfied'
+    assert publisher._published == ['OFF1']
+    assert len(reservations) == len(finished) == len(validations) == 1
+    listing = projected['ebay_listing']
+    assert listing['publish_content_identity'] == (
+        reservations[0]['authority_binding']['content_identity']
+    )
+    assert listing['projected_content_identity'] == listing_content_identity(projected)
+    assert listing['projected_content_identity'] != listing['publish_content_identity']
+
+    changed_content = json.loads(json.dumps(projected))
+    changed_content['draft_listing']['title'] = 'changed after publish'
+    path.write_text(json.dumps(changed_content), encoding='utf-8')
+    with pytest.raises(TreatmentFailure) as content_mismatch:
+        publisher.handle(job)
+    assert content_mismatch.value.result['evidence']['reason_code'] == (
+        'PROVIDER_EFFECT_REPLAY_INVALID'
+    )
+
+    changed_environment = json.loads(json.dumps(projected))
+    changed_environment['ebay_listing']['ebay_environment'] = 'sandbox'
+    path.write_text(json.dumps(changed_environment), encoding='utf-8')
+    with pytest.raises(TreatmentFailure) as environment_mismatch:
+        publisher.handle(job)
+    assert environment_mismatch.value.result['evidence']['reason_code'] == (
+        'PROVIDER_EFFECT_REPLAY_INVALID'
+    )
+    assert publisher._published == ['OFF1']
+    assert len(reservations) == len(finished) == 1
+    assert len(validations) == 3
 
 
 def test_default_publish_mints_no_schedule(publisher, tmp_path):

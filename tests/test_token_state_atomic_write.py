@@ -37,7 +37,11 @@ def test_get_access_token_save_token_state_atomic(monkeypatch):
 
         gat.save_token_state({'access_token': 'abc', 'expiry': 123})
 
-        assert json.loads(token_path.read_text()) == {'access_token': 'abc', 'expiry': 123}
+        assert json.loads(token_path.read_text()) == {
+            'access_token': 'abc',
+            'expiry': 123,
+            '_tgw_ebay_environment': 'production',
+        }
         assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
         assert _no_leftover_tmp_files(token_path.parent, 'ebay-token.json')
 
@@ -49,6 +53,10 @@ def test_refresh_access_token_save_token_state_atomic(monkeypatch):
 
         rat.save_token_state({'access_token': 'xyz', 'expiry': 456})
 
-        assert json.loads(token_path.read_text()) == {'access_token': 'xyz', 'expiry': 456}
+        assert json.loads(token_path.read_text()) == {
+            'access_token': 'xyz',
+            'expiry': 456,
+            '_tgw_ebay_environment': 'production',
+        }
         assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
         assert _no_leftover_tmp_files(token_path.parent, 'ebay-token.json')

@@ -14,7 +14,11 @@ from pathlib import Path
 import pytest
 
 import tgw.ebay.sync as sync
-from tgw.workers.ebay_draft import _get_store_category_id
+from tgw.workers.ebay_draft import (
+    _get_store_category,
+    _get_store_category_id,
+    _store_category_draft_fields,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures shared across sections
@@ -35,6 +39,7 @@ def cat_groups_file(tmp_path):
                 "name": "Remotes",
                 "store_category": "TV & Audio Accessories",
                 "store_category_id": 55555,
+                "ebay_categories": ["14999"],
             },
         },
     }
@@ -80,6 +85,54 @@ def test_get_store_category_id_returns_none_when_no_group(cfg_with_groups):
 def test_get_store_category_id_returns_none_on_bad_path():
     cfg = {'category_groups_path': '/nonexistent/path/to/file.json'}
     assert _get_store_category_id({'category_group': 'books'}, cfg) is None
+
+
+def test_store_category_falls_back_to_resolved_ebay_category(cfg_with_groups):
+    assert _get_store_category(
+        {'ebay_category_id': '14999'}, cfg_with_groups
+    ) == {
+        'store_category_id': 55555,
+        'store_category_name': 'TV & Audio Accessories',
+    }
+
+
+def test_redraft_preserves_operator_store_selection_and_explicit_clear(
+    cfg_with_groups,
+):
+    previous = {
+        'store_category_id': '',
+        'store_category_name': None,
+        'store_category_source': 'operator',
+        'secondary_store_category_id': '77777',
+        'secondary_store_category_name': 'Operator secondary',
+        'secondary_store_category_source': 'operator',
+    }
+
+    assert _store_category_draft_fields(
+        previous,
+        {'ebay_category_id': '14999'},
+        cfg_with_groups,
+        '14999',
+    ) == previous
+
+
+def test_redraft_remaps_automatic_store_selection(cfg_with_groups):
+    result = _store_category_draft_fields(
+        {
+            'store_category_id': 11111,
+            'store_category_name': 'Old automatic choice',
+            'store_category_source': 'category_group',
+        },
+        {'ebay_category_id': '14999'},
+        cfg_with_groups,
+        '14999',
+    )
+
+    assert result == {
+        'store_category_id': 55555,
+        'store_category_name': 'TV & Audio Accessories',
+        'store_category_source': 'category_group',
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +199,25 @@ def test_offer_uses_config_names_when_no_id_in_draft(cfg_sync, monkeypatch):
                         lambda _cfg, _cat: ['Config Category'])
     _, offer = sync._build_offer_bodies(cfg_sync, 'tgw0001', _item())
     assert offer['storeCategoryNames'] == ['Config Category']
+
+
+def test_operator_store_category_clear_suppresses_config_default(
+    cfg_sync, monkeypatch,
+):
+    monkeypatch.setattr(
+        sync,
+        '_resolve_store_category_names',
+        lambda _cfg, _cat: ['Config Category'],
+    )
+    item = _item()
+    item['draft_listing'].update({
+        'store_category_id': '',
+        'store_category_source': 'operator',
+    })
+
+    _, offer = sync._build_offer_bodies(cfg_sync, 'tgw0001', item)
+
+    assert 'storeCategoryNames' not in offer
 
 
 def test_offer_omits_store_category_when_no_id_and_no_config(cfg_sync, monkeypatch):

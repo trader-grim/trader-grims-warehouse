@@ -111,6 +111,7 @@ class TestCategoryContextConditionRemap:
             for cid, lbl in _BOOKS_POLICY
         ]
         with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=allowed), \
+             patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=True), \
              patch("tgw.apis.ebay.conditions.best_condition_for_enum",
                    return_value={"condition_id": "5000", "condition_label": "Good", "condition_enum": "USED_GOOD"}), \
              patch("tgw.apis.ebay.specifics.get_aspects", return_value=[]):
@@ -122,6 +123,7 @@ class TestCategoryContextConditionRemap:
         http_server._cfg = _cfg(tmp_path)
         allowed = [{"condition_id": "3000", "condition_label": "Used", "condition_enum": "USED_EXCELLENT"}]
         with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=allowed), \
+             patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=True), \
              patch("tgw.apis.ebay.specifics.get_aspects", return_value=[]):
             result = http_server.ebay_category_context("165806", current_condition="USED_EXCELLENT")
 
@@ -130,7 +132,69 @@ class TestCategoryContextConditionRemap:
     def test_no_current_condition_param_skips_remap_lookup(self, tmp_path):
         http_server._cfg = _cfg(tmp_path)
         with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=[]), \
+             patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=None), \
              patch("tgw.apis.ebay.specifics.get_aspects", return_value=[]):
             result = http_server.ebay_category_context("165806")
 
         assert result["condition_remap"] is None
+
+    def test_incomplete_policy_never_publishes_a_remap_suggestion(self, tmp_path):
+        http_server._cfg = _cfg(tmp_path)
+        allowed = [{
+            "condition_id": "5000",
+            "condition_label": "Good",
+            "condition_enum": "USED_GOOD",
+        }]
+        with patch(
+            "tgw.apis.ebay.conditions.allowed_conditions_for_category",
+            return_value=allowed,
+        ), patch(
+            "tgw.apis.ebay.conditions.item_condition_required_for_category",
+            return_value=None,
+        ), patch(
+            "tgw.apis.ebay.conditions.best_condition_for_enum",
+            side_effect=AssertionError("unresolved policy must not suggest a remap"),
+        ), patch("tgw.apis.ebay.specifics.get_aspects", return_value=[]):
+            result = http_server.ebay_category_context(
+                "1105", current_condition="USED_EXCELLENT"
+            )
+
+        assert result["conditions"] == [{"enum": "USED_GOOD", "label": "Good"}]
+        assert result["item_condition_required"] is None
+        assert result["condition_remap"] is None
+
+    def test_cold_category_group_index_populates_pricing_and_store_context(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        groups_path = tmp_path / "category-groups.json"
+        groups_path.write_text(
+            json.dumps({
+                "groups": {
+                    "books": {
+                        "name": "Books",
+                        "ebay_categories": ["1105"],
+                        "store_category": "Books",
+                        "store_category_id": "77",
+                        "size_class": "small",
+                        "pricing": {"floor": 3.0, "typical_used": 8.0},
+                    }
+                }
+            }),
+            encoding="utf-8",
+        )
+        http_server._cfg = cfg
+        pricing_mod._groups_cache = None
+        pricing_mod._groups_reverse = None
+
+        with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=[]), \
+             patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=None), \
+             patch("tgw.apis.ebay.specifics.get_aspects", return_value=[]):
+            result = http_server.ebay_category_context("1105")
+
+        assert result["group_name"] == "Books"
+        assert result["store_category_id"] == "77"
+        assert result["size_class"] == "small"
+        assert result["pricing"] == {
+            "floor": 3.0,
+            "typical_used": 8.0,
+            "typical_new": None,
+        }

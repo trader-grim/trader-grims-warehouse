@@ -43,7 +43,10 @@ _FAKE_MOTORS_TREE = {
 
 
 def _reset_caches():
+    taxonomy._tree_index_cache = None
+    taxonomy._tree_roots_cache = None
     taxonomy._motors_tree_index_cache = None
+    taxonomy._motors_tree_roots_cache = None
 
 
 def _cfg(tmp_path):
@@ -154,3 +157,44 @@ class TestIsMotorsCategory:
             taxonomy.is_motors_category(cfg, '12')
             taxonomy.is_motors_category(cfg, '99999')
         assert mock_get.call_count == 1  # one tree fetch serves every category_id check
+
+
+class TestSnapshotOnlyMotorsOperatorTaxonomy:
+    def setup_method(self):
+        _reset_caches()
+
+    def test_resolve_search_and_browse_use_motors_snapshot_without_provider(
+        self, tmp_path,
+    ):
+        (tmp_path / 'ebay-motors-category-tree.json').write_text(
+            json.dumps({'_cached_at': 0, 'tree': _FAKE_MOTORS_TREE}),
+            encoding='utf-8',
+        )
+        cfg = _cfg(tmp_path)
+        with patch.object(
+            taxonomy, 'ebay_get',
+            side_effect=AssertionError('must not call eBay'),
+        ):
+            node = taxonomy.get_cached_category_node(cfg, '11')
+            results = taxonomy.search_categories_cached(cfg, 'brakes')
+            roots = taxonomy.get_cached_category_children(cfg, None)
+
+        assert node == {
+            'id': '11',
+            'name': 'Brakes',
+            'path': 'Parts & Accessories > Brakes',
+            'leaf': True,
+            'marketplace_id': 'EBAY_MOTORS_US',
+            'source': 'taxonomy-snapshot',
+        }
+        assert results == [node]
+        assert roots == [
+            {
+                'id': '1',
+                'name': 'Parts & Accessories',
+                'path': 'Parts & Accessories',
+                'leaf': False,
+                'marketplace_id': 'EBAY_MOTORS_US',
+                'source': 'taxonomy-snapshot',
+            }
+        ]

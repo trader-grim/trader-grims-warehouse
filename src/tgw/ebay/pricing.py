@@ -474,6 +474,8 @@ def suggest_price(
     Returns a dict with keys:
         price             float or None (None = insufficient data)
         source            description of how the price was derived
+        query             exact Browse query which produced the priced comps,
+                          or None when the price did not come from a query
         comps             {count, min, p25, median, p75, max}
         price_confidence  'high' | 'medium' | 'low'
         velocity_hint     'hold_launch' | None
@@ -494,16 +496,19 @@ def suggest_price(
 
     all_prices:     List[float] = []
     winning_summaries: List[Dict[str, Any]] = []
+    winning_query: Optional[str] = None
     source = ''
     was_cond_filtered = False
 
     # Stage 0a — operator search_terms (highest priority; each entry is training data)
     if search_terms and search_terms.strip():
-        summaries = _fetch_raw(cfg, search_terms.strip())
+        operator_query = search_terms.strip()
+        summaries = _fetch_raw(cfg, operator_query)
         prices, cfiltered = _best_prices(summaries, item_rank)
         if len(prices) >= MIN_COMPS:
             all_prices = prices
             winning_summaries = summaries
+            winning_query = operator_query
             was_cond_filtered = cfiltered
             source = 'browse:search_terms'
             log.info('pricing stage 0a (search_terms): %r → %d comps', search_terms, len(prices))
@@ -516,17 +521,20 @@ def suggest_price(
         if len(prices) >= MIN_COMPS:
             all_prices = prices
             winning_summaries = summaries
+            winning_query = lq
             was_cond_filtered = cfiltered
             source = 'browse:lookup_query'
             log.debug('pricing stage 0 (lookup): %r → %d comps', lq, len(prices))
 
     # Stage 1 — full title
     if not all_prices:
-        summaries = _fetch_raw(cfg, title)
+        title_query = title
+        summaries = _fetch_raw(cfg, title_query)
         prices, cfiltered = _best_prices(summaries, item_rank)
         if len(prices) >= MIN_COMPS:
             all_prices = prices
             winning_summaries = summaries
+            winning_query = title_query
             was_cond_filtered = cfiltered
             source = 'browse:full_title'
 
@@ -539,6 +547,7 @@ def suggest_price(
         if len(prices) >= MIN_COMPS:
             all_prices = prices
             winning_summaries = summaries
+            winning_query = query2
             was_cond_filtered = cfiltered
             source = 'browse:category+short'
 
@@ -599,6 +608,7 @@ def suggest_price(
                 return {
                     'price':            assumed,
                     'source':           f'group_assumption:{grp["name"]}',
+                    'query':            None,
                     'comps':            {},
                     'price_confidence': 'low',
                     'velocity_hint':    vel_hint,
@@ -615,6 +625,7 @@ def suggest_price(
             return {
                 'price':            assumed,
                 'source':           f'category_default:{category_id}',
+                'query':            None,
                 'comps':            {},
                 'price_confidence': 'low',
                 'velocity_hint':    vel_hint,
@@ -624,6 +635,7 @@ def suggest_price(
         return {
             'price':            None,
             'source':           'insufficient_data',
+            'query':            None,
             'comps':            {},
             'price_confidence': 'low',
             'velocity_hint':    vel_hint,
@@ -660,6 +672,7 @@ def suggest_price(
     return {
         'price':            price,
         'source':           source,
+        'query':            winning_query,
         'comps':            _comp_stats,
         'comp_items':       _extract_comp_records(winning_summaries),
         'price_confidence': confidence,

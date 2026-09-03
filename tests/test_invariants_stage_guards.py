@@ -17,8 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import tgw.workers.ebay_stage as ebay_stage
 import tgw.provider_effects as provider_effects
+import tgw.workers.ebay_stage as ebay_stage
 from tgw.queue.worker_base import HardFailure, classify_dead_letter
 
 
@@ -38,6 +38,11 @@ def stage(tmp_path, monkeypatch):
         return {'offer_id': 'OFF-NEW', 'status': 'UNPUBLISHED', 'inventory_item': {}}
 
     monkeypatch.setattr(ebay_stage, 'stage_draft', fake_stage_draft)
+    monkeypatch.setattr(
+        ebay_stage,
+        'validate_listing_condition_for_stage',
+        lambda *args, **kwargs: 'USED_GOOD',
+    )
     monkeypatch.setattr(ebay_stage, 'enqueue_post_push_sync', lambda *a, **k: True)
     monkeypatch.setattr(
         provider_effects, 'reserve_and_begin_authorized_effect',
@@ -213,7 +218,11 @@ def test_successful_stage_is_unpublished_and_preserves_comps(stage, tmp_path):
 def _run_force(worker, sku, **extra_payload):
     # operator origin by default — C9 blocks operator-less force on live items
     payload = {'sku': sku, 'force': True, 'origin': 'operator', **extra_payload}
-    worker.handle(_job(worker, sku, **{key: value for key, value in payload.items() if key != 'sku'}))
+    return worker.handle(
+        _job(worker, sku, **{
+            key: value for key, value in payload.items() if key != 'sku'
+        })
+    )
 
 
 def _live_item(draft_price, offer_price):
@@ -227,14 +236,21 @@ def _live_item(draft_price, offer_price):
 def test_force_restage_never_raises_live_price(stage, tmp_path):
     # Stale pre-s41 draft price above the live markdown must be clamped to the
     # live price AND persisted back (heals the stale draft, price_history event).
+    # The repair changes the governed generation, so provider dispatch must wait
+    # for a new evaluation/authority instead of falling through on stale intent.
     path = _write(tmp_path, 'tgw10', _live_item(draft_price=9.97, offer_price=7.98))
-    _run_force(stage, 'tgw10')
-    assert stage._staged == ['tgw10']
+    receipt = _run_force(stage, 'tgw10')
+    assert stage._staged == []
+    assert receipt['outcome'] == 'partial'
+    assert receipt['evidence']['reason_code'] == 'NEVER_RAISE_CLAMP_APPLIED'
     after = json.loads(path.read_text(encoding='utf-8'))
     assert after['draft_listing']['price'] == 7.98
     ev = after['price_history'][-1]
     assert ev['label'] == 'never_raise_clamp'
     assert ev['previous_price'] == 9.97
+    from tgw.item_mutation import item_generation
+    assert receipt['evidence']['resulting_generation'] == item_generation(after)
+    assert receipt['object_generation'] != item_generation(after)
 
 
 def test_force_restage_allows_operator_authorized_raise(stage, tmp_path):
@@ -336,11 +352,20 @@ def test_legacy_confirmed_not_duplicate_resolves_and_falls_through(stage, tmp_pa
                             'inventory_listing_id': listing_id, 'inventory_status': 'ACTIVE'})
 
     _write(tmp_path, 'tgw22', _legacy_item())
-    _run(stage, 'tgw22', force=True, origin='operator')
-    assert stage._staged == ['tgw22']   # fell through to stage_draft
+    receipt = _run(stage, 'tgw22', force=True, origin='operator')
+    assert stage._staged == []
+    assert receipt['outcome'] == 'partial'
+    assert receipt['evidence']['reason_code'] == 'LEGACY_LISTING_RESOLVED'
     after = json.loads((tmp_path / 'tgw22' / 'tgw22.json').read_text(encoding='utf-8'))
     assert after['legacy_listing_resolved'] is True
     assert after['legacy_listing_blocked']['duplicate_check']['match'] is True
+    from tgw.item_mutation import item_generation
+    assert receipt['evidence']['resulting_generation'] == item_generation(after)
+
+    # A freshly generated job is now bound to the repaired canonical generation
+    # and may proceed through the ordinary force-stage path.
+    _run(stage, 'tgw22', force=True, origin='operator')
+    assert stage._staged == ['tgw22']
 
 
 def test_legacy_duplicate_risk_never_resolves(stage, tmp_path, monkeypatch):
@@ -394,12 +419,18 @@ def test_operator_list_without_price_hard_fails_with_finding(stage, tmp_path, mo
     retry) + pipeline_error persisted so the editor renders 'needs price'
     (C11)."""
     patched = []
-    monkeypatch.setattr(ebay_stage, 'fence_patch_item',
-                        lambda cfg, sku, fields: patched.append((sku, fields)))
     item = _ready_item()
     item['draft_listing'].pop('price')
     item['ebay_offer']['price'] = 40.99
-    _write(tmp_path, 'tgw9s45', item)
+    path = _write(tmp_path, 'tgw9s45', item)
+    from tgw.item_mutation import item_generation
+    generation = item_generation(json.loads(path.read_text(encoding='utf-8')))
+
+    def capture_patch(cfg, sku, fields, *, expected_generation=None):
+        assert expected_generation == generation
+        patched.append((sku, fields))
+
+    monkeypatch.setattr(ebay_stage, 'fence_patch_item', capture_patch)
     with pytest.raises(HardFailure, match='no price set in draft_listing'):
         _run(stage, 'tgw9s45', origin='operator')
     assert stage._staged == []
@@ -421,11 +452,17 @@ def test_fallback_category_99_never_staged_no_api_call(stage, tmp_path, monkeypa
     draft_listing.category_id == '99'. Must HardFailure locally — never call
     stage_draft (no wasted/guaranteed-failing eBay API round-trip)."""
     patched = []
-    monkeypatch.setattr(ebay_stage, 'fence_patch_item',
-                        lambda cfg, sku, fields: patched.append((sku, fields)))
     item = _ready_item()
     item['draft_listing']['category_id'] = '99'
-    _write(tmp_path, 'tgw-cat99', item)
+    path = _write(tmp_path, 'tgw-cat99', item)
+    from tgw.item_mutation import item_generation
+    generation = item_generation(json.loads(path.read_text(encoding='utf-8')))
+
+    def capture_patch(cfg, sku, fields, *, expected_generation=None):
+        assert expected_generation == generation
+        patched.append((sku, fields))
+
+    monkeypatch.setattr(ebay_stage, 'fence_patch_item', capture_patch)
     with pytest.raises(HardFailure, match="fallback '99'"):
         _run(stage, 'tgw-cat99')
     assert stage._staged == []   # stage_draft (the eBay call) never reached

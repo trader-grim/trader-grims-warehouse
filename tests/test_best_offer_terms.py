@@ -15,6 +15,9 @@ from __future__ import annotations
 import pytest
 
 import tgw.ebay.sync as sync
+from tgw.draft_sync import pin_draft_to_live
+from tgw.ebay.pull import backfill_draft_from_live
+from tgw.workers.ebay_draft import _best_offer_draft_fields
 
 
 @pytest.fixture(autouse=True)
@@ -48,12 +51,16 @@ def cfg_sync():
     }
 
 
-def test_best_offer_omitted_when_unset(cfg_sync):
-    """Operator hasn't touched the field — don't send bestOfferTerms at all,
-    so eBay's existing category default (or prior state) is left untouched."""
+def test_best_offer_defaults_enabled_when_missing(cfg_sync):
     item = _item()
     _, offer = sync._build_offer_bodies(cfg_sync, 'tgw0001', item)
-    assert 'bestOfferTerms' not in offer['listingPolicies']
+    assert offer['listingPolicies']['bestOfferTerms'] == {'bestOfferEnabled': True}
+
+
+def test_best_offer_defaults_enabled_when_null(cfg_sync):
+    item = _item(best_offer_enabled=None)
+    _, offer = sync._build_offer_bodies(cfg_sync, 'tgw0001', item)
+    assert offer['listingPolicies']['bestOfferTerms'] == {'bestOfferEnabled': True}
 
 
 def test_best_offer_enabled_true(cfg_sync):
@@ -89,3 +96,69 @@ def test_best_offer_enabled_without_prices_omits_price_fields(cfg_sync):
     terms = offer['listingPolicies']['bestOfferTerms']
     assert 'autoAcceptPrice' not in terms
     assert 'autoDeclinePrice' not in terms
+
+
+def test_ai_redraft_defaults_and_preserves_best_offer_fields():
+    assert _best_offer_draft_fields({}) == {'best_offer_enabled': True}
+    assert _best_offer_draft_fields({'best_offer_enabled': None}) == {
+        'best_offer_enabled': True,
+    }
+    assert _best_offer_draft_fields(
+        {
+            'best_offer_enabled': False,
+            'best_offer_auto_accept_price': 45,
+            'best_offer_auto_decline_price': 20,
+        }
+    ) == {
+        'best_offer_enabled': False,
+        'best_offer_auto_accept_price': 45,
+        'best_offer_auto_decline_price': 20,
+    }
+
+
+def test_live_backfill_preserves_explicit_best_offer_false():
+    item = {
+        'ebay_live': {
+            'inventory_item': {'product': {}},
+            'offer': {
+                'listingPolicies': {
+                    'bestOfferTerms': {
+                        'bestOfferEnabled': False,
+                        'autoAcceptPrice': {'currency': 'USD', 'value': '45.00'},
+                        'autoDeclinePrice': {'currency': 'USD', 'value': '20.00'},
+                    },
+                },
+            },
+        },
+    }
+
+    assert backfill_draft_from_live(item, {}) is True
+    draft = item['draft_listing']
+    assert draft['best_offer_enabled'] is False
+    assert draft['best_offer_auto_accept_price'] == '45.00'
+    assert draft['best_offer_auto_decline_price'] == '20.00'
+
+
+def test_reset_draft_from_live_preserves_explicit_best_offer_false():
+    patch = pin_draft_to_live(
+        {
+            'draft_listing': {'best_offer_enabled': True},
+            'ebay_live': {
+                'inventory_item': {'product': {}},
+                'offer': {
+                    'listingPolicies': {
+                        'bestOfferTerms': {
+                            'bestOfferEnabled': False,
+                            'autoAcceptPrice': {'currency': 'USD', 'value': '45.00'},
+                            'autoDeclinePrice': {'currency': 'USD', 'value': '20.00'},
+                        },
+                    },
+                },
+            },
+        }
+    )
+
+    draft = patch['draft_listing']
+    assert draft['best_offer_enabled'] is False
+    assert draft['best_offer_auto_accept_price'] == '45.00'
+    assert draft['best_offer_auto_decline_price'] == '20.00'

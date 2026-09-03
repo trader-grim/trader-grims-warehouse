@@ -205,9 +205,11 @@ def tgw_queue_status() -> str:
     waiting but completed nothing in the watchdog window (PP-DEADLETTER-001).
     """
     cfg = _get_cfg()
+    from tgw.config import configured_ebay_environment
     from tgw.health import classify_dead_letter_errors
     from tgw.queue import state_machine
-    state_machine.init(cfg['postgres_dsn'])
+    environment = configured_ebay_environment(cfg)
+    state_machine.init(cfg['postgres_dsn'], environment)
     try:
         with state_machine._conn() as con:
             with con.cursor() as cur:
@@ -220,9 +222,17 @@ def tgw_queue_status() -> str:
                      ORDER BY queue_name, state
                     """
                 )
+                counts: Dict[tuple[str, str], int] = {}
+                for queue_name, state, count in cur.fetchall():
+                    if not state_machine.queue_name_visible_in_environment(
+                        queue_name, environment,
+                    ):
+                        continue
+                    key = (state_machine.logical_queue_name(queue_name), state)
+                    counts[key] = counts.get(key, 0) + count
                 rows = [
-                    {'queue': r[0], 'state': r[1], 'count': r[2]}
-                    for r in cur.fetchall()
+                    {'queue': queue, 'state': state, 'count': count}
+                    for (queue, state), count in sorted(counts.items())
                 ]
 
         dead_letter_total = sum(
@@ -293,6 +303,7 @@ def tgw_enqueue(
     cfg = _get_cfg()
     import psycopg2.errors
 
+    from tgw.config import configured_ebay_environment
     from tgw.queue import state_machine
 
     _VALID_ACTIONS = {
@@ -316,7 +327,9 @@ def tgw_enqueue(
         else:
             return json.dumps({'ok': False, 'error': f'item not found: {sku}'})
 
-    state_machine.init(cfg['postgres_dsn'])
+    state_machine.init(
+        cfg['postgres_dsn'], configured_ebay_environment(cfg),
+    )
     try:
         jid = state_machine.enqueue_job(
             queue_name=action,
@@ -395,8 +408,11 @@ def tgw_get_todo(
         include_bodies: explicitly include full bodies in a page.
     """
     cfg = _get_cfg()
+    from tgw.config import configured_ebay_environment
     from tgw.queue import state_machine
-    state_machine.init(cfg['postgres_dsn'])
+    state_machine.init(
+        cfg['postgres_dsn'], configured_ebay_environment(cfg),
+    )
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
         return json.dumps({'ok': False, 'error': 'limit must be an integer between 1 and 100'})
     if not isinstance(todo_id, int) or isinstance(todo_id, bool) or todo_id < 0:
@@ -537,9 +553,12 @@ def tgw_dead_letter(
     Returns JSON list of dead_letter jobs with queue, sku, error, verdict fields.
     """
     cfg = _get_cfg()
+    from tgw.config import configured_ebay_environment
     from tgw.queue import state_machine
     from tgw.queue.worker_base import classify_dead_letter
-    state_machine.init(cfg['postgres_dsn'])
+    state_machine.init(
+        cfg['postgres_dsn'], configured_ebay_environment(cfg),
+    )
     try:
         jobs = state_machine.dead_letter_jobs(queue_name=queue, limit=limit)
         result = []

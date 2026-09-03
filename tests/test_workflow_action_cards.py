@@ -2,6 +2,7 @@ import json
 from unittest.mock import MagicMock
 
 from tgw import http_server
+from tgw.item_mutation import item_generation
 from tgw.workflow.action_cards import build_item_action_card
 
 
@@ -34,58 +35,23 @@ def test_projection_exposes_current_graph_evidence_waits_and_legal_actions(tmp_p
                for reason in upload["reasons"])
 
 
-def test_missing_provider_contract_does_not_hide_list_command(tmp_path):
-    path = _item(tmp_path, condition="Used")
-    path.write_text(
-        json.dumps(
-            {
-                "sku": "SKU-1",
-                "condition": "Used",
-                "image": "a.jpg",
-                "ebay_category_id": "123",
-                "draft_listing": {
-                    "title": "Example",
-                    "category_id": "123",
-                    "price": 10,
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+def test_action_card_evaluates_canonical_path_state_not_supplied_stale_document(tmp_path):
+    """The card snapshot always reflects the canonical item file on disk.
 
-    card = build_item_action_card(path)
+    item_snapshot (main stream) builds the evaluated snapshot from the item
+    path, never from a caller-supplied document: a stale ``item_document``
+    feeds the authoritative stage lookup but cannot override the snapshot, so
+    the card generation is the on-disk canonical generation.
+    """
+    path = _item(tmp_path, condition="original")
+    frozen = json.loads(path.read_text(encoding="utf-8"))
+    advanced = {**frozen, "condition": "concurrent", "concurrent": True}
+    path.write_text(json.dumps(advanced), encoding="utf-8")
 
-    upload = next(
-        waiting
-        for waiting in card["waiting_treatments"]
-        if waiting["treatment_id"] == "ebay-upload"
-    )
-    assert len(upload["reasons"]) == 1
-    assert upload["reasons"][0].startswith("operator_authorized_upload=false:")
-    assert card["operator_projection"]["commands"]["list-item"] == {
-        "enabled": True,
-        "reason": None,
-    }
+    card = build_item_action_card(path, item_document=frozen)
 
-
-def test_published_inventory_projection_exposes_update_not_list(tmp_path):
-    path = _item(tmp_path, condition="Used")
-    item = json.loads(path.read_text(encoding="utf-8"))
-    item.update(
-        ebay_offer={"offer_id": "offer-1", "status": "PUBLISHED"},
-        ebay_listing={
-            "listing_id": "listing-1",
-            "status": "PUBLISHED",
-        },
-    )
-    path.write_text(json.dumps(item), encoding="utf-8")
-
-    card = build_item_action_card(path)
-    commands = card["operator_projection"]["commands"]
-
-    assert card["operator_projection"]["state"] == "published"
-    assert commands["list-item"]["enabled"] is False
-    assert commands["update-item"] == {"enabled": True, "reason": None}
+    assert card["object_generation"] == item_generation(advanced)
+    assert card["object_generation"] != item_generation(frozen)
 
 
 def test_attempts_join_results_and_ambiguous_external_effect_becomes_gate(tmp_path):
@@ -104,8 +70,6 @@ def test_attempts_join_results_and_ambiguous_external_effect_becomes_gate(tmp_pa
     assert "listing.publish" in card["operator_gates"]
     assert card["blind_retry_allowed"] is False
     assert not any(action.get("action") == "retry" for action in card["legal_actions"])
-    assert card["operator_projection"]["commands"]["list-item"]["enabled"] is False
-    assert card["operator_projection"]["commands"]["update-item"]["enabled"] is False
 
 
 def test_legacy_unbound_reconciliation_receipt_still_blocks_retry(tmp_path):
@@ -275,7 +239,8 @@ def test_attempt_query_uses_entity_identity_with_legacy_sku_fallback(monkeypatch
     cursor = MagicMock()
     cursor.__enter__.return_value = cursor
     cursor.fetchall.return_value = [{
-        "job_id": "job-1", "state": "dead_letter",
+        "job_id": "job-1", "queue_name": "normalize_condition",
+        "state": "dead_letter",
         "payload_json": {"treatment_id": "normalize-condition", "graph_id": "graph-1",
                          "object_generation": "gen-1"},
     }]

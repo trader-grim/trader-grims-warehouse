@@ -32,7 +32,7 @@ from .catalog import (
     load_full_catalog,
     load_search_catalog,
 )
-from .config import DEFAULT_CONFIG, load_config
+from .config import DEFAULT_CONFIG, configured_ebay_environment, load_config
 from .context import clear_context, get_context, set_context
 from .ebay.draft_specifics import get_ebay_aspects as _get_ebay_aspects
 from .ebay.inventory_diff import diff_ebay_draft_to_inventory as _diff_ebay_to_inventory
@@ -275,7 +275,9 @@ def cmd_enqueue_sku(cfg: Dict[str, Any], sku: str, queue: str) -> Dict[str, Any]
     if not sku_json(cfg, sku).exists():
         return {"ok": False, "error": f"item not found: {sku}"}
 
-    state_machine.init(cfg["postgres_dsn"])
+    state_machine.init(
+        cfg["postgres_dsn"], configured_ebay_environment(cfg),
+    )
     try:
         jid = state_machine.enqueue_job(
             queue_name=queue,
@@ -956,7 +958,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="trigger Syncthing rescan of catalog_export_folder_id after export (PP-PORTABLE-CATALOG-001 P2)")
 
     p = sub.add_parser("get-ebay-token", help="browser OAuth re-consent flow — use when refresh token is dead (HTTP 400)")
-    p.add_argument("--sandbox", action="store_true", help="use eBay sandbox instead of production")
+    p.add_argument(
+        "--sandbox",
+        action="store_true",
+        default=None,
+        help="use eBay sandbox instead of the environment selected by config",
+    )
     p.add_argument("--code", default=None, help="skip browser: supply auth code from redirect URL directly (URL-encoded OK)")
     p.add_argument("--print-url", action="store_true", dest="print_url", help="print the OAuth authorization URL and exit without opening a browser")
 
@@ -2113,7 +2120,10 @@ def cmd_hint(cfg: Dict[str, Any], sku: str, hint: str, force: bool = False) -> D
     import psycopg2.errors
 
     try:
-        state_machine.init(cfg.get("postgres_dsn", "dbname=state_machine user=tgw"))
+        state_machine.init(
+            cfg.get("postgres_dsn", "dbname=state_machine user=tgw"),
+            configured_ebay_environment(cfg),
+        )
         jid = state_machine.enqueue_job(
             queue_name="ai_identify",
             payload={"sku": sku},
@@ -2191,7 +2201,9 @@ def cmd_dead_letter(
     from tgw.queue import state_machine
     from tgw.queue.worker_base import classify_dead_letter
 
-    state_machine.init(cfg["postgres_dsn"])
+    state_machine.init(
+        cfg["postgres_dsn"], configured_ebay_environment(cfg),
+    )
 
     if requeue_id:
         try:
@@ -2267,7 +2279,9 @@ def cmd_queue_history(
     """Show job state-transition history from v_job_history."""
     from tgw.queue import state_machine
 
-    state_machine.init(cfg["postgres_dsn"])
+    state_machine.init(
+        cfg["postgres_dsn"], configured_ebay_environment(cfg),
+    )
     rows = state_machine.job_history(sku=sku, queue_name=queue, job_id=job_id, limit=limit)
 
     if not rows:
@@ -2378,7 +2392,10 @@ def cmd_requeue(
         return {"ok": False, "error": "specify at least one filter flag"}
 
     if not dry_run:
-        state_machine.init(cfg.get("postgres_dsn", "dbname=state_machine user=tgw"))
+        state_machine.init(
+            cfg.get("postgres_dsn", "dbname=state_machine user=tgw"),
+            configured_ebay_environment(cfg),
+        )
 
     matched, queued, skipped_pending, skipped_no_photos = [], [], [], []
     root: Path = cfg["itemdata_root"]
@@ -2481,7 +2498,10 @@ def cmd_resolve_legacy(cfg: Dict[str, Any], skus: List[str], enqueue_stage: bool
     from tgw.items import atomic_write_json
     from tgw.queue import state_machine
 
-    state_machine.init(cfg.get("postgres_dsn", "dbname=state_machine user=tgw"))
+    state_machine.init(
+        cfg.get("postgres_dsn", "dbname=state_machine user=tgw"),
+        configured_ebay_environment(cfg),
+    )
 
     resolved, not_found, already_done, staged = [], [], [], []
     duplicate_risk: List[Dict[str, Any]] = []
@@ -2674,6 +2694,12 @@ def cmd_publish(cfg: Dict[str, Any], skus: List[str], dry_run: bool = False) -> 
     enqueued: List[str] = []
     skipped: List[str] = []
     errors: List[str] = []
+
+    if not dry_run:
+        state_machine.init(
+            cfg.get("postgres_dsn", "dbname=state_machine user=tgw"),
+            configured_ebay_environment(cfg),
+        )
 
     for sku in skus:
         jf = cfg["itemdata_root"] / sku / f"{sku}.json"
@@ -3002,7 +3028,10 @@ def cmd_ai_usage(cfg: Dict[str, Any], since_days: int = 7) -> Dict[str, Any]:
     Prints a formatted table to stdout when called from the CLI.
     """
     from tgw.queue import state_machine as sm
-    sm.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+    sm.init(
+        cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'),
+        configured_ebay_environment(cfg),
+    )
     try:
         rows = sm.query_ai_usage(since_days)
     except Exception as exc:
@@ -3049,7 +3078,10 @@ def cmd_ai_usage_by_sku(cfg: Dict[str, Any], sku: str, since_days: int = 30) -> 
     Returns ``{'ok': True, 'sku': sku, 'rows': [...], 'since_days': N}``.
     """
     from tgw.queue import state_machine as sm
-    sm.init(cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+    sm.init(
+        cfg.get('postgres_dsn', 'dbname=state_machine user=tgw'),
+        configured_ebay_environment(cfg),
+    )
     try:
         rows = sm.query_ai_usage_by_sku(sku, since_days)
     except Exception as exc:
@@ -3329,7 +3361,9 @@ def cmd_price_freeship(
             import psycopg2.errors  # noqa: PLC0415
 
             from tgw.queue import state_machine as _sm
-            _sm.init(cfg["postgres_dsn"])
+            _sm.init(
+                cfg["postgres_dsn"], configured_ebay_environment(cfg),
+            )
             _sm.enqueue_catalog_rebuild(f"price_freeship:{sku}")
         except psycopg2.errors.UniqueViolation:
             pass
@@ -3436,7 +3470,9 @@ def cmd_bulk(
         try:
             from .queue import state_machine as _sm
 
-            _sm.init(cfg["postgres_dsn"])
+            _sm.init(
+                cfg["postgres_dsn"], configured_ebay_environment(cfg),
+            )
             _sm.enqueue_catalog_rebuild("bulk_edit")
         except Exception:
             pass
@@ -3637,7 +3673,10 @@ def cmd_trace_start(
     """
     from tgw.queue import state_machine as sm
 
-    sm.init(cfg.get("postgres_dsn", "dbname=state_machine user=tgw"))
+    sm.init(
+        cfg.get("postgres_dsn", "dbname=state_machine user=tgw"),
+        configured_ebay_environment(cfg),
+    )
 
     try:
         run_id = sm.start_agent_run(
@@ -3664,7 +3703,10 @@ def cmd_trace_end(
     """`tgw trace end` — record the end of one agent run (PP-AGENTTRACE-001)."""
     from tgw.queue import state_machine as sm
 
-    sm.init(cfg.get("postgres_dsn", "dbname=state_machine user=tgw"))
+    sm.init(
+        cfg.get("postgres_dsn", "dbname=state_machine user=tgw"),
+        configured_ebay_environment(cfg),
+    )
 
     try:
         sm.end_agent_run(run_id, status=status, summary=summary, transcript_path=transcript_path)
@@ -3738,7 +3780,9 @@ def cmd_quiet_check(cfg: Dict[str, Any], *, notify_on_idle: bool = False, kdc_de
 
     from .queue import state_machine
 
-    state_machine.init(cfg["postgres_dsn"])
+    state_machine.init(
+        cfg["postgres_dsn"], configured_ebay_environment(cfg),
+    )
     depths = state_machine.active_depths()
     active_total = sum(depths.values())
     quiet = active_total == 0
@@ -5103,7 +5147,9 @@ def main() -> int:
         elif args.op == "migrate-restore":
             from .queue import state_machine as _sm
             from .sku_migration import _MIGRATE_ARCHIVE
-            _sm.init(cfg["postgres_dsn"])
+            _sm.init(
+                cfg["postgres_dsn"], configured_ebay_environment(cfg),
+            )
 
             old_sku = args.old_sku
             archive_path = _MIGRATE_ARCHIVE / f"{old_sku}.json"
@@ -5161,7 +5207,9 @@ def main() -> int:
             from .queue import state_machine as _sm
             from .sku_migration import check_collisions, run_migration
 
-            _sm.init(cfg["postgres_dsn"])
+            _sm.init(
+                cfg["postgres_dsn"], configured_ebay_environment(cfg),
+            )
 
             if args.check_collisions:
                 result = check_collisions(cfg)
@@ -5272,7 +5320,9 @@ def main() -> int:
         elif args.op == "import-sold-csv":
             from .queue import state_machine as _sm
 
-            _sm.init(cfg["postgres_dsn"])
+            _sm.init(
+                cfg["postgres_dsn"], configured_ebay_environment(cfg),
+            )
             result = cmd_import_sold_csv(cfg, Path(args.file), dry_run=args.dry_run, show_columns=args.show_columns, fuzzy=args.fuzzy, fuzzy_threshold=args.fuzzy_threshold)
             if result.get("ok") and not args.show_columns:
                 marked = result.get("marked", 0)
@@ -5292,7 +5342,9 @@ def main() -> int:
             )
             from .queue import state_machine as _sm
 
-            _sm.init(cfg["postgres_dsn"])
+            _sm.init(
+                cfg["postgres_dsn"], configured_ebay_environment(cfg),
+            )
             observed_at = datetime.now(tz=timezone.utc)
             api_orders = list(get_orders(
                 cfg,
@@ -5338,7 +5390,9 @@ def main() -> int:
             from .queue import state_machine as _sm
             from .workers.ebay_legacy_sync import _sold_state_path
 
-            _sm.init(cfg["postgres_dsn"])
+            _sm.init(
+                cfg["postgres_dsn"], configured_ebay_environment(cfg),
+            )
 
             synced_at = datetime.now(tz=timezone.utc).isoformat()
             itemdata_root = cfg["itemdata_root"]
@@ -5868,7 +5922,9 @@ def main() -> int:
         elif args.op == "restart-ebay-token":
             from .queue import state_machine as _sm
 
-            _sm.init(cfg["postgres_dsn"])
+            _sm.init(
+                cfg["postgres_dsn"], configured_ebay_environment(cfg),
+            )
             cleared = _sm.clear_dead_letter(queue_name="token_refresh")
             # PP-STATEMACHINE-001 Phase 3 (todo #1608): supersede=True is the
             # "force now regardless of pending schedule" case — without it, a
@@ -5924,9 +5980,17 @@ def main() -> int:
             from .apis.ebay.get_access_token import exchange_code_for_tokens, generate_auth_url, get_access_token, save_token_state
             from .apis.ebay.get_access_token import load_config as _ebay_load_config
 
+            sandbox_selector = getattr(args, "sandbox", None)
+            ebay_cfg = _ebay_load_config(
+                is_sandbox=sandbox_selector,
+                config=cfg,
+            )
+            selected_sandbox = ebay_cfg["environment"] == "sandbox"
+
             if getattr(args, "print_url", False):
                 url = generate_auth_url(
-                    _ebay_load_config(is_sandbox=getattr(args, "sandbox", False)), is_sandbox=getattr(args, "sandbox", False)
+                    ebay_cfg,
+                    is_sandbox=selected_sandbox,
                 )
                 print(url)
                 result = {"ok": True, "url": url}
@@ -5934,18 +5998,34 @@ def main() -> int:
                 direct_code = getattr(args, "code", None)
                 if direct_code:
                     direct_code = unquote(direct_code)
-                    ebay_cfg = _ebay_load_config(is_sandbox=getattr(args, "sandbox", False))
-                    tokens = exchange_code_for_tokens(direct_code, ebay_cfg, is_sandbox=getattr(args, "sandbox", False))
-                    save_token_state(tokens)
+                    tokens = exchange_code_for_tokens(
+                        direct_code,
+                        ebay_cfg,
+                        is_sandbox=selected_sandbox,
+                    )
+                    save_token_state(
+                        tokens,
+                        selected_sandbox,
+                        token_path=ebay_cfg["token_path"],
+                        environment=ebay_cfg["environment"],
+                    )
                     token = tokens["access_token"]
                     import time as _time
 
                     exp = int(tokens.get("expiry", 0) - _time.time())
                     print(f"Token exchanged. Expires in {exp}s ({exp // 3600}h). Run: tgw restart-ebay-token")
                 else:
-                    token = get_access_token(prompt_if_needed=True, is_sandbox=getattr(args, "sandbox", False))
+                    token = get_access_token(
+                        prompt_if_needed=True,
+                        is_sandbox=sandbox_selector,
+                        config=cfg,
+                    )
                     print("Token written to secrets. Run: tgw restart-ebay-token")
-                result = {"ok": True, "token_prefix": token[:20] + "..."}
+                result = {
+                    "ok": True,
+                    "environment": ebay_cfg["environment"],
+                    "token_written": bool(token),
+                }
 
         elif args.op == "report":
             from .reports import cmd_report_sales

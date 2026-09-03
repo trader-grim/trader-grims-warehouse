@@ -1,12 +1,9 @@
-"""audit#1143 #1168 — ebay_publish.py's 25021 condition-rejection fallback.
+"""A provider condition rejection must return to explicit operator choice.
 
-Bug: when eBay rejects publish with errorId 25021 (category doesn't support
-the granular condition), the worker retried with condition=USED_EXCELLENT
-via a direct inventory_item PUT and succeeded — but never wrote the corrected
-condition back into draft_listing. The next ebay_stage re-stage would
-resubmit the original (rejected) condition_enum from draft_listing, get
-25021 again, and repeat this same fallback dance forever — local record
-permanently disagreeing with what's actually live on eBay.
+The former 25021 path silently rewrote the provider inventory item to
+USED_EXCELLENT and retried publish.  Category changes now expose a
+same-or-worse suggestion but never apply it automatically, so the provider
+worker must record the rejection once and stop.
 
 All eBay API calls and state_machine/fence writes are mocked — tests pass
 completely offline.
@@ -21,8 +18,9 @@ from typing import Any, Dict
 import pytest
 import requests
 
-import tgw.workers.ebay_publish as ebay_publish_mod
+import tgw.ebay.sync as ebay_sync
 import tgw.provider_effects as provider_effects
+import tgw.workers.ebay_publish as ebay_publish_mod
 from tgw.workers.ebay_publish import EbayPublishWorker
 
 
@@ -80,9 +78,18 @@ def _http_error_25021() -> requests.exceptions.HTTPError:
 
 
 def _mock_common(monkeypatch, tmp_path):
+    from tests.conftest import make_fake_fence_write
+
     monkeypatch.setattr(ebay_publish_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
     monkeypatch.setattr(ebay_publish_mod.state_machine, 'enqueue_job', lambda **k: 'job-1')
-    monkeypatch.setattr(ebay_publish_mod, 'fence_ebay_write', lambda *a, **k: {'ok': True})
+    monkeypatch.setattr(
+        ebay_publish_mod,
+        'validate_listing_condition_for_stage',
+        lambda *args, **kwargs: 'USED_VERY_GOOD',
+    )
+    monkeypatch.setattr(
+        ebay_publish_mod, 'fence_ebay_write', make_fake_fence_write(tmp_path),
+    )
     monkeypatch.setattr(ebay_publish_mod, 'enqueue_post_push_sync', lambda *a, **k: True)
     monkeypatch.setattr(
         provider_effects, 'reserve_and_begin_authorized_effect',
@@ -102,7 +109,49 @@ def _job(tmp_path, sku):
         tmp_path, sku, treatment_id='ebay-publish', origin='operator')
 
 
-def test_condition_fallback_writes_corrected_condition_back_to_draft_listing(tmp_path, monkeypatch):
+def test_condition_hold_precedes_publish_effect_reservation(tmp_path, monkeypatch):
+    sku = 'tgw-condition-hold'
+    _write_item(tmp_path, sku, _item(sku))
+    _mock_common(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        ebay_publish_mod,
+        'validate_listing_condition_for_stage',
+        ebay_sync.validate_listing_condition_for_stage,
+    )
+    monkeypatch.setattr(
+        ebay_sync,
+        'item_condition_required_for_category',
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        ebay_sync,
+        'allowed_conditions_for_category',
+        lambda *args, **kwargs: [{
+            'condition_id': '4000',
+            'condition_label': 'Very Good',
+            'condition_enum': 'USED_VERY_GOOD',
+        }],
+    )
+    monkeypatch.setattr(
+        provider_effects,
+        'reserve_and_begin_authorized_effect',
+        lambda **kwargs: pytest.fail(
+            'publish effect must not be reserved while condition policy is held'
+        ),
+    )
+    monkeypatch.setattr(
+        ebay_publish_mod,
+        'publish_offer',
+        lambda *args, **kwargs: pytest.fail(
+            'provider publish must not run while condition policy is held'
+        ),
+    )
+
+    with pytest.raises(ValueError, match='condition policy is unresolved'):
+        _worker(_cfg(tmp_path)).handle(_job(tmp_path, sku))
+
+
+def test_condition_rejection_is_recorded_without_retry_or_grade_rewrite(tmp_path, monkeypatch):
     sku = 'tgw1'
     _write_item(tmp_path, sku, _item(sku))
     _mock_common(monkeypatch, tmp_path)
@@ -111,65 +160,59 @@ def test_condition_fallback_writes_corrected_condition_back_to_draft_listing(tmp
 
     def _fake_publish_offer(cfg, offer_id):
         calls['publish'] += 1
-        if calls['publish'] == 1:
-            raise _http_error_25021()
-        return {'listing_id': 'L1', 'listing_url': 'http://x', 'status': 'PUBLISHED'}
+        raise _http_error_25021()
 
     monkeypatch.setattr(ebay_publish_mod, 'publish_offer', _fake_publish_offer)
-    monkeypatch.setattr(ebay_publish_mod, 'ebay_put', lambda *a, **k: {'ok': True})
-    # No cached policy for this category — condition_label falls back to 'Used'.
-    monkeypatch.setattr(ebay_publish_mod.conditions, 'allowed_conditions_for_category',
-                        lambda cfg, cat_id: [])
 
     patched = {}
-    monkeypatch.setattr(ebay_publish_mod, 'fence_patch_item',
-                        lambda cfg, sku, fields: patched.update(fields) or {'ok': True})
+    from tests.conftest import make_fake_patch_item
+    fake_patch = make_fake_patch_item(tmp_path)
+    monkeypatch.setattr(
+        ebay_publish_mod, 'fence_patch_item',
+        lambda cfg, sku, fields, **kwargs: (
+            patched.update(fields) or fake_patch(cfg, sku, fields, **kwargs)
+        ),
+    )
 
     worker = _worker(_cfg(tmp_path))
-    worker.handle(_job(tmp_path, sku))
+    with pytest.raises(ebay_publish_mod.TreatmentFailure):
+        worker.handle(_job(tmp_path, sku))
 
-    assert calls['publish'] == 2
-    assert patched['draft_listing']['condition_enum'] == 'USED_EXCELLENT'
-    assert patched['draft_listing']['condition_id'] == '3000'
-    assert patched['draft_listing']['condition_label'] == 'Used'
+    assert calls['publish'] == 1
+    assert 'draft_listing' not in patched
+    assert patched['pipeline_error']['code'] == 'ebay_rejected'
+    assert patched['pipeline_error']['field'] == 'condition_enum'
 
 
-def test_condition_fallback_uses_category_specific_label_when_available(tmp_path, monkeypatch):
-    # code-review follow-up: the label must come from conditions.py's
-    # canonical per-category lookup, not a hardcoded 'Used' string, when
-    # the category's real eBay-returned description differs.
+def test_condition_rejection_does_not_consult_a_fallback_label(tmp_path, monkeypatch):
     sku = 'tgw3'
     _write_item(tmp_path, sku, _item(sku, category_id='999'))
     _mock_common(monkeypatch, tmp_path)
 
     def _fake_publish_offer(cfg, offer_id):
-        if not hasattr(_fake_publish_offer, 'called'):
-            _fake_publish_offer.called = True
-            raise _http_error_25021()
-        return {'listing_id': 'L1', 'listing_url': 'http://x', 'status': 'PUBLISHED'}
+        raise _http_error_25021()
 
     monkeypatch.setattr(ebay_publish_mod, 'publish_offer', _fake_publish_offer)
-    monkeypatch.setattr(ebay_publish_mod, 'ebay_put', lambda *a, **k: {'ok': True})
-
-    def _fake_allowed(cfg, cat_id):
-        assert cat_id == '999'
-        return [{'condition_id': '3000', 'condition_label': 'Pre-owned - Good', 'condition_enum': 'USED_EXCELLENT'}]
-
-    monkeypatch.setattr(ebay_publish_mod.conditions, 'allowed_conditions_for_category', _fake_allowed)
 
     patched = {}
-    monkeypatch.setattr(ebay_publish_mod, 'fence_patch_item',
-                        lambda cfg, sku, fields: patched.update(fields) or {'ok': True})
+    from tests.conftest import make_fake_patch_item
+    fake_patch = make_fake_patch_item(tmp_path)
+    monkeypatch.setattr(
+        ebay_publish_mod, 'fence_patch_item',
+        lambda cfg, sku, fields, **kwargs: (
+            patched.update(fields) or fake_patch(cfg, sku, fields, **kwargs)
+        ),
+    )
 
     worker = _worker(_cfg(tmp_path))
-    worker.handle(_job(tmp_path, sku))
+    with pytest.raises(ebay_publish_mod.TreatmentFailure):
+        worker.handle(_job(tmp_path, sku))
 
-    assert patched['draft_listing']['condition_label'] == 'Pre-owned - Good'
+    assert 'draft_listing' not in patched
+    assert patched['pipeline_error']['code'] == 'ebay_rejected'
 
 
-def test_condition_fallback_label_lookup_failure_falls_back_safely(tmp_path, monkeypatch):
-    # A broken/unavailable condition-policy lookup must not fail the
-    # already-succeeded publish — falls back to the safe default label.
+def test_repeated_condition_rejection_still_dispatches_only_once(tmp_path, monkeypatch):
     sku = 'tgw4'
     _write_item(tmp_path, sku, _item(sku))
     _mock_common(monkeypatch, tmp_path)
@@ -178,27 +221,27 @@ def test_condition_fallback_label_lookup_failure_falls_back_safely(tmp_path, mon
 
     def _fake_publish_offer(cfg, offer_id):
         calls['publish'] += 1
-        if calls['publish'] == 1:
-            raise _http_error_25021()
-        return {'listing_id': 'L1', 'listing_url': 'http://x', 'status': 'PUBLISHED'}
+        raise _http_error_25021()
 
     monkeypatch.setattr(ebay_publish_mod, 'publish_offer', _fake_publish_offer)
-    monkeypatch.setattr(ebay_publish_mod, 'ebay_put', lambda *a, **k: {'ok': True})
-
-    def _raise(cfg, cat_id):
-        raise RuntimeError('condition policy cache unavailable')
-
-    monkeypatch.setattr(ebay_publish_mod.conditions, 'allowed_conditions_for_category', _raise)
 
     patched = {}
-    monkeypatch.setattr(ebay_publish_mod, 'fence_patch_item',
-                        lambda cfg, sku, fields: patched.update(fields) or {'ok': True})
+    from tests.conftest import make_fake_patch_item
+    fake_patch = make_fake_patch_item(tmp_path)
+    monkeypatch.setattr(
+        ebay_publish_mod, 'fence_patch_item',
+        lambda cfg, sku, fields, **kwargs: (
+            patched.update(fields) or fake_patch(cfg, sku, fields, **kwargs)
+        ),
+    )
 
     worker = _worker(_cfg(tmp_path))
-    worker.handle(_job(tmp_path, sku))
+    with pytest.raises(ebay_publish_mod.TreatmentFailure):
+        worker.handle(_job(tmp_path, sku))
 
-    assert calls['publish'] == 2
-    assert patched['draft_listing']['condition_label'] == 'Used'
+    assert calls['publish'] == 1
+    assert 'draft_listing' not in patched
+    assert patched['pipeline_error']['code'] == 'ebay_rejected'
 
 
 def test_non_25021_error_does_not_touch_condition(tmp_path, monkeypatch):
@@ -212,8 +255,14 @@ def test_non_25021_error_does_not_touch_condition(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ebay_publish_mod, 'publish_offer', _raise_other)
     patched = {}
-    monkeypatch.setattr(ebay_publish_mod, 'fence_patch_item',
-                        lambda cfg, sku, fields: patched.update(fields) or {'ok': True})
+    from tests.conftest import make_fake_patch_item
+    fake_patch = make_fake_patch_item(tmp_path)
+    monkeypatch.setattr(
+        ebay_publish_mod, 'fence_patch_item',
+        lambda cfg, sku, fields, **kwargs: (
+            patched.update(fields) or fake_patch(cfg, sku, fields, **kwargs)
+        ),
+    )
 
     worker = _worker(_cfg(tmp_path))
     with pytest.raises(ebay_publish_mod.TreatmentFailure):

@@ -218,8 +218,11 @@ def data_scrub_size_class_backfill(cfg: Dict[str, Any], dry_run: bool = True) ->
 
     if not dry_run and updated:
         try:
+            from .config import configured_ebay_environment
             from .queue import state_machine as _sm
-            _sm.init(cfg['postgres_dsn'])
+            _sm.init(
+                cfg['postgres_dsn'], configured_ebay_environment(cfg),
+            )
             _sm.enqueue_catalog_rebuild('size_class_backfill')
         except Exception:
             pass

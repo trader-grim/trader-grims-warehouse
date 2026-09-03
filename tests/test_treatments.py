@@ -23,8 +23,10 @@ from tgw.workflow.treatments import (
     EBAY_PUBLISH,
     EBAY_STAGE,
     EBAY_UPLOAD,
+    EBAY_WITHDRAW,
     NORMALIZE_CONDITION,
     TGW_TREATMENTS,
+    WITHDRAW_TREATMENTS,
 )
 from tgw.development.treatments import (
     CLAUDE_REVIEW,
@@ -58,12 +60,14 @@ _TGW_CONDITIONS = frozenset({
     "operator_authorized_upload",
     "operator_authorized_stage",
     "operator_authorized_publish",
+    "operator_authorized_withdraw",
     "valid_condition",
     "condition_normalizable",
     "valid_category",
     "title_ok",
     "provider_effect_succeeded",
     "provider_projection_current",
+    "listing_inactive",
 })
 
 _ALL_KNOWN_CONDITIONS = _CODING_CONDITIONS | _TGW_CONDITIONS
@@ -110,10 +114,14 @@ def _evaluate(assertions, treatments, *, generation="3", ambiguities=()):
 
 
 def test_treatment_count():
-    """Business and coding treatment registries are separate."""
+    """Registries are separate: ALL_TREATMENTS covers the TGW listing domain
+    (8 ordinary treatments) plus the explicit operator withdrawal. Coding
+    treatments live in tgw.development.treatments and are not aggregated here.
+    """
     assert len(CODING_TREATMENTS) == 4
     assert len(TGW_TREATMENTS) == 8
-    assert len(ALL_TREATMENTS) == 8
+    assert WITHDRAW_TREATMENTS == (EBAY_WITHDRAW,)
+    assert len(ALL_TREATMENTS) == 9
 
 
 def test_unique_identity_version_pairs():
@@ -157,6 +165,7 @@ def test_external_treatments_are_external():
         EBAY_UPLOAD,
         EBAY_STAGE,
         EBAY_PUBLISH,
+        EBAY_WITHDRAW,
     }
     for t in external:
         assert t.effect_class == EffectClass.EXTERNAL, (
@@ -315,6 +324,15 @@ def test_ebay_publish_requires_current_stage_and_operator_authority():
         "inventory_available", "staged", "staged_content_current",
         "operator_authorized_publish",
     }
+
+
+def test_ebay_withdraw_requires_published_listing_and_operator_authority():
+    assert {item.condition_id for item in EBAY_WITHDRAW.requires} == {
+        "published",
+        "operator_authorized_withdraw",
+    }
+    assert EBAY_WITHDRAW.may_establish == ("listing_inactive",)
+    assert EBAY_WITHDRAW.ownership == ("listing.withdraw",)
 
 
 # ── evaluate() integration with real treatments ────────────────────────────

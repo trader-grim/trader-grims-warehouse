@@ -8,7 +8,10 @@ All eBay API calls are mocked — tests pass completely offline.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
+
+import pytest
 
 from tgw.apis.ebay import taxonomy
 
@@ -50,6 +53,8 @@ def _reset_caches():
     taxonomy._tree_index_cache = None
     taxonomy._tree_roots_cache = None
     taxonomy._tree_id_cache = None
+    taxonomy._motors_tree_index_cache = None
+    taxonomy._motors_tree_roots_cache = None
 
 
 def _cfg(tmp_path):
@@ -167,7 +172,16 @@ class TestSearchCategoriesLocal:
     def test_search_includes_breadcrumb_path(self, tmp_path):
         cfg = self._warm(tmp_path)
         results = taxonomy.search_categories_local(cfg, 'US Coins')
-        assert results[0]['path'] == 'Collectibles > Coins'
+        assert results[0]['path'] == 'Collectibles > Coins > US Coins'
+
+    def test_search_accepts_numeric_category_id(self, tmp_path):
+        cfg = self._warm(tmp_path)
+        results = taxonomy.search_categories_local(cfg, '111')
+        assert results[0] == {
+            'id': '111',
+            'name': 'US Coins',
+            'path': 'Collectibles > Coins > US Coins',
+        }
 
     def test_search_empty_query_returns_nothing(self, tmp_path):
         cfg = self._warm(tmp_path)
@@ -229,6 +243,10 @@ class TestGetCategoryChildren:
         children = taxonomy.get_category_children(cfg, '1')
         names = {c['name'] for c in children}
         assert names == {'Coins', 'Stamps'}
+        assert {c['path'] for c in children} == {
+            'Collectibles > Coins',
+            'Collectibles > Stamps',
+        }
 
     def test_children_of_leaf_is_empty(self, tmp_path):
         cfg = self._warm(tmp_path)
@@ -237,3 +255,57 @@ class TestGetCategoryChildren:
     def test_unknown_parent_is_empty(self, tmp_path):
         cfg = self._warm(tmp_path)
         assert taxonomy.get_category_children(cfg, '999999') == []
+
+
+class TestSnapshotOnlyOperatorTaxonomy:
+    def setup_method(self):
+        _reset_caches()
+
+    def test_disk_snapshot_resolves_without_tree_id_or_provider(self, tmp_path):
+        (tmp_path / 'ebay-category-tree.json').write_text(
+            json.dumps({'_cached_at': 0, 'tree': _FAKE_TREE}),
+            encoding='utf-8',
+        )
+        cfg = _cfg(tmp_path)
+        with patch.object(
+            taxonomy, 'get_category_tree_id',
+            side_effect=AssertionError('must not resolve a live tree ID'),
+        ), patch.object(
+            taxonomy, 'ebay_get',
+            side_effect=AssertionError('must not call eBay'),
+        ):
+            node = taxonomy.get_cached_category_node(cfg, '111')
+            results = taxonomy.search_categories_cached(cfg, '111')
+            children = taxonomy.get_cached_category_children(cfg, '11')
+
+        assert node == {
+            'id': '111',
+            'name': 'US Coins',
+            'path': 'Collectibles > Coins > US Coins',
+            'leaf': True,
+            'marketplace_id': 'EBAY_US',
+            'source': 'taxonomy-snapshot',
+        }
+        assert results == [node]
+        assert children == [node]
+
+    def test_missing_snapshot_never_falls_through_to_provider(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        with patch.object(
+            taxonomy, 'ebay_get',
+            side_effect=AssertionError('must not call eBay'),
+        ):
+            assert taxonomy.get_cached_category_node(cfg, '111') is None
+            with pytest.raises(taxonomy.CategoryTaxonomySnapshotUnavailable):
+                taxonomy.search_categories_cached(cfg, 'coins')
+            with pytest.raises(taxonomy.CategoryTaxonomySnapshotUnavailable):
+                taxonomy.get_cached_category_children(cfg, None)
+
+    def test_corrupt_snapshot_never_falls_through_to_provider(self, tmp_path):
+        (tmp_path / 'ebay-category-tree.json').write_text('{broken', encoding='utf-8')
+        cfg = _cfg(tmp_path)
+        with patch.object(
+            taxonomy, 'ebay_get',
+            side_effect=AssertionError('must not call eBay'),
+        ):
+            assert taxonomy.get_cached_category_node(cfg, '111') is None

@@ -5,12 +5,16 @@ import pytest
 from fastapi import HTTPException
 
 from tgw import http_server
+from tgw.config import bind_ebay_provider_identity
+from tgw.item_mutation import item_generation
 from tgw.workflow.listing_migration import (
     GoalRequestResult,
     _evaluator_authorized_scopes,
+    _require_provider_target_environment,
     approved_authority_scopes,
     authorize_and_dispatch_force_restage,
     authorize_and_dispatch_next_listing_effect,
+    authorize_and_execute_end_listing,
     authorize_and_request_item_goal,
     request_item_goal,
 )
@@ -19,6 +23,7 @@ from tgw.workflow.profiles import (
     TGW_EBAY_IDENTIFIED,
     TGW_EBAY_LISTABLE,
     TGW_EBAY_PRICED,
+    TGW_EBAY_WITHDRAWN,
 )
 from tgw.workflow.treatments import (
     AI_IDENTIFY,
@@ -46,13 +51,14 @@ def test_next_listing_effect_dispatches_exact_governed_payload(
     expected_force,
 ):
     _, path = _item(tmp_path, ebay_offer={"offer_id": offer_id})
+    generation = item_generation(json.loads(path.read_text(encoding="utf-8")))
     disposition = SimpleNamespace(
         treatment_id=treatment.identity,
         treatment_version=treatment.version,
     )
     graph = SimpleNamespace(
         object_id="SKU-1",
-        object_generation="gen-1",
+        object_generation=generation,
         eligible_treatments=(disposition,),
         ownership_conflicts=(),
         reconciliation_gates=(),
@@ -91,7 +97,7 @@ def test_next_listing_effect_dispatches_exact_governed_payload(
     authority = SimpleNamespace(
         scopes=("upload", "stage", "publish", "force-restage"),
         entity_id="SKU-1",
-        object_generation="gen-1",
+        object_generation=generation,
         pre_authority_condition_hash="pre-hash",
     )
 
@@ -303,11 +309,13 @@ def test_authorized_local_remediation_carries_continuation_identity(tmp_path, mo
     assert captured["operator_surface"] == "http:item-action:ebay-publish"
 
 
-def test_force_restage_dispatch_is_exact_and_authority_bound(monkeypatch):
+def test_force_restage_dispatch_is_exact_and_authority_bound(monkeypatch, tmp_path):
+    _, path = _item(tmp_path)
+    generation = item_generation(json.loads(path.read_text(encoding="utf-8")))
     disposition = SimpleNamespace(treatment_id="ebay-stage", treatment_version="1")
     graph = SimpleNamespace(
         object_id="SKU-1",
-        object_generation="gen-1",
+        object_generation=generation,
         eligible_treatments=(disposition,),
         ownership_conflicts=(),
         reconciliation_gates=(),
@@ -345,11 +353,11 @@ def test_force_restage_dispatch_is_exact_and_authority_bound(monkeypatch):
     authority = SimpleNamespace(
         scopes=("force-restage",),
         entity_id="SKU-1",
-        object_generation="gen-1",
+        object_generation=generation,
         pre_authority_condition_hash="pre-hash",
     )
     _, dispatched, authority_id, created = authorize_and_dispatch_force_restage(
-        "/items/SKU-1.json",
+        path,
         operator_identity="authenticated:dave",
         surface="http:item-action:force-restage",
         provider_identity="ebay:account",
@@ -436,6 +444,379 @@ def test_goal_scope_ceiling_defaults_and_blocks_escalation():
         "stage",
     )
     assert _evaluator_authorized_scopes(["stage"]) == ("stage",)
+    assert approved_authority_scopes(TGW_EBAY_WITHDRAWN, ()) == ("withdraw",)
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=("fresh", "succeeded-replay"))
+def test_end_listing_uses_exact_withdraw_authority_and_reserved_effect(
+    tmp_path,
+    monkeypatch,
+    replay,
+):
+    from datetime import UTC, datetime, timedelta
+
+    from tgw.workflow import listing_migration
+    from tgw.workflow.treatments import EBAY_WITHDRAW
+
+    _, path = _item(
+        tmp_path,
+        draft_listing={"title": "Ready", "category_id": "123", "price": 10},
+        ebay_offer={
+            "offer_id": "offer-1",
+            "status": "PUBLISHED",
+            "ebay_environment": "sandbox",
+        },
+        ebay_listing={
+            "listing_id": "listing-1",
+            "status": "ACTIVE",
+            "ebay_environment": "sandbox",
+        },
+    )
+    generation = item_generation(json.loads(path.read_text(encoding="utf-8")))
+    snapshot = SimpleNamespace(object_id="SKU-1", generation=generation)
+    disposition = SimpleNamespace(
+        treatment_id=EBAY_WITHDRAW.identity,
+        treatment_version=EBAY_WITHDRAW.version,
+    )
+    base_graph = SimpleNamespace(
+        waiting_treatments=(disposition,),
+        condition_hash="pre-authority-condition",
+    )
+    admitted_graph = SimpleNamespace(
+        eligible_treatments=(disposition,),
+        ownership_conflicts=(),
+        reconciliation_gates=(),
+        graph_id="withdraw-graph",
+        condition_hash="authorized-condition",
+    )
+    graphs = iter((base_graph, admitted_graph))
+    monkeypatch.setattr(listing_migration, "build_item_snapshot", lambda *args, **kwargs: snapshot)
+    monkeypatch.setattr(listing_migration, "evaluate", lambda **kwargs: next(graphs))
+
+    issued = {}
+
+    def issuer(**values):
+        issued.update(values)
+        return "authority-1", True
+
+    now = datetime.now(UTC)
+    authority = SimpleNamespace(
+        authority_id="authority-1",
+        superseded_at=None,
+        entity_id="SKU-1",
+        goal_profile_id=TGW_EBAY_WITHDRAWN.identity,
+        goal_profile_version=TGW_EBAY_WITHDRAWN.version,
+        object_generation=generation,
+        pre_authority_condition_hash="pre-authority-condition",
+        content_identity=listing_migration.listing_content_identity(json.loads(path.read_text())),
+        provider_identity=bind_ebay_provider_identity(
+            "ebay:sandbox-account", "sandbox",
+        ),
+        scopes=("withdraw",),
+        issued_at=now - timedelta(seconds=5),
+        expires_at=now + timedelta(minutes=5),
+    )
+    reserved = {}
+
+    def reserve(**values):
+        reserved.update(values)
+        if replay:
+            return SimpleNamespace(
+                effect_id="effect-1",
+                state="succeeded",
+                result={
+                    "offer_id": "offer-1",
+                    "listing_id": "listing-1",
+                    "ended_at": "2026-08-22T12:00:00+00:00",
+                    "ebay_environment": "sandbox",
+                    "endpoint": "https://api.sandbox.ebay.com",
+                    "provider_response": {"withdrawn": True},
+                },
+            )
+        return SimpleNamespace(effect_id="effect-1", state="dispatched", result=None)
+
+    finished = {}
+
+    def finish(effect_id, **values):
+        finished.update({"effect_id": effect_id, **values})
+        return SimpleNamespace(effect_id=effect_id, state=values["state"], result=values.get("result"))
+
+    provider_calls = []
+    graph, effect, authority_id, created, projection = authorize_and_execute_end_listing(
+        path,
+        config={
+            "ebay_environment": "sandbox",
+            "itemdata_root": tmp_path,
+            "archive_root": tmp_path / "archive",
+            "item_mutation_journal_root": tmp_path / "mutations",
+        },
+        operator_identity="operator:dave",
+        surface="http:operator-object:end-listing",
+        provider_identity="ebay:sandbox-account",
+        issuer=issuer,
+        authority_lookup=lambda value: authority if value == "authority-1" else None,
+        reserve_effect=reserve,
+        finish_effect=finish,
+        inventory_withdraw=lambda offer_id: provider_calls.append(offer_id) or {"withdrawn": True},
+        project_item=lambda sku, document: {"ok": True},
+    )
+
+    assert graph is admitted_graph
+    assert effect.state == "succeeded"
+    assert authority_id == "authority-1" and created is True
+    assert issued["scopes"] == ("withdraw",)
+    assert reserved["authority_scope"] == "withdraw"
+    assert reserved["operation"] == "withdraw-offer"
+    assert reserved["request"]["offer_id"] == "offer-1"
+    assert reserved["request"]["ebay_environment"] == "sandbox"
+    assert reserved["request"]["endpoint"] == "https://api.sandbox.ebay.com"
+    assert provider_calls == ([] if replay else ["offer-1"])
+    if replay:
+        assert finished == {}
+    else:
+        assert finished["state"] == "succeeded"
+    assert projection.status == "COMMITTED"
+    projected = json.loads(path.read_text(encoding="utf-8"))
+    assert projected["ebay_listing"]["status"] == "Ended"
+    assert projected["ebay_offer"]["status"] == "UNPUBLISHED"
+    assert projected["ebay_listing"]["provider_effect_id"] == "effect-1"
+
+
+def test_end_listing_lock_excludes_concurrent_provider_target_mutation(
+    tmp_path,
+    monkeypatch,
+):
+    """A competing target edit cannot land between admission and dispatch."""
+    import threading
+    from datetime import UTC, datetime, timedelta
+
+    from tgw import item_mutation
+    from tgw.item_mutation import mutate_item
+    from tgw.workflow import listing_migration
+    from tgw.workflow.treatments import EBAY_WITHDRAW
+
+    _, path = _item(
+        tmp_path,
+        draft_listing={"title": "Ready", "category_id": "123", "price": 10},
+        ebay_offer={
+            "offer_id": "offer-1",
+            "status": "PUBLISHED",
+            "ebay_environment": "sandbox",
+        },
+        ebay_listing={
+            "listing_id": "listing-1",
+            "status": "ACTIVE",
+            "ebay_environment": "sandbox",
+        },
+    )
+    generation = item_generation(json.loads(path.read_text(encoding="utf-8")))
+    snapshot = SimpleNamespace(object_id="SKU-1", generation=generation)
+    disposition = SimpleNamespace(
+        treatment_id=EBAY_WITHDRAW.identity,
+        treatment_version=EBAY_WITHDRAW.version,
+    )
+    graphs = iter((
+        SimpleNamespace(
+            waiting_treatments=(disposition,),
+            condition_hash="pre-authority-condition",
+        ),
+        SimpleNamespace(
+            eligible_treatments=(disposition,),
+            ownership_conflicts=(),
+            reconciliation_gates=(),
+            graph_id="withdraw-graph",
+            condition_hash="authorized-condition",
+        ),
+    ))
+    monkeypatch.setattr(
+        listing_migration,
+        "build_item_snapshot",
+        lambda *args, **kwargs: snapshot,
+    )
+    monkeypatch.setattr(
+        listing_migration,
+        "evaluate",
+        lambda **kwargs: next(graphs),
+    )
+    now = datetime.now(UTC)
+    authority = SimpleNamespace(
+        authority_id="authority-1",
+        superseded_at=None,
+        entity_id="SKU-1",
+        goal_profile_id=TGW_EBAY_WITHDRAWN.identity,
+        goal_profile_version=TGW_EBAY_WITHDRAWN.version,
+        object_generation=generation,
+        pre_authority_condition_hash="pre-authority-condition",
+        content_identity=listing_migration.listing_content_identity(
+            json.loads(path.read_text(encoding="utf-8"))
+        ),
+        provider_identity=bind_ebay_provider_identity(
+            "ebay:sandbox-account", "sandbox",
+        ),
+        scopes=("withdraw",),
+        issued_at=now - timedelta(seconds=5),
+        expires_at=now + timedelta(minutes=5),
+    )
+    config = {
+        "ebay_environment": "sandbox",
+        "itemdata_root": tmp_path,
+        "archive_root": tmp_path / "archive",
+        "item_mutation_journal_root": tmp_path / "mutations",
+    }
+    writer_lock_probe_done = threading.Event()
+    writer_lock_probe_results = []
+    writer_finished = threading.Event()
+    writer_receipts = []
+    writer_threads = []
+    writer_thread_name = "concurrent-provider-target-writer"
+    real_flock = item_mutation.fcntl.flock
+
+    def observe_writer_lock(descriptor, operation):
+        if (
+            threading.current_thread().name != writer_thread_name
+            or operation != item_mutation.fcntl.LOCK_EX
+        ):
+            return real_flock(descriptor, operation)
+        try:
+            real_flock(
+                descriptor,
+                item_mutation.fcntl.LOCK_EX | item_mutation.fcntl.LOCK_NB,
+            )
+        except BlockingIOError:
+            writer_lock_probe_results.append("blocked")
+            writer_lock_probe_done.set()
+            return real_flock(descriptor, item_mutation.fcntl.LOCK_EX)
+        writer_lock_probe_results.append("acquired")
+        writer_lock_probe_done.set()
+        return None
+
+    monkeypatch.setattr(item_mutation.fcntl, "flock", observe_writer_lock)
+
+    def race_target(document):
+        updated = json.loads(json.dumps(document))
+        updated["ebay_offer"]["offer_id"] = "offer-raced"
+        return updated
+
+    def concurrent_writer():
+        writer_receipts.append(mutate_item(
+            item_path=path,
+            archive_root=config["archive_root"],
+            journal_root=config["item_mutation_journal_root"],
+            sku="SKU-1",
+            kind="test:concurrent-provider-target",
+            expected_generation=generation,
+            payload={"offer_id": "offer-raced"},
+            mutate=race_target,
+            project=lambda sku, document: {"ok": True},
+        ))
+        writer_finished.set()
+
+    def reserve(**values):
+        thread = threading.Thread(
+            target=concurrent_writer,
+            name=writer_thread_name,
+            daemon=True,
+        )
+        writer_threads.append(thread)
+        thread.start()
+        assert writer_lock_probe_done.wait(1), (
+            "concurrent target writer did not reach the item-lock acquisition"
+        )
+        assert writer_lock_probe_results == ["blocked"], (
+            "concurrent target writer acquired the item lock during effect admission"
+        )
+        assert not writer_finished.is_set()
+        return SimpleNamespace(
+            effect_id="effect-1", state="dispatched", result=None,
+        )
+
+    def finish(effect_id, **values):
+        return SimpleNamespace(
+            effect_id=effect_id,
+            state=values["state"],
+            result=values.get("result"),
+        )
+
+    provider_calls = []
+    *_, projection = authorize_and_execute_end_listing(
+        path,
+        config=config,
+        operator_identity="operator:dave",
+        surface="http:operator-object:end-listing",
+        provider_identity="ebay:sandbox-account",
+        issuer=lambda **kwargs: ("authority-1", True),
+        authority_lookup=lambda value: (
+            authority if value == "authority-1" else None
+        ),
+        reserve_effect=reserve,
+        finish_effect=finish,
+        inventory_withdraw=lambda offer_id: (
+            provider_calls.append(offer_id) or {"withdrawn": True}
+        ),
+        project_item=lambda sku, document: {"ok": True},
+    )
+    writer_threads[0].join(timeout=2)
+
+    assert projection.status == "COMMITTED"
+    assert provider_calls == ["offer-1"]
+    assert writer_finished.is_set()
+    assert writer_receipts[0].status == "CONFLICT"
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["ebay_offer"]["offer_id"] == "offer-1"
+    assert persisted["ebay_offer"]["status"] == "UNPUBLISHED"
+    assert persisted["ebay_listing"]["status"] == "Ended"
+
+
+def test_end_listing_target_environment_is_fail_closed_with_prod_legacy_only():
+    _require_provider_target_environment(
+        {"offer_id": "legacy-production"},
+        "production",
+        "ebay_offer",
+    )
+    with pytest.raises(ValueError, match="production-only"):
+        _require_provider_target_environment(
+            {"offer_id": "untagged-sandbox"},
+            "sandbox",
+            "ebay_offer",
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        _require_provider_target_environment(
+            {
+                "offer_id": "wrong-environment",
+                "ebay_environment": "production",
+            },
+            "sandbox",
+            "ebay_offer",
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        _require_provider_target_environment(
+            {
+                "listing_id": "unknown-environment",
+                "ebay_environment": "staging",
+            },
+            "production",
+            "ebay_listing",
+        )
+
+
+def test_end_listing_rejects_untagged_sandbox_target_before_authority(tmp_path):
+    _, path = _item(
+        tmp_path,
+        ebay_offer={"offer_id": "legacy-offer", "status": "PUBLISHED"},
+    )
+    authority_calls = []
+
+    with pytest.raises(ValueError, match="production-only"):
+        authorize_and_execute_end_listing(
+            path,
+            config={"ebay_environment": "sandbox"},
+            operator_identity="operator:dave",
+            surface="http:operator-object:end-listing",
+            provider_identity="ebay:sandbox-account",
+            issuer=lambda **kwargs: authority_calls.append(kwargs),
+        )
+
+    assert authority_calls == []
 
 
 def test_update_dispatch_requires_fresh_stage_even_when_item_is_published(monkeypatch):
@@ -720,12 +1101,11 @@ def test_item_action_ai_identify_workflow_uses_authenticated_goal_not_direct_fan
     assert captured["origin"] == "operator"
     assert captured["operator_identity"] == "operator:test"
     assert captured["operator_surface"] == "http:item-action:ai-identify"
-    from tgw.workflow.profiles import TGW_EBAY_DRAFTED
-
-    assert captured_goal == [TGW_EBAY_DRAFTED]
+    assert captured_goal == [TGW_EBAY_PRICED]
     written = json.loads(path.read_text())
     assert written["ai_reidentify"] is True
     assert written["ai_redraft_requested"] is True
+    assert written["ai_reprice_requested"] is True
 
 
 def test_item_action_ai_identify_defaults_to_exact_governed_fanout(tmp_path, monkeypatch):

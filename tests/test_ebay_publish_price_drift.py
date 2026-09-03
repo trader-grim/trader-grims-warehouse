@@ -21,8 +21,8 @@ from typing import Any, Dict
 
 import pytest
 
-import tgw.workers.ebay_publish as ebay_publish_mod
 import tgw.provider_effects as provider_effects
+import tgw.workers.ebay_publish as ebay_publish_mod
 from tgw.errors import TreatmentFailure
 from tgw.workers.ebay_publish import EbayPublishWorker
 
@@ -104,6 +104,11 @@ def test_matching_prices_do_not_enqueue_restage(tmp_path, monkeypatch):
     # this test hits a live Postgres connection under the test's real DSN.
     monkeypatch.setattr(
         ebay_publish_mod.state_machine, 'active_jobs_for_sku', lambda *a, **k: [])
+    monkeypatch.setattr(
+        ebay_publish_mod,
+        'validate_listing_condition_for_stage',
+        lambda *args, **kwargs: 'USED_GOOD',
+    )
     monkeypatch.setattr(ebay_publish_mod, 'publish_offer',
                         lambda cfg, offer_id: {'listing_id': 'L1', 'listing_url': 'http://x', 'status': 'PUBLISHED'})
     monkeypatch.setattr(ebay_publish_mod, 'fence_ebay_write', lambda *a, **k: {'ok': True})

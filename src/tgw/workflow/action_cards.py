@@ -25,6 +25,7 @@ def build_item_action_card(
     item_path: str | Path,
     attempts: Sequence[Mapping[str, Any]] = (),
     *,
+    item_document: Mapping[str, Any] | None = None,
     provider_identity: str = "",
     reconciled_provider_effect_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
@@ -35,6 +36,23 @@ def build_item_action_card(
     supplies that identity; callers without one intentionally receive a
     ledger-free, read-only graph.
     """
+    path = Path(item_path)
+    if item_document is None:
+        item = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        # Make a JSON-native copy so the action card and evaluator cannot see
+        # later mutations to a caller-owned mapping.
+        item = json.loads(
+            json.dumps(
+                item_document,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        )
+    if not isinstance(item, dict):
+        raise ValueError(f"{path}: top-level JSON is not an object")
+
     ambiguities: set[str] = set()
     contracts = {(item.identity, item.version): item for item in TGW_TREATMENTS}
     attempt_rows: list[dict[str, Any]] = []
@@ -89,11 +107,11 @@ def build_item_action_card(
     if provider_identity:
         from .listing_migration import _authoritative_stage_lookup
 
-        item = json.loads(Path(item_path).read_text(encoding="utf-8"))
         stage_receipt_lookup = _authoritative_stage_lookup(item, provider_identity)
 
     snapshot = build_item_snapshot(
-        item_path, TGW_EBAY_LISTABLE, treatments=TGW_TREATMENTS,
+        item_path, TGW_EBAY_LISTABLE,
+        treatments=TGW_TREATMENTS,
         stage_receipt_lookup=stage_receipt_lookup,
         external_effect_ambiguities=tuple(ambiguities),
     )
@@ -187,9 +205,12 @@ def build_item_action_card(
     def command(enabled: bool, reason: str | None) -> dict[str, Any]:
         return {"enabled": enabled, "reason": None if enabled else reason}
 
-    # The operator command is what supplies the missing provider contract.
-    # Hiding it because that contract is absent creates a circular lockout.
-    # Reconciliation or ownership ambiguity still blocks all provider work.
+    # An operator command is the mechanism that issues the missing provider
+    # contract.  Treating ``provider_contract_required`` as a reason to hide
+    # that command creates a circular lockout.  Only reconciliation/ownership
+    # ambiguity blocks the command up front; the evaluator remains the exact
+    # next-treatment selector after authority is issued.  (Comment blend of
+    # both streams; behavior identical.)
     blocking_gates = sorted(set(graph.reconciliation_gates))
     if graph.ownership_conflicts:
         blocking_gates.append("workflow ownership conflict")
@@ -197,6 +218,8 @@ def build_item_action_card(
     authorizable_external = any(
         contracts[(waiting.treatment_id, waiting.treatment_version)].effect_class
         is EffectClass.EXTERNAL
+        # main-stream guard: a waiting external treatment with no reasons at
+        # all must not be treated as operator-authorizable.
         and bool(waiting.reasons)
         and all("operator_authorized_" in reason for reason in waiting.reasons)
         for waiting in graph.waiting_treatments

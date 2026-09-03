@@ -7,6 +7,11 @@ import pytest
 from tgw.provider_effects import ProviderEffectConflict
 from tgw.workflow.post_push_sync import dispatch_targeted_sync
 
+_ENVIRONMENT = {
+    "ebay_environment": "production",
+    "ebay_endpoint": "https://api.ebay.com",
+}
+
 
 def _item(tmp_path, *, marker="effect-1"):
     path = tmp_path / "SKU-1" / "SKU-1.json"
@@ -26,6 +31,7 @@ def test_dispatch_is_constructed_from_exact_ledger_and_canonical_marker(tmp_path
         result = dispatch_targeted_sync(
             _item(tmp_path), source_provider_effect_id="effect-1",
             provider_identity="ebay:account",
+            **_ENVIRONMENT,
             enqueue_fn=lambda **kwargs: calls.append(kwargs) or "sync-job",
         )
     assert result.enqueued is True
@@ -36,6 +42,8 @@ def test_dispatch_is_constructed_from_exact_ledger_and_canonical_marker(tmp_path
     payload = calls[0]["payload"]
     assert payload["provider_effect_id"] == "effect-1"
     assert payload["expected_offer_id"] == "OFF-1"
+    assert payload["ebay_environment"] == "production"
+    assert payload["ebay_endpoint"] == "https://api.ebay.com"
     assert payload["object_generation"]
     assert calls[0]["dedupe_key"] == (
         f"treatment:ebay_sync:item:SKU-1:{payload['object_generation']}:"
@@ -51,6 +59,7 @@ def test_dispatch_rejects_missing_or_forged_canonical_marker(tmp_path):
         dispatch_targeted_sync(
             _item(tmp_path, marker="forged"),
             source_provider_effect_id="effect-1", provider_identity="ebay:account",
+            **_ENVIRONMENT,
             enqueue_fn=lambda **kwargs: pytest.fail("must not enqueue"),
         )
 
@@ -70,6 +79,7 @@ def test_dispatch_rejects_missing_or_path_mismatched_sku_before_ledger(
         dispatch_targeted_sync(
             path, source_provider_effect_id="effect-1",
             provider_identity="ebay:account",
+            **_ENVIRONMENT,
             enqueue_fn=lambda **kwargs: pytest.fail("must not enqueue"),
         )
     ledger.assert_not_called()
@@ -85,6 +95,7 @@ def test_dispatch_duplicate_is_truthful_already_dispatched(tmp_path):
         result = dispatch_targeted_sync(
             _item(tmp_path), source_provider_effect_id="effect-1",
             provider_identity="ebay:account",
+            **_ENVIRONMENT,
             enqueue_fn=lambda **kwargs: (_ for _ in ()).throw(Duplicate()),
         )
     assert result.enqueued is False

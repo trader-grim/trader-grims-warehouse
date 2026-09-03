@@ -30,10 +30,17 @@ import tgw.logging as tgw_logging
 from tgw.apis.ebay.client import ebay_get
 from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
-from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.config import (
+    DEFAULT_CONFIG,
+    bind_ebay_provider_identity,
+    configured_ebay_environment,
+    ebay_environment_settings,
+    load_config,
+)
 from tgw.ebay.pull import backfill_canonical_from_live
 from tgw.ebay.sync import fetch_all_offers
 from tgw.errors import TreatmentFailure
+from tgw.item_mutation import resolve_item_mutation_journal_root
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 
@@ -58,6 +65,35 @@ class EbaySyncWorker(QueueWorker):
     job_timeout_s = 900
     _OBSERVATION_SCHEMA = "ebay-sync-observation/v1"
 
+    def _runtime_environment_binding(self) -> tuple[str, str]:
+        environment = configured_ebay_environment(self.config)
+        endpoint = ebay_environment_settings(environment)["rest_api_root"]
+        return environment, endpoint
+
+    def _operator_environment_binding(self, payload: Dict[str, Any]) -> tuple[str, str]:
+        environment, endpoint = self._runtime_environment_binding()
+        if payload.get("ebay_environment") != environment:
+            raise HardFailure("operator ebay_sync environment mismatch")
+        if payload.get("ebay_endpoint") != endpoint:
+            raise HardFailure("operator ebay_sync endpoint mismatch")
+        return environment, endpoint
+
+    def _governed_environment_binding(self, payload: Dict[str, Any]) -> tuple[str, str]:
+        environment, endpoint = self._operator_environment_binding(payload)
+        migration = self.config.get("workflow_migration")
+        if migration is None and isinstance(self.config.get("raw"), dict):
+            migration = self.config["raw"].get("workflow_migration")
+        migration = migration if isinstance(migration, dict) else {}
+        configured_identity = bind_ebay_provider_identity(
+            migration.get("ebay_provider_identity"),
+            environment,
+        )
+        if not configured_identity:
+            raise HardFailure("workflow targeted sync provider identity is unconfigured")
+        if payload.get("provider_identity") != configured_identity:
+            raise HardFailure("workflow targeted sync provider identity mismatch")
+        return environment, endpoint
+
     @staticmethod
     def _observation_fingerprint(offer):
         encoded = json.dumps(
@@ -72,6 +108,8 @@ class EbaySyncWorker(QueueWorker):
         observation = {
             "provider_effect_id": payload["provider_effect_id"],
             "provider_identity": payload["provider_identity"],
+            "ebay_environment": payload["ebay_environment"],
+            "ebay_endpoint": payload["ebay_endpoint"],
             "projection_policy": "verify-noop/v1",
             "offer": offer,
         }
@@ -87,6 +125,8 @@ class EbaySyncWorker(QueueWorker):
             "source_provider_effect_id": payload["provider_effect_id"],
             "source_operation": payload["source_operation"],
             "provider_identity": payload["provider_identity"],
+            "ebay_environment": payload["ebay_environment"],
+            "ebay_endpoint": payload["ebay_endpoint"],
             "expected_offer_id": payload["expected_offer_id"],
             "observed_offer_id": offer.get("offerId"),
             "offer": offer,
@@ -107,6 +147,8 @@ class EbaySyncWorker(QueueWorker):
             "source_provider_effect_id": payload["provider_effect_id"],
             "source_operation": payload["source_operation"],
             "provider_identity": payload["provider_identity"],
+            "ebay_environment": payload["ebay_environment"],
+            "ebay_endpoint": payload["ebay_endpoint"],
             "expected_offer_id": payload["expected_offer_id"],
             "mutation_kind": "ebay-sync-targeted",
             "projection_policy": "verify-noop/v1",
@@ -157,7 +199,10 @@ class EbaySyncWorker(QueueWorker):
             "artifacts": [f"item:{sku}"],
             "evidence": {
                 "reason_code": reason, "provider_effect_id": payload["provider_effect_id"],
-                "provider_identity": payload["provider_identity"], **evidence,
+                "provider_identity": payload["provider_identity"],
+                "ebay_environment": payload["ebay_environment"],
+                "ebay_endpoint": payload["ebay_endpoint"],
+                **evidence,
             },
         }
 
@@ -246,7 +291,8 @@ class EbaySyncWorker(QueueWorker):
         required = ("treatment_id", "treatment_version", "graph_id",
                     "goal_profile_id", "goal_profile_version",
                     "object_generation", "condition_hash", "provider_effect_id",
-                    "provider_identity", "expected_offer_id")
+                    "provider_identity", "expected_offer_id",
+                    "ebay_environment", "ebay_endpoint")
         required = (*required, "source_operation")
         missing = [key for key in required
                    if not isinstance(payload.get(key), str) or not payload[key].strip()]
@@ -259,6 +305,7 @@ class EbaySyncWorker(QueueWorker):
         if (payload["treatment_id"] != "ebay-sync-targeted"
                 or payload["treatment_version"] != "1"):
             raise HardFailure("workflow targeted sync treatment binding mismatch")
+        self._governed_environment_binding(payload)
         if (job.get("entity_type") != "item" or job.get("entity_id") != sku
                 or payload.get("entity_id") != sku):
             raise HardFailure("workflow targeted sync entity binding mismatch")
@@ -382,6 +429,8 @@ class EbaySyncWorker(QueueWorker):
         observation = {
             "provider_effect_id": payload["provider_effect_id"],
             "provider_identity": payload["provider_identity"],
+            "ebay_environment": payload["ebay_environment"],
+            "ebay_endpoint": payload["ebay_endpoint"],
             "projection_policy": "verify-noop/v1",
             "offer": offer,
         }
@@ -446,12 +495,7 @@ class EbaySyncWorker(QueueWorker):
         )
 
     def _item_mutation_journal_root(self):
-        data_root = Path(self.config.get(
-            "data_root", self.config["itemdata_root"].parent,
-        ))
-        return Path(self.config.get(
-            "item_mutation_journal_root", data_root.parent / "var/item-mutations",
-        ))
+        return resolve_item_mutation_journal_root(self.config)
 
     def _project_catalog(self, _sku, document):
         from tgw.sqlite_catalog import upsert_catalog_row
@@ -460,6 +504,309 @@ class EbaySyncWorker(QueueWorker):
         if not isinstance(result, dict) or result.get("ok") is not True:
             raise RuntimeError("SQLite projection did not report success")
         return result
+
+    @staticmethod
+    def _observation_due(last_seen: Any, interval_days: int, now: datetime) -> bool:
+        if not last_seen:
+            return True
+        try:
+            return (now - datetime.fromisoformat(str(last_seen))).days >= interval_days
+        except (TypeError, ValueError):
+            return True
+
+    def _operator_sync_observation(
+        self,
+        *,
+        sku: str,
+        item: Dict[str, Any],
+        offer: Dict[str, Any],
+        ebay_environment: str,
+        ebay_endpoint: str,
+    ) -> Dict[str, Any]:
+        """Finish all provider reads before the one operator-sync CAS."""
+        observed_at = datetime.now(timezone.utc)
+        observed_at_iso = observed_at.isoformat()
+        interval_days = int(self.config.get("ebay_verify_interval_days", 7))
+        listing = item.get("ebay_listing") or {}
+        listing_info = offer.get("listing") or {}
+        active = (
+            listing_info.get("listingStatus") == "ACTIVE"
+            or listing.get("status") == "Active"
+        )
+        photo_check_due = active and self._observation_due(
+            (listing.get("photo_verify") or {}).get("verified_at"),
+            interval_days,
+            observed_at,
+        )
+        live = item.get("ebay_live") or {}
+        inventory_refresh_due = self._observation_due(
+            live.get("pulled_at"),
+            interval_days,
+            observed_at,
+        )
+
+        inventory_item = None
+        if photo_check_due or inventory_refresh_due:
+            try:
+                candidate = ebay_get(
+                    self.config,
+                    f"/sell/inventory/v1/inventory_item/{sku}",
+                )
+                if isinstance(candidate, dict):
+                    inventory_item = candidate
+                else:
+                    log.warning(
+                        "ebay_sync: inventory_item GET returned a non-object for %s",
+                        sku,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "ebay_sync: inventory_item GET failed for %s: %s", sku, exc,
+                )
+
+        submitted = (
+            (item.get("ebay_submitted") or {})
+            .get("inventory_item", {})
+            .get("product", {})
+            .get("imageUrls")
+            or (item.get("draft_listing") or {}).get("imageUrls", [])
+        )
+        confirmed = (
+            (inventory_item or {}).get("product", {}).get("imageUrls", [])
+            if photo_check_due and inventory_item is not None
+            else []
+        )
+        return {
+            "schema": "ebay-sync-operator-observation/v1",
+            "sku": sku,
+            "expected_generation": "",  # filled from the bound queue payload
+            "ebay_environment": ebay_environment,
+            "ebay_endpoint": ebay_endpoint,
+            "observed_at": observed_at_iso,
+            "offer": json.loads(json.dumps(offer, ensure_ascii=False)),
+            "inventory_item": (
+                json.loads(json.dumps(inventory_item, ensure_ascii=False))
+                if inventory_item is not None
+                else None
+            ),
+            "photo_check_performed": bool(photo_check_due and inventory_item is not None),
+            "submitted_photo_count": len(submitted),
+            "confirmed_photo_count": len(confirmed),
+            "repush_required": bool(submitted and len(confirmed) < len(submitted))
+            if photo_check_due and inventory_item is not None
+            else False,
+        }
+
+    def _project_operator_offer(
+        self,
+        *,
+        payload: Dict[str, Any],
+        sku: str,
+        observation: Dict[str, Any],
+        item_path: Path,
+    ):
+        """Project one manual provider observation as one durable item CAS."""
+        from tgw.item_mutation import mutate_item
+
+        expected_generation = payload["object_generation"]
+        observation = json.loads(json.dumps(observation, ensure_ascii=False))
+        observation["expected_generation"] = expected_generation
+
+        def mutate(document):
+            if document.get("sku") != sku:
+                raise ValueError(
+                    "authoritative document SKU does not match requested SKU"
+                )
+            updated = json.loads(json.dumps(document, ensure_ascii=False))
+            offer = observation["offer"]
+            listing = dict(updated.get("ebay_listing") or {})
+            local_offer = dict(updated.get("ebay_offer") or {})
+            offer_id = offer.get("offerId")
+            ebay_status = offer.get("status")
+            listing_info = offer.get("listing") or {}
+            listing_id = listing_info.get("listingId")
+            listing_status = listing_info.get("listingStatus")
+
+            if offer_id:
+                listing["offer_id"] = offer_id
+                local_offer["offer_id"] = offer_id
+            if ebay_status:
+                listing["status"] = ebay_status
+                local_offer["status"] = ebay_status
+            if listing_id:
+                listing["listing_id"] = listing_id
+                listing["listing_url"] = f"https://www.ebay.com/itm/{listing_id}"
+            if listing_status:
+                listing["listing_status"] = listing_status
+
+            price = (offer.get("pricingSummary") or {}).get("price") or {}
+            if price.get("value") is not None:
+                try:
+                    price_value = float(price["value"])
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    local_offer["price"] = price_value
+                    listing["live_price"] = price_value
+            category_id = offer.get("categoryId")
+            if category_id:
+                local_offer["category_id"] = str(category_id)
+            if offer.get("availableQuantity") is not None:
+                local_offer["quantity"] = offer["availableQuantity"]
+            fulfillment = str(
+                (offer.get("listingPolicies") or {}).get("fulfillmentPolicyId")
+                or ""
+            )
+            if fulfillment:
+                local_offer["fulfillment_policy_id"] = fulfillment
+
+            marketplace_id = str(offer.get("marketplaceId") or "")
+            top_level_changed = False
+            if marketplace_id and updated.get("marketplace_id") != marketplace_id:
+                updated["marketplace_id"] = marketplace_id
+                top_level_changed = True
+
+            live = dict(updated.get("ebay_live") or {})
+            live["offer"] = dict(offer)
+            live["synced_at"] = observation["observed_at"]
+            inventory_item = observation.get("inventory_item")
+            if isinstance(inventory_item, dict):
+                live["inventory_item"] = inventory_item
+                live["pulled_at"] = observation["observed_at"]
+                if observation.get("photo_check_performed"):
+                    confirmed = (
+                        inventory_item.get("product", {}).get("imageUrls", [])
+                    )
+                    if confirmed:
+                        local_offer["photo_urls"] = confirmed
+                    listing["photo_verify"] = {
+                        "submitted_count": observation["submitted_photo_count"],
+                        "confirmed_count": observation["confirmed_photo_count"],
+                        "verified_at": observation["observed_at"],
+                    }
+
+            updated["ebay_listing"] = listing
+            updated["ebay_offer"] = local_offer
+            updated["ebay_live"] = live
+            promoted = backfill_canonical_from_live(updated)
+            if top_level_changed or promoted:
+                updated.pop("catalog_verified", None)
+            return updated
+
+        data_root = Path(
+            self.config.get("data_root", self.config["itemdata_root"].parent)
+        )
+        return mutate_item(
+            item_path=item_path,
+            archive_root=Path(
+                self.config.get("archive_root", data_root / "ItemArchive")
+            ),
+            journal_root=self._item_mutation_journal_root(),
+            sku=sku,
+            kind="ebay-sync-operator",
+            expected_generation=expected_generation,
+            payload=observation,
+            mutate=mutate,
+            project=self._project_catalog,
+            project_noop=True,
+        )
+
+    def _handle_operator_targeted(
+        self,
+        payload: Dict[str, Any],
+        sku: str,
+    ) -> int:
+        """Run a manual sync without any stale whole-document write window."""
+        from tgw.ebay.sync import _find_offer
+        from tgw.item_mutation import item_generation, reconcile_mutation
+
+        # Validate the closed production/sandbox binding before *any* provider
+        # read. A correctly-shaped but stale-environment queue row must not
+        # query whichever account happens to be configured on this worker.
+        environment, endpoint = self._operator_environment_binding(payload)
+        item_path = self.config["itemdata_root"] / sku / f"{sku}.json"
+        item = json.loads(item_path.read_text(encoding="utf-8"))
+        observed_generation = item_generation(item)
+        expected_generation = payload["object_generation"]
+        if observed_generation != expected_generation:
+            raise HardFailure(
+                f"{sku}: operator sync generation conflict: expected "
+                f"{expected_generation}, observed {observed_generation}"
+            )
+
+        try:
+            offer = _find_offer(self.config, sku)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as exc:
+            log.warning("ebay_sync: eBay unreachable for %s (%s)", sku, exc)
+            return 0
+        if offer is None:
+            log.info("ebay_sync: no eBay offer found for %s", sku)
+            return 0
+        if not isinstance(offer, dict):
+            raise HardFailure(f"{sku}: operator sync provider offer is malformed")
+        if offer.get("sku") not in (None, "", sku):
+            raise HardFailure(f"{sku}: operator sync provider SKU mismatch")
+
+        observation = self._operator_sync_observation(
+            sku=sku,
+            item=item,
+            offer=offer,
+            ebay_environment=environment,
+            ebay_endpoint=endpoint,
+        )
+        mutation = self._project_operator_offer(
+            payload=payload,
+            sku=sku,
+            observation=observation,
+            item_path=item_path,
+        )
+        if mutation.status == "REPAIR_REQUIRED":
+            mutation = reconcile_mutation(
+                item_path=item_path,
+                journal_root=self._item_mutation_journal_root(),
+                operation_id=mutation.operation_id,
+                project=self._project_catalog,
+            )
+        if mutation.status == "CONFLICT":
+            raise HardFailure(
+                f"{sku}: operator sync generation advanced during provider "
+                f"observation: expected {expected_generation}, observed "
+                f"{mutation.observed_generation}"
+            )
+        if mutation.status != "COMMITTED":
+            raise HardFailure(
+                mutation.detail
+                or f"{sku}: operator sync item mutation {mutation.status}"
+            )
+
+        if observation["repush_required"]:
+            log.error(
+                "ebay_sync: %s photo count dropped — submitted=%d confirmed=%d "
+                "— enqueueing repush",
+                sku,
+                observation["submitted_photo_count"],
+                observation["confirmed_photo_count"],
+            )
+            tgw_logging.log_event(
+                "ebay_photo_count_dropped",
+                sku=sku,
+                submitted=observation["submitted_photo_count"],
+                confirmed=observation["confirmed_photo_count"],
+            )
+            try:
+                state_machine.enqueue_job(
+                    queue_name="ebay_repush",
+                    payload={"sku": sku},
+                    entity_type="item",
+                    entity_id=sku,
+                    dedupe_key=f"ebay_repush:{sku}",
+                    max_attempts=3,
+                )
+            except psycopg2.errors.UniqueViolation:
+                pass
+        return int(mutation.changed)
+
     def run(self) -> None:
         self.install_signal_handlers()
         tgw_logging.log_event("worker_start", queue=QUEUE_NAME, owner=self.owner)
@@ -510,6 +857,24 @@ class EbaySyncWorker(QueueWorker):
                 payload, payload.get("sku"), job,
             )
         target_sku = payload.get("sku")
+
+        if shape == "operator" and target_sku:
+            log.info("ebay_sync: targeted operator sync for %s", target_sku)
+            tgw_logging.log_event("ebay_sync_start", sku=target_sku)
+            updated = self._handle_operator_targeted(payload, target_sku)
+            if updated:
+                try:
+                    state_machine.enqueue_catalog_rebuild(
+                        "ebay_sync_targeted", delay_seconds=5.0,
+                    )
+                except Exception:
+                    pass
+            log.info(
+                "ebay_sync: targeted operator sync %s → %s",
+                target_sku,
+                "updated" if updated else "no change",
+            )
+            return
 
         if shape == "legacy" and target_sku:
             # Per-SKU sync — fetch just this item's offer from eBay

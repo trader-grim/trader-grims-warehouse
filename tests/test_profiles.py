@@ -29,6 +29,7 @@ from tgw.workflow.profiles import (  # noqa: E402
     TGW_EBAY_LISTABLE,
     TGW_EBAY_PRICED,
     TGW_EBAY_STAGED,
+    TGW_EBAY_WITHDRAWN,
     ProfileMeta,
     all_profiles,
     get_meta,
@@ -156,6 +157,14 @@ class TestTgwEbayListable:
         assert TGW_EBAY_LISTABLE.required[-1] == "published"
 
 
+class TestTgwEbayWithdrawn:
+    def test_identity(self):
+        assert TGW_EBAY_WITHDRAWN.identity == "tgw.ebay_withdrawn"
+
+    def test_required(self):
+        assert TGW_EBAY_WITHDRAWN.required == ("listing_inactive",)
+
+
 class TestTgwCumulative:
     """Each successive TGW profile is a strict superset of the previous."""
 
@@ -178,8 +187,8 @@ class TestTgwCumulative:
 
 
 class TestProfileRegistry:
-    def test_dict_has_six_business_entries(self):
-        assert len(PROFILE) == 6
+    def test_dict_has_seven_business_entries(self):
+        assert len(PROFILE) == 7
 
     def test_all_values_are_goal_profiles(self):
         for p in PROFILE.values():
@@ -208,8 +217,8 @@ class TestGetProfile:
 
 
 class TestAllProfiles:
-    def test_returns_six_business_profiles(self):
-        assert len(all_profiles()) == 6
+    def test_returns_seven_business_profiles(self):
+        assert len(all_profiles()) == 7
 
     def test_returns_tuples(self):
         assert isinstance(all_profiles(), tuple)
@@ -235,9 +244,9 @@ class TestCodingProfilesHelper:
 
 
 class TestTgwProfilesHelper:
-    def test_returns_six(self):
+    def test_returns_seven(self):
         profiles = tgw_profiles()
-        assert len(profiles) == 6
+        assert len(profiles) == 7
 
     def test_all_have_tgw_prefix(self):
         for p in tgw_profiles():
@@ -252,6 +261,7 @@ class TestTgwProfilesHelper:
             "tgw.ebay_staged",
             "tgw.ebay_listable",
             "tgw.ebay_reconciled",
+            "tgw.ebay_withdrawn",
         }
 
 
@@ -323,6 +333,10 @@ class TestTgwMeta:
         assert ("published", "TRUE") in meta.accepted_results
         assert ("published", "NOT_APPLICABLE") in meta.accepted_results
         assert len(meta.accepted_results) == 2
+
+    def test_withdrawn_meta(self):
+        meta = get_meta("tgw.ebay_withdrawn")
+        assert meta.evidence_source_class == "provider_effect_receipt"
 
 
 class TestProfileMetaFrozen:

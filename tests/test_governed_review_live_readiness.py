@@ -1,5 +1,6 @@
 """Read-only regression for the currently selected live provider projection."""
 
+import grp
 import re
 import subprocess
 
@@ -15,7 +16,7 @@ def _sudo(*argv):
     return result.stdout.strip()
 
 
-def test_current_live_provider_is_hold_until_protected_skill_and_mcp_projection_exists():
+def test_current_live_actor_skill_and_mcp_projections_are_protected():
     command = "/home/claude/.local/bin/claude"
     target = _sudo("readlink", "-f", command)
     if not target:
@@ -28,6 +29,12 @@ def test_current_live_provider_is_hold_until_protected_skill_and_mcp_projection_
     skill_file = _sudo(
         "stat", "-Lc", "%u %g %a", "/home/claude/.claude/skills/tgw-review/SKILL.md",
     ).split()
+    mcp_link = _sudo(
+        "stat", "-c", "%u %g %a", "/home/claude/.claude/.mcp.json",
+    ).split()
+    mcp_file = _sudo(
+        "stat", "-Lc", "%u %g %a", "/home/claude/.claude/.mcp.json",
+    ).split()
     credential = _sudo(
         "stat", "-c", "%u %g %a %h %s", "/home/claude/.claude/.credentials.json",
     ).split()
@@ -35,19 +42,24 @@ def test_current_live_provider_is_hold_until_protected_skill_and_mcp_projection_
     assert re.fullmatch(r"/home/claude/\.local/share/claude/versions/\d+\.\d+\.\d+", target)
     assert link[2:6] == ["1006", "1006", "777", "1"]
     assert resolved[2:6] == ["1006", "1006", "755", "1"]
-    assert skill_link[:2] == ["0", "0"]
+    actor_group = str(grp.getgrnam("tgw-coders").gr_gid)
+    assert skill_link == ["0", actor_group, "777"]
+    assert skill_file == ["0", "0", "444"]
+    assert mcp_link == ["0", actor_group, "777"]
+    assert mcp_file == ["0", "0", "444"]
     assert credential[:4] == ["1006", "1006", "600", "1"]
 
-    # The executable and sealed credential have distinct, admissible owner
-    # policies. The currently discovered skill does not: it resolves to a
-    # group-writable development checkout. Therefore the real provider is a
-    # deterministic HOLD until a protected tgw-review/MCP/runtime projection is
-    # provisioned; installed-skill visibility alone is never readiness.
+    # These are actor-local discovery projections only. They prove that every
+    # harness can find the root-materialized skill and Context MCP inputs; they
+    # are not the separate, per-review protected projection or execution
+    # receipt required for governed admission.
     violations = []
     if int(skill_file[2], 8) & 0o022:
         violations.append("skill-contract-resolved-mode")
     if skill_file[:2] != ["0", "0"]:
         violations.append("skill-contract-resolved-owner")
-    assert violations == [
-        "skill-contract-resolved-mode", "skill-contract-resolved-owner",
-    ]
+    if int(mcp_file[2], 8) & 0o022:
+        violations.append("mcp-config-resolved-mode")
+    if mcp_file[:2] != ["0", "0"]:
+        violations.append("mcp-config-resolved-owner")
+    assert violations == []

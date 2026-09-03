@@ -38,6 +38,7 @@ from tgw.item_mutation import (
     mutate_item,
     operation_identity,
     reconcile_mutation,
+    resolve_item_mutation_journal_root,
 )
 from tgw.items import append_history_event
 from tgw.queue import state_machine
@@ -421,10 +422,7 @@ class AIIdentifyWorker(QueueWorker):
                 return result
 
             data_root = Path(self.config.get("data_root", "/opt/TGW/data"))
-            journal_root = Path(self.config.get(
-                "item_mutation_journal_root",
-                data_root.parent / "var/item-mutations",
-            ))
+            journal_root = resolve_item_mutation_journal_root(self.config)
             result = mutate_item(
                 item_path=json_path,
                 archive_root=Path(self.config.get(

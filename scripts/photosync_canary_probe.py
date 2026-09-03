@@ -37,7 +37,11 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
-from tgw.config import DEFAULT_CONFIG, load_config  # noqa: E402
+from tgw.config import (  # noqa: E402
+    DEFAULT_CONFIG,
+    configured_ebay_environment,
+    load_config,
+)
 from tgw.ebay.draft_specifics import get_ebay_aspects  # noqa: E402
 from tgw.items import load_item_doc  # noqa: E402
 from tgw.logging import announce_script_run, setup_logging  # noqa: E402
@@ -194,7 +198,9 @@ def main() -> int:
     api_key_path = cfg['secrets_root'] / 'tgw-api-key.json'
     api_key = json.loads(api_key_path.read_text(encoding='utf-8'))['api_key']
 
-    state_machine.init(cfg['postgres_dsn'])
+    state_machine.init(
+        cfg['postgres_dsn'], configured_ebay_environment(cfg),
+    )
 
     json_path = cfg['itemdata_root'] / args.sku / f'{args.sku}.json'
     if not json_path.exists():

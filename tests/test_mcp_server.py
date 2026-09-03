@@ -301,10 +301,13 @@ def test_search_full_accepts_capitalized_arguments(cfg, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_queue_status_aggregates_dead_letter(cfg, monkeypatch):
+    cfg["ebay_environment"] = "sandbox"
     rows = [
-        ("ebay_draft", "queued", 5),
-        ("ebay_draft", "dead_letter", 2),
-        ("ebay_price", "dead_letter", 1),
+        ("ebay_draft", "queued", 99),
+        ("ebay_draft@sandbox", "queued", 5),
+        ("ebay_draft@sandbox", "dead_letter", 2),
+        ("ebay_price@sandbox", "dead_letter", 1),
+        ("thumbnail_gen", "queued", 4),
     ]
     _install_conn(monkeypatch, rows)
     monkeypatch.setattr(sm, "dead_letter_errors", lambda: [
@@ -324,7 +327,11 @@ def test_queue_status_aggregates_dead_letter(cfg, monkeypatch):
     assert out["dead_letter_transient"] == 1
     assert out["dead_letter_hard"] == 2
     assert out["zero_work_stalls"] == []
-    assert len(out["queues"]) == 3
+    assert len(out["queues"]) == 4
+    assert {row["queue"] for row in out["queues"]} == {
+        "ebay_draft", "ebay_price", "thumbnail_gen",
+    }
+    assert not any(row["count"] == 99 for row in out["queues"])
 
 
 # ---------------------------------------------------------------------------
@@ -372,12 +379,15 @@ def test_enqueue_resolves_renamed_sku_via_alias_fallback(cfg, monkeypatch):
 
 def test_enqueue_success(cfg, monkeypatch):
     _write_item(cfg, "tgw001", {"sku": "tgw001"})
-    monkeypatch.setattr(sm, "init", lambda *a, **k: None)
+    cfg["ebay_environment"] = "sandbox"
+    initialized = []
+    monkeypatch.setattr(sm, "init", lambda *a, **k: initialized.append(a))
     monkeypatch.setattr(sm, "enqueue_job", lambda **kw: "job-77")
     out = json.loads(mcp_server.tgw_enqueue("tgw001", "ebay_draft"))
     assert out["ok"] is True
     assert out["job_id"] == "job-77"
     assert out["queue"] == "ebay_draft"
+    assert initialized == [("postgresql://fake/db", "sandbox")]
 
 
 def test_enqueue_duplicate_is_ok(cfg, monkeypatch):

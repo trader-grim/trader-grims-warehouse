@@ -29,7 +29,8 @@ class TestBuildConditionOptions:
     def test_uses_real_category_policy_not_generic_list(self):
         # category 165806 ("California") real policy: only New + Used allowed
         allowed = _fake_allowed([("1000", "New", "NEW"), ("3000", "Used", "USED_EXCELLENT")])
-        with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=allowed):
+        with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=allowed), \
+             patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=True):
             html, invalid = _build_condition_options("USED_EXCELLENT", "165806")
         assert "USED_EXCELLENT" in html
         assert ">Used<" in html
@@ -38,12 +39,15 @@ class TestBuildConditionOptions:
         assert "USED_ACCEPTABLE" not in html
         assert invalid is False
 
-    def test_falls_back_to_generic_list_when_no_category_policy(self):
-        with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=[]):
+    def test_resolved_optional_category_does_not_offer_generic_conditions(self):
+        with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=[]), \
+             patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=False):
             html, invalid = _build_condition_options("USED_GOOD", "999999999")
         assert "USED_GOOD" in html
-        assert "USED_ACCEPTABLE" in html  # generic fallback list is present
-        assert invalid is False
+        assert "USED_ACCEPTABLE" not in html
+        assert "No condition — not required" in html
+        assert 'selected disabled' in html
+        assert invalid is True
 
     def test_no_category_id_uses_generic_fallback(self):
         html, invalid = _build_condition_options("NEW", "")
@@ -58,9 +62,10 @@ class TestBuildConditionOptions:
         returned `invalid` flag (PP-CONDITION-ENUM-001 / todo #1562) is what
         the caller uses to redden the <select> border on initial render."""
         allowed = _fake_allowed([("1000", "New", "NEW"), ("3000", "Used", "USED_EXCELLENT")])
-        with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=allowed):
+        with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=allowed), \
+             patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=True):
             html, invalid = _build_condition_options("USED_GOOD", "165806")
-        assert 'value="USED_GOOD" selected' in html
+        assert 'value="USED_GOOD" selected disabled' in html
         assert "not valid for this category" in html
         assert invalid is True
 
@@ -68,13 +73,24 @@ class TestBuildConditionOptions:
         with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category",
                    side_effect=RuntimeError("boom")):
             html, invalid = _build_condition_options("NEW", "165806")
-        assert "NEW" in html  # falls back to generic list
-        assert invalid is False
+        assert 'value="NEW" selected disabled' in html
+        assert "USED_GOOD" not in html
+        assert invalid is True
+
+    def test_cached_choices_without_requirement_flag_are_not_selectable(self):
+        allowed = _fake_allowed([("1000", "New", "NEW")])
+        with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=allowed), \
+             patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=None):
+            html, invalid = _build_condition_options("NEW", "165806")
+        assert html.count('value="NEW"') == 1
+        assert 'value="NEW" selected disabled' in html
+        assert invalid is True
 
     def test_duplicate_enums_across_condition_ids_deduped(self):
         # Two different legacy conditionIds mapping to the same enum shouldn't double-render
         allowed = _fake_allowed([("3000", "Used", "USED_EXCELLENT"), ("3010", "Refurb", "USED_EXCELLENT")])
-        with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=allowed):
+        with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=allowed), \
+             patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=True):
             html, invalid = _build_condition_options("USED_EXCELLENT", "165806")
         assert html.count('value="USED_EXCELLENT"') == 1
         assert invalid is False
@@ -84,7 +100,8 @@ class TestBuildConditionOptions:
         condition_enum corrupted to a raw human label ("Very Good") instead
         of a real Inventory API enum."""
         allowed = _fake_allowed([("4000", "Used - Very Good", "USED_VERY_GOOD")])
-        with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=allowed):
+        with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=allowed), \
+             patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=True):
             html, invalid = _build_condition_options("Very Good", "165806")
         assert invalid is True
-        assert 'value="Very Good" selected' in html
+        assert 'value="Very Good" selected disabled' in html

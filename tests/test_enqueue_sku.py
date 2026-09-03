@@ -33,7 +33,9 @@ def test_item_not_found(cfg):
 
 def test_success(cfg, monkeypatch):
     _write_item(cfg, "tgw001")
-    monkeypatch.setattr(sm, "init", lambda *a, **k: None)
+    cfg["ebay_environment"] = "sandbox"
+    initialized = []
+    monkeypatch.setattr(sm, "init", lambda *a, **k: initialized.append(a))
     captured = {}
     monkeypatch.setattr(sm, "enqueue_job",
                         lambda **kw: captured.update(kw) or "job-9")
@@ -43,6 +45,7 @@ def test_success(cfg, monkeypatch):
     assert out["queue"] == "ebay_draft"
     assert captured["dedupe_key"] == "ebay_draft:tgw001"
     assert captured["payload"] == {"sku": "tgw001"}
+    assert initialized == [("postgresql://fake/db", "sandbox")]
 
 
 def test_duplicate_is_ok(cfg, monkeypatch):

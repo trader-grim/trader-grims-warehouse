@@ -38,6 +38,7 @@ def test_conditions_come_from_real_policy_not_fabricated_map(tmp_path):
         {"condition_id": "3000", "condition_label": "Used", "condition_enum": "USED_EXCELLENT"},
     ]
     with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=allowed), \
+         patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=True), \
          patch("tgw.apis.ebay.specifics.get_aspects", return_value=[]):
         result = http_server.ebay_category_context("165806")
 
@@ -46,6 +47,7 @@ def test_conditions_come_from_real_policy_not_fabricated_map(tmp_path):
     # must not contain the fabricated extra grades for the single "Used" bucket
     assert "USED_GOOD" not in enums
     assert "USED_ACCEPTABLE" not in enums
+    assert result["item_condition_required"] is True
 
 
 def test_conditions_empty_when_policy_lookup_fails(tmp_path):
@@ -85,6 +87,7 @@ def test_aspects_error_distinguishes_lookup_failure_from_genuine_empty(tmp_path)
     aspects_error so the UI can say 'lookup failed', not 'no specifics'."""
     http_server._cfg = _cfg(tmp_path)
     with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=[]), \
+         patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=None), \
          patch("tgw.apis.ebay.specifics.get_aspects",
                side_effect=RuntimeError("429 Client Error: Too Many Requests")):
         result = http_server.ebay_category_context("165806")
@@ -96,6 +99,7 @@ def test_aspects_error_distinguishes_lookup_failure_from_genuine_empty(tmp_path)
 def test_no_aspects_error_when_lookup_succeeds(tmp_path):
     http_server._cfg = _cfg(tmp_path)
     with patch("tgw.apis.ebay.conditions.allowed_conditions_for_category", return_value=[]), \
+         patch("tgw.apis.ebay.conditions.item_condition_required_for_category", return_value=None), \
          patch("tgw.apis.ebay.specifics.get_aspects",
                return_value=[{"name": "Country/Region of Manufacture", "required": True,
                               "mode": "FREE_TEXT", "allowed_values": []}]):
@@ -105,11 +109,33 @@ def test_no_aspects_error_when_lookup_succeeds(tmp_path):
     assert len(result["aspects"]) == 1
 
 
+def test_resolved_no_condition_category_is_not_reported_unresolved(tmp_path):
+    http_server._cfg = _cfg(tmp_path)
+    with patch(
+        "tgw.apis.ebay.conditions.allowed_conditions_for_category",
+        return_value=[],
+    ), patch(
+        "tgw.apis.ebay.conditions.item_condition_required_for_category",
+        return_value=False,
+    ), patch("tgw.apis.ebay.specifics.get_aspects", return_value=[]):
+        result = http_server.ebay_category_context("108857")
+
+    assert result["conditions"] == []
+    assert result["item_condition_required"] is False
+
+
 def test_editor_script_exposes_category_aspect_max_length():
     """A taxonomy aspect limit must become an actual input maxlength hint."""
     script = http_server._CATEGORY_CONTEXT_IIFE
     assert "maxlength=" in script
     assert "maxHint" in script
+
+
+def test_legacy_editor_never_auto_persists_condition_remap():
+    script = http_server._CATEGORY_CONTEXT_IIFE
+    assert "condition auto-matched" not in script
+    assert "suggested same-or-worse choice" in script
+    assert "draft_listing:{condition_enum:curVal}" not in script
 
 
 def test_editor_applies_persisted_error_after_aspect_form_is_rendered():

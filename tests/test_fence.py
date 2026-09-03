@@ -23,7 +23,9 @@ from tgw import http_server  # noqa: E402
 from tgw.item_mutation import item_generation  # noqa: E402
 
 API_KEY = "test-key-fence-001"
+MACHINE_API_KEY = "test-machine-key-fence-001"
 AUTH = {"Authorization": f"Bearer {API_KEY}"}
+MACHINE_AUTH = {"Authorization": f"Bearer {MACHINE_API_KEY}"}
 
 SKU = "tgw20260101120000001"
 
@@ -91,6 +93,7 @@ def env(tmp_path, monkeypatch, enqueue_calls):
     }
     monkeypatch.setattr(http_server, "_cfg", cfg)
     monkeypatch.setattr(http_server, "_api_key", API_KEY)
+    monkeypatch.setattr(http_server, "_machine_api_key", MACHINE_API_KEY)
     monkeypatch.setattr(http_server, "_web_password", "")
     monkeypatch.setattr(http_server.psycopg2, "connect", lambda *a, **k: _FakeConn())
 
@@ -189,11 +192,47 @@ class TestAppend:
 # ---------------------------------------------------------------------------
 
 class TestEbayWrite:
+    def test_operator_credential_cannot_use_machine_ebay_fence(self, env):
+        response = env["client"].post(
+            f"/api/items/{SKU}/ebay-write",
+            json={"ebay_offer": {"offer_id": "forged"}},
+            headers=AUTH,
+        )
+
+        assert response.status_code == 403
+
+    def test_generation_bound_merge_rejects_stale_replay(self, env):
+        original = _read_item(env["itemdata_root"], SKU)
+        expected = item_generation(original)
+        committed = env["client"].post(
+            f"/api/items/{SKU}/ebay-write",
+            json={
+                "expected_generation": expected,
+                "ebay_offer": {"offer_id": "generation-bound"},
+            },
+            headers=MACHINE_AUTH,
+        )
+        assert committed.status_code == 200, committed.text
+
+        stale = env["client"].post(
+            f"/api/items/{SKU}/ebay-write",
+            json={
+                "expected_generation": expected,
+                "ebay_offer": {"offer_id": "stale-overwrite"},
+            },
+            headers=MACHINE_AUTH,
+        )
+        assert stale.status_code == 409
+        assert stale.json()["detail"]["code"] == "generation_conflict"
+        assert _read_item(env["itemdata_root"], SKU)["ebay_offer"]["offer_id"] == (
+            "generation-bound"
+        )
+
     def test_merge_offer(self, env):
         r = env["client"].post(
             f"/api/items/{SKU}/ebay-write",
             json={"ebay_offer": {"offer_id": "off001", "listing_id": "list001", "price": "9.99"}},
-            headers=AUTH,
+            headers=MACHINE_AUTH,
         )
         assert r.status_code == 200
         assert r.json()["changed_fields"] == ["ebay_offer"]
@@ -207,7 +246,7 @@ class TestEbayWrite:
         r = env["client"].post(
             f"/api/items/{SKU}/ebay-write",
             json={"ebay_listing": {"listing_id": "list002", "listing_status": "ACTIVE"}},
-            headers=AUTH,
+            headers=MACHINE_AUTH,
         )
         assert r.status_code == 200
         doc = _read_item(env["itemdata_root"], SKU)
@@ -222,7 +261,7 @@ class TestEbayWrite:
                 "ebay_offer": {"offer_id": "o1"},
                 "ebay_listing": {"listing_id": "l1"},
             },
-            headers=AUTH,
+            headers=MACHINE_AUTH,
         )
         assert r.status_code == 200
         assert set(r.json()["changed_fields"]) == {"ebay_offer", "ebay_listing"}
@@ -231,7 +270,7 @@ class TestEbayWrite:
         r = env["client"].post(
             f"/api/items/{SKU}/ebay-write",
             json={},
-            headers=AUTH,
+            headers=MACHINE_AUTH,
         )
         assert r.status_code == 400
 
@@ -239,7 +278,7 @@ class TestEbayWrite:
         r = env["client"].post(
             "/api/items/tgw20260101999999999/ebay-write",
             json={"ebay_offer": {"offer_id": "x"}},
-            headers=AUTH,
+            headers=MACHINE_AUTH,
         )
         assert r.status_code == 404
 
@@ -248,7 +287,7 @@ class TestEbayWrite:
         env["client"].post(
             f"/api/items/{SKU}/ebay-write",
             json={"ebay_offer": {"price": "8.00"}},
-            headers=AUTH,
+            headers=MACHINE_AUTH,
         )
         assert not any(k.get("queue_name") == "catalog_rebuild" for k in env["enqueue_calls"])
 

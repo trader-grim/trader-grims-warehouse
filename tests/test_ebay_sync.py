@@ -37,6 +37,22 @@ def _no_ebay_calls(monkeypatch):
     Motors) unless a test explicitly overrides it."""
     monkeypatch.setattr(sync, '_get_merchant_location', lambda _cfg: 'LOC-1')
     monkeypatch.setattr(sync, '_is_motors_category', lambda cfg, category_id: False)
+    monkeypatch.setattr(
+        sync,
+        'item_condition_required_for_category',
+        lambda cfg, category_id: True,
+    )
+    monkeypatch.setattr(
+        sync,
+        'allowed_conditions_for_category',
+        lambda cfg, category_id: [
+            {
+                'condition_id': '5000',
+                'condition_label': 'Good',
+                'condition_enum': 'USED_GOOD',
+            },
+        ],
+    )
 
 
 def _item(**extra):
@@ -96,6 +112,103 @@ def test_offer_body_still_builds_without_weight(cfg):
     assert offer_body['sku'] == 'tgw0001'
     assert offer_body['pricingSummary']['price'] == {'currency': 'USD', 'value': '19.99'}
     assert inv_body['condition'] == 'USED_GOOD'
+
+
+def test_raw_display_condition_enum_is_held_for_explicit_operator_selection(cfg):
+    item = _item(condition='Very Good')
+    item['draft_listing']['condition_enum'] = 'Very Good'
+
+    with pytest.raises(ValueError, match='select a displayed category-legal value'):
+        sync._build_offer_bodies(cfg, 'tgw0001', item)
+
+
+def test_resolved_optional_category_omits_condition_and_description(cfg, monkeypatch):
+    monkeypatch.setattr(
+        sync,
+        'item_condition_required_for_category',
+        lambda cfg, category_id: False,
+    )
+    item = _item()
+    item['draft_listing']['category_id'] = '108857'
+    item['draft_listing']['condition_enum'] = ''
+    item['draft_listing']['condition_description'] = 'Legacy notes'
+
+    inv_body, _ = sync._build_offer_bodies(cfg, 'tgw0001', item)
+
+    assert 'condition' not in inv_body
+    assert 'conditionDescription' not in inv_body
+
+
+def test_optional_category_requires_explicit_clear_before_stage(cfg, monkeypatch):
+    monkeypatch.setattr(
+        sync,
+        'item_condition_required_for_category',
+        lambda cfg, category_id: False,
+    )
+
+    with pytest.raises(ValueError, match='choose the blank listing-condition option'):
+        sync.validate_listing_condition_for_stage(cfg, 'tgw0001', _item())
+
+
+def test_condition_policy_lookup_failure_holds_stage(cfg, monkeypatch):
+    monkeypatch.setattr(
+        sync,
+        'item_condition_required_for_category',
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('cache offline')),
+    )
+
+    with pytest.raises(ValueError, match='condition policy is unresolved'):
+        sync.validate_listing_condition_for_stage(cfg, 'tgw0001', _item())
+
+
+def test_missing_requirement_flag_holds_even_with_cached_allowed_choices(
+    cfg, monkeypatch
+):
+    monkeypatch.setattr(
+        sync,
+        'item_condition_required_for_category',
+        lambda cfg, category_id: None,
+    )
+
+    with pytest.raises(ValueError, match='condition policy is unresolved'):
+        sync.validate_listing_condition_for_stage(cfg, 'tgw0001', _item())
+
+
+def test_exact_category_policy_rejects_other_real_enum(cfg, monkeypatch):
+    item = _item()
+    item['draft_listing']['condition_enum'] = 'USED_VERY_GOOD'
+
+    with pytest.raises(ValueError, match='not valid for eBay category 12345'):
+        sync.validate_listing_condition_for_stage(cfg, 'tgw0001', item)
+
+
+def test_stage_draft_does_not_retry_provider_condition_rejection(cfg, monkeypatch):
+    monkeypatch.setattr(
+        sync,
+        '_find_offer',
+        lambda cfg, sku: {'offerId': 'O1', 'marketplaceId': 'EBAY_US'},
+    )
+    calls = []
+    response = type(
+        'Response',
+        (),
+        {
+            'status_code': 400,
+            'json': lambda self: {'errors': [{'errorId': 25021}]},
+        },
+    )()
+
+    def reject_condition(cfg, path, body):
+        calls.append((path, body))
+        raise requests.exceptions.HTTPError(response=response)
+
+    monkeypatch.setattr(sync, 'ebay_put', reject_condition)
+
+    with pytest.raises(requests.exceptions.HTTPError):
+        sync.stage_draft(cfg, 'tgw0001', _item())
+
+    assert len(calls) == 1
+    assert calls[0][1]['condition'] == 'USED_GOOD'
 
 
 # ---------------------------------------------------------------------------

@@ -107,7 +107,10 @@ def _waiting_treatment_receipt_error(value: Any, job: Dict[str, Any]) -> str | N
     timer = value.get("timer")
     if not isinstance(timer, dict):
         return "INVALID_TIMER"
-    if timer.get("queue_name") != job.get("queue_name"):
+    if not state_machine.queue_name_matches_environment(
+        job.get("queue_name"), timer.get("queue_name"),
+        payload.get("ebay_environment"),
+    ):
         return "TIMER_QUEUE_MISMATCH"
     not_before = timer.get("not_before")
     if (isinstance(not_before, bool)
@@ -133,7 +136,7 @@ def _waiting_treatment_receipt_error(value: Any, job: Dict[str, Any]) -> str | N
         "goal_profile_id", "goal_profile_version", "object_generation",
         "condition_hash", "entity_id", "object_id", "sku",
         "provider_effect_id", "provider_identity", "expected_offer_id",
-        "source_operation",
+        "source_operation", "ebay_environment", "ebay_endpoint",
     )
     for key in continuation_bindings:
         if timer_payload.get(key) != payload.get(key):
@@ -208,8 +211,14 @@ class QueueWorker:
     """Forever loop: claim a leased job, handle it, report the result."""
 
     def __init__(self, queue_name: str, config: Dict[str, Any]) -> None:
+        from tgw.config import configured_ebay_environment
+
         self.queue_name   = queue_name
         self.config       = config
+        self.ebay_environment = configured_ebay_environment(config)
+        self.claim_queue_name = state_machine.queue_name_for_environment(
+            queue_name, self.ebay_environment,
+        )
         self.owner        = f'{socket.gethostname()}:{os.getpid()}'
         self.poll_interval = float(
             config.get('queue', {}).get('poll_interval_s', 2.0)
@@ -226,7 +235,10 @@ class QueueWorker:
         )
         self._stop           = False
         self._last_recover   = 0.0
-        state_machine.init(config.get('postgres_dsn', 'dbname=state_machine user=tgw'))
+        state_machine.init(
+            config.get('postgres_dsn', 'dbname=state_machine user=tgw'),
+            self.ebay_environment,
+        )
         # File logging is a resolved configuration binding.  Directly
         # constructed workers (tests and embedded callers) stay console-only
         # instead of implicitly opening the production log directory.
@@ -318,6 +330,9 @@ class QueueWorker:
                 lease_owner=self.owner,
                 lease_seconds=self.lease_seconds,
                 limit=1,
+                ebay_environment=getattr(
+                    self, 'ebay_environment', 'production',
+                ),
             )
             return jobs[0] if jobs else None
         except Exception:

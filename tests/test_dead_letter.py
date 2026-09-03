@@ -23,7 +23,11 @@ def _jobs():
 
 
 def _patch_common(monkeypatch, requeued):
-    monkeypatch.setattr(state_machine, "init", lambda dsn: None, raising=False)
+    def _init(dsn, ebay_environment):
+        assert dsn == "x"
+        assert ebay_environment == "production"
+
+    monkeypatch.setattr(state_machine, "init", _init, raising=False)
     # classify by the real transient substrings used in worker_base
     monkeypatch.setattr(state_machine, "requeue_dead_letter_job",
                         lambda jid: requeued.append(jid) or f"new-{jid}", raising=False)

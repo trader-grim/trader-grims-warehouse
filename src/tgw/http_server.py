@@ -9,6 +9,7 @@ Auth: Bearer <api_key> — key stored in secrets_root/tgw-api-key.json
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import psycopg2
@@ -36,7 +37,13 @@ from pydantic import BaseModel, Field
 from . import draft_sync, inventory_record
 from .assets import ordered_photos as _ordered_photos
 from .bootstrap_host_integration import configured_bootstrap_deployment_provider
-from .config import DEFAULT_CONFIG
+from .config import (
+    DEFAULT_CONFIG,
+    bind_ebay_provider_identity,
+    configured_ebay_environment,
+    ebay_cache_filename,
+    ebay_environment_settings,
+)
 from .ebay.category_aspect_migration import (
     apply_category_aspect_migration,
     detect_category_orphaned_aspects,
@@ -45,8 +52,23 @@ from .ebay.description import build_listing_description
 from .ebay.draft_specifics import get_ebay_aspects, set_ebay_aspects
 from .ebay.draft_specifics import is_envelope as _is_ebay_draft_envelope
 from .ebay.inventory_diff import apply_inventory_diff, diff_ebay_draft_to_inventory
-from .item_mutation import item_generation, item_mutation_lock, operation_identity
-from .items import _archive_before_overwrite, atomic_write_json, create_item, sync_location_tree
+from .item_mutation import (
+    MutationReceipt,
+    item_generation,
+    item_mutation_lock,
+    item_write_lock,
+    mutate_item,
+    operation_identity,
+    reconcile_mutation,
+    resolve_item_mutation_journal_root,
+)
+from .items import (
+    _archive_before_overwrite,
+    atomic_write_json,
+    create_item,
+    locationupdate,
+    sync_location_tree,
+)
 from .operator_console_host import configured_authority_principal, configured_console_mount
 from .operator_console_plugin import mount_operator_console
 from .plan_authority import AuthorityPrincipal, PrincipalRole
@@ -57,6 +79,33 @@ from .resolver import load_item_doc
 log = logging.getLogger(__name__)
 
 _DISPLAY_TZ = ZoneInfo("America/Los_Angeles")
+
+
+def _ebay_reference_snapshot_path(
+    cfg: Dict[str, Any],
+    production_filename: str,
+) -> Optional[Path]:
+    """Return the environment-bound item-page reference snapshot path."""
+    catalog_root = cfg.get("catalog_root")
+    if not catalog_root:
+        return None
+    return Path(catalog_root) / ebay_cache_filename(cfg, production_filename)
+
+
+def _ebay_reference_cache_slot(
+    cache: Dict[str, Dict[str, Any]],
+    cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Return one process-cache slot per closed eBay environment."""
+    environment = configured_ebay_environment(cfg)
+    return cache.setdefault(environment, {"data": None, "at": 0.0})
+
+
+def _clear_ebay_reference_cache(
+    cache: Dict[str, Dict[str, Any]],
+    cfg: Dict[str, Any],
+) -> None:
+    cache.pop(configured_ebay_environment(cfg), None)
 
 
 def _local_ts(raw: Any, fmt: str = "%Y-%m-%d %H:%M") -> str:
@@ -270,7 +319,9 @@ async def lifespan(app: FastAPI):
     from tgw.config import load_operational_config
 
     _cfg = load_operational_config(DEFAULT_CONFIG)
-    state_machine.init(_cfg["postgres_dsn"])
+    state_machine.init(
+        _cfg["postgres_dsn"], configured_ebay_environment(_cfg),
+    )
 
     key_path: Path = _cfg["secrets_root"] / "tgw-api-key.json"
     if not key_path.exists():
@@ -820,6 +871,7 @@ class EbayWriteBody(BaseModel):
     # e.g. ["price_comps"] from ebay_price, ["photo_verify"] from ebay_repush.
     # Everyone else stays blocked from touching a protected field (#1189).
     allow_protected: Optional[List[str]] = None
+    expected_generation: Optional[str] = None
 
 
 class SoldEvidenceBody(BaseModel):
@@ -1046,11 +1098,21 @@ def _workflow_attempt_rows(sku: str, limit: int = 100) -> List[Dict[str, Any]]:
                  WHERE (entity_type = 'item' AND entity_id = %s)
                     OR payload_json->>'sku' = %s
                  ORDER BY created_at DESC
-                 LIMIT %s
                 """,
-                (sku, sku, limit),
+                (sku, sku),
             )
             rows = [dict(row) for row in cur.fetchall()]
+    environment = configured_ebay_environment(_cfg)
+    rows = [
+        row for row in rows
+        if state_machine.queue_name_visible_in_environment(
+            row.get("queue_name"), environment,
+        )
+    ][:limit]
+    for row in rows:
+        row["queue_name"] = state_machine.logical_queue_name(
+            str(row.get("queue_name") or ""),
+        )
     consumers = _queue_consumers([str(row.get("queue_name") or "") for row in rows])
     for row in rows:
         row["consumer"] = consumers.get(str(row.get("queue_name") or ""), {})
@@ -1138,11 +1200,25 @@ def _workflow_provider_identity() -> str:
     if migration is None and isinstance(_cfg.get("raw"), dict):
         migration = _cfg["raw"].get("workflow_migration")
     value = migration.get("ebay_provider_identity") if isinstance(migration, dict) else None
-    return value if isinstance(value, str) else ""
+    return bind_ebay_provider_identity(
+        value,
+        configured_ebay_environment(_cfg),
+    )
+
+
+def _workflow_provider_environment_binding() -> tuple[str, str, str]:
+    environment = configured_ebay_environment(_cfg)
+    settings = ebay_environment_settings(environment)
+    return (
+        environment,
+        settings["rest_api_root"],
+        settings["trading_api_endpoint"],
+    )
 
 
 def _current_item_operator_object(sku: str) -> Dict[str, Any]:
     """Read and publish one exact current server-owned item object."""
+    from .assets import ordered_photos, primary_photo
     from .operator_objects import build_item_operator_object
     from .workflow.action_cards import build_item_action_card
 
@@ -1162,39 +1238,132 @@ def _current_item_operator_object(sku: str) -> Dict[str, Any]:
             workflow_card = build_item_action_card(
                 json_path,
                 attempts,
+                item_document=item,
                 provider_identity=_workflow_provider_identity(),
                 reconciled_provider_effect_ids=reconciled_effect_ids,
             )
+        if workflow_card.get("object_generation") != item_generation(item):
+            raise RuntimeError(
+                "item and workflow projections do not share one exact generation"
+            )
         draft = item.get("draft_listing") if isinstance(item.get("draft_listing"), dict) else {}
         category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "")
-        current_condition = str(draft.get("condition_enum") or "")  # Never use legacy human record labels as eBay enums.
+        # Never use legacy human record labels as eBay enums.
+        current_condition = str(draft.get("condition_enum") or "")
         category_context = ebay_category_context(category_id, current_condition=current_condition) if category_id and category_id != "99" else {}
         category_context = dict(category_context)
-        groups_path = _cfg.get("category_groups_path")
-        if groups_path and Path(groups_path).exists():
-            raw_groups = json.loads(Path(groups_path).read_text(encoding="utf-8"))
-            category_context["category_groups"] = [
-                {"value": key, "label": str(group.get("name") or key),
-                 "size_class": str(group.get("size_class") or ""), "ai_hint": str(group.get("ai_hint") or ""),
-                 "ebay_categories": [str(value) for value in group.get("ebay_categories", []) if str(value)]}
-                for key, group in raw_groups.get("groups", {}).items() if isinstance(group, dict)
-            ]
-            category_context["record_condition_vocabulary"] = list((raw_groups.get("condition_factors") or {}).keys())
-            category_context["record_attribute_vocabulary"] = raw_groups.get("attribute_vocabulary") or raw_groups.get("attributes") or {}
+        from .apis.ebay.taxonomy import get_cached_category_node
+
+        secondary_category_id = str(draft.get("secondary_category_id") or "").strip()
+        category_context["primary_category_node"] = (
+            get_cached_category_node(_cfg, category_id) if category_id else None
+        )
+        category_context["secondary_category_node"] = (
+            get_cached_category_node(_cfg, secondary_category_id)
+            if secondary_category_id
+            else None
+        )
         try:
             store_categories, _store_refreshed, _store_error = _store_categories_snapshot(_cfg)
         except (KeyError, OSError, ValueError):
-            store_categories = []
+            store_categories = _store_categories_from_groups(_cfg)
+        else:
+            if _store_error:
+                store_categories = _store_categories_from_groups(_cfg)
         try:
             fulfillment, _fulfillment_refreshed, _fulfillment_error = _fulfillment_policies_snapshot(_cfg)
         except (KeyError, OSError, ValueError):
             fulfillment = {}
+        try:
+            return_policies, _return_refreshed, _return_error = _return_policies_snapshot(_cfg)
+        except (KeyError, OSError, ValueError):
+            return_policies = {}
         category_context["store_categories"] = [{"value": entry["id"], "label": entry["name"]} for entry in store_categories if isinstance(entry.get("id"), str) and isinstance(entry.get("name"), str)]
         category_context["fulfillment_policies"] = [{"value": policy_id, "label": label} for policy_id, label in sorted(fulfillment.items(), key=lambda item: (item[1].casefold(), item[0]))]
+        category_context["return_policies"] = [{"value": policy_id, "label": label} for policy_id, label in sorted(return_policies.items(), key=lambda item: (item[1].casefold(), item[0]))]
+        try:
+            category_groups = _category_group_table(_cfg)
+            category_context["category_groups"] = _category_group_choices(_cfg)
+            category_context.update(
+                _category_group_inventory_condition_context(
+                    _cfg,
+                    item,
+                    groups=category_groups,
+                )
+            )
+        except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+            # The rest of the operator object remains usable when template
+            # configuration is temporarily unavailable.  The assembler keeps
+            # category_group read-only unless this exact choice set is present.
+            category_context["category_groups"] = []
+            category_context["category_groups_error"] = str(exc)
+            category_context["inventory_conditions"] = []
+            category_context["inventory_conditions_error"] = str(exc)
+        browser_image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+        browser_video_extensions = {".mp4", ".mov", ".mkv", ".webm"}
+        try:
+            primary = primary_photo(item, json_path.parent)
+            browser_photos = [
+                photo
+                for photo in ordered_photos(item, json_path.parent)
+                if photo.suffix.lower() in browser_image_extensions
+                and not photo.name.startswith(".")
+            ]
+            browser_videos = [
+                candidate
+                for candidate in sorted(
+                    json_path.parent.iterdir(),
+                    key=lambda path: path.name.casefold(),
+                )
+                if candidate.is_file()
+                and candidate.suffix.lower() in browser_video_extensions
+                and not candidate.name.startswith(".")
+            ]
+        except OSError:
+            primary = None
+            browser_photos = []
+            browser_videos = []
+            media_status = {
+                "state": "unavailable",
+                "reason": "Media could not be read from item storage.",
+            }
+        else:
+            media_status = {
+                "state": "ready" if browser_photos or browser_videos else "empty",
+                "reason": None,
+            }
+        media = [
+            {
+                "kind": "image",
+                "name": photo.name,
+                "url": (
+                    f"/media/{urllib.parse.quote(sku, safe='')}/"
+                    f"{urllib.parse.quote(photo.name, safe='')}"
+                ),
+                "position": position,
+                "primary": primary is not None and photo == primary,
+            }
+            for position, photo in enumerate(browser_photos)
+        ]
+        media.extend(
+            {
+                "kind": "video",
+                "name": video.name,
+                "url": (
+                    f"/media/{urllib.parse.quote(sku, safe='')}/"
+                    f"{urllib.parse.quote(video.name, safe='')}"
+                ),
+                "position": len(browser_photos) + position,
+                "primary": False,
+            }
+            for position, video in enumerate(browser_videos)
+        )
         return build_item_operator_object(
             item=item,
             workflow_card=workflow_card,
             category_context=category_context,
+            media=media,
+            media_status=media_status,
         )
     except HTTPException:
         raise
@@ -1236,6 +1405,339 @@ def get_item_operator_object(sku: str) -> Dict[str, Any]:
     return {"ok": True, "object": _current_item_operator_object(sku)}
 
 
+def _operator_rejection_draft_field(pipeline_error: Any) -> str | None:
+    """Map an attributed provider rejection to its published draft field."""
+    if not isinstance(pipeline_error, Mapping):
+        return None
+    field = str(pipeline_error.get("field") or "").strip()
+    if field in {"categoryId", "category_id"}:
+        return "category_id"
+    if field in {"condition", "conditionId", "condition_id", "condition_enum"}:
+        return "condition_enum"
+    detail = str(
+        pipeline_error.get("detail") or pipeline_error.get("error") or ""
+    ).casefold()
+    compact = "".join(character for character in detail if character.isalnum())
+    if "categoryid" in compact:
+        return "category_id"
+    if "conditionid" in compact:
+        return "condition_enum"
+    return None
+
+
+def _operator_patch_document(
+    document: Dict[str, Any],
+    fields: Mapping[str, Any],
+    *,
+    operator_identity: str,
+) -> Dict[str, Any]:
+    """Pure transform for a generation-fenced published-command edit.
+
+    This mirrors the sanctioned Set A/Set B behavior of ``_apply_patch`` but
+    has no pathname reads or writes.  Keeping the transform pure lets
+    ``mutate_item`` perform the generation comparison and canonical rename
+    while holding the same per-item lock used by governed workers.
+    """
+    doc = json.loads(json.dumps(document, ensure_ascii=False))
+    pending = json.loads(json.dumps(dict(fields), ensure_ascii=False))
+    original_keys = list(pending)
+
+    draft_fields = pending.get("draft_listing")
+    if isinstance(draft_fields, dict):
+        current_draft = dict(doc.get("draft_listing") or {})
+        if doc.get("pipeline_error"):
+            rejection_field = _operator_rejection_draft_field(
+                doc["pipeline_error"]
+            )
+            rejection_field_changed = bool(
+                rejection_field
+                and rejection_field in draft_fields
+                and str(current_draft.get(rejection_field))
+                != str(draft_fields.get(rejection_field))
+            )
+            resolved = draft_sync.resolve_pipeline_error(
+                doc["pipeline_error"],
+                {**current_draft, **draft_fields},
+                clear_rejections=rejection_field_changed,
+            )
+            if resolved is None:
+                pending["pipeline_error"] = None
+                if "pipeline_error" not in original_keys:
+                    original_keys.append("pipeline_error")
+        if (
+            "description" in draft_fields
+            and "listing_description" not in draft_fields
+        ):
+            merged_for_description = {**current_draft, **draft_fields}
+            draft_fields["listing_description"] = build_listing_description(
+                {**doc, "draft_listing": merged_for_description},
+                _cfg,
+            )
+
+    for document_map_key in ("draft_listing", "item_attributes"):
+        incoming = pending.pop(document_map_key, None)
+        if not isinstance(incoming, dict):
+            if incoming is not None:
+                pending[document_map_key] = incoming
+            continue
+        if (
+            document_map_key == "item_attributes"
+            and not inventory_record.is_envelope(incoming)
+        ):
+            patch = inventory_record.set_inventory_fields(
+                doc,
+                incoming,
+                source="operator_object",
+                applied_by=operator_identity,
+            )
+            doc.update(patch)
+            continue
+        if document_map_key == "draft_listing":
+            existing = dict(doc.get("draft_listing") or {})
+            prior_price = existing.get("price")
+            incoming_specifics = incoming.pop("item_specifics", None)
+            prior_specifics = dict(get_ebay_aspects(doc))
+            changed_specifics = (
+                {
+                    key: value
+                    for key, value in incoming_specifics.items()
+                    if str(prior_specifics.get(key)) != str(value)
+                }
+                if isinstance(incoming_specifics, dict)
+                and not _is_ebay_draft_envelope(incoming_specifics)
+                else {}
+            )
+            existing.update(incoming)
+            doc[document_map_key] = existing
+            if (
+                isinstance(incoming_specifics, dict)
+                and not _is_ebay_draft_envelope(incoming_specifics)
+            ):
+                specifics_patch = set_ebay_aspects(
+                    doc,
+                    incoming_specifics,
+                    source="operator_object",
+                    applied_by=operator_identity,
+                )
+                existing.update(specifics_patch)
+            elif incoming_specifics is not None:
+                existing.update({"item_specifics": incoming_specifics})
+            doc[document_map_key] = existing
+
+            # Set A follows only the operator's explicit Set B changes.  A
+            # complete List/Update submit includes untouched controls, and a
+            # sparse Save Draft omits them; in both cases, an unchanged blank
+            # draft value must not erase a populated inventory attribute.
+            if changed_specifics:
+                inventory_patch = inventory_record.sync_from_draft(
+                    doc,
+                    changed_specifics,
+                    source="draft_sync",
+                    applied_by=operator_identity,
+                )
+                doc.update(inventory_patch)
+            for base_key in ("title", "description"):
+                draft_value = existing.get(base_key)
+                if draft_value and not inventory_record.is_locked(doc, base_key):
+                    doc[base_key] = draft_value
+
+            if "price" in incoming and incoming.get("price") is not None:
+                new_price = incoming.get("price")
+                if str(new_price) != str(prior_price):
+                    doc["price_history"] = list(doc.get("price_history") or []) + [
+                        {
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "price": float(new_price),
+                            "previous_price": (
+                                float(prior_price)
+                                if prior_price not in (None, "")
+                                else None
+                            ),
+                            "stage": None,
+                            "label": "price edited",
+                            "source": operator_identity,
+                        }
+                    ]
+            continue
+
+        existing = dict(doc.get(document_map_key) or {})
+        existing.update(incoming)
+        doc[document_map_key] = existing
+
+    for key, value in pending.items():
+        if value is None:
+            doc.pop(key, None)
+        else:
+            doc[key] = value
+    if "catalog_verified" not in pending:
+        doc.pop("catalog_verified", None)
+
+    if isinstance(doc.get("draft_listing"), dict):
+        for base_key in ("title", "description"):
+            if base_key in pending:
+                doc["draft_listing"][base_key] = pending.get(base_key)
+    return doc
+
+
+def _operator_mutation_roots() -> tuple[Path, Path]:
+    itemdata_root = Path(_cfg["itemdata_root"])
+    data_root = Path(_cfg.get("data_root", itemdata_root.parent))
+    archive_root = Path(_cfg.get("archive_root", data_root / "ItemArchive"))
+    journal_root = resolve_item_mutation_journal_root(_cfg)
+    return archive_root, journal_root
+
+
+def _raise_operator_mutation_failure(
+    receipt: MutationReceipt,
+    *,
+    refresh: str,
+) -> None:
+    if receipt.status == "CONFLICT":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "generation_conflict",
+                "expected": receipt.observed_generation,
+                "received": receipt.expected_generation,
+                "refresh": refresh,
+            },
+        )
+    status_code = 503 if receipt.status == "REPAIR_REQUIRED" else 500
+    raise HTTPException(
+        status_code=status_code,
+        detail={
+            "code": "item_mutation_held",
+            "status": receipt.status.lower(),
+            "operation_id": receipt.operation_id,
+            "reason": receipt.detail or "the canonical mutation was not committed",
+            "refresh": refresh,
+        },
+    )
+
+
+def _apply_operator_mutation_cas(
+    json_path: Path,
+    sku: str,
+    *,
+    expected_generation: str,
+    command_id: str,
+    payload: Mapping[str, Any],
+    mutate: Callable[[Dict[str, Any]], Dict[str, Any]],
+    changed_keys: tuple[str, ...],
+) -> MutationReceipt:
+    """Commit one operator command against its exact published generation."""
+    archive_root, journal_root = _operator_mutation_roots()
+    before_after: Dict[str, Dict[str, Any]] = {}
+
+    def guarded_mutate(document: Dict[str, Any]) -> Dict[str, Any]:
+        if str(document.get("sku") or json_path.stem) != sku:
+            raise ValueError("authoritative document SKU mismatch")
+        before_after["before"] = json.loads(json.dumps(document, ensure_ascii=False))
+        updated = mutate(document)
+        before_after["after"] = json.loads(json.dumps(updated, ensure_ascii=False))
+        return updated
+
+    def project(_sku: str, document: Dict[str, Any]) -> Dict[str, Any]:
+        from .sqlite_catalog import upsert_catalog_row
+
+        result = upsert_catalog_row(_cfg, document)
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise RuntimeError("SQLite projection did not report success")
+        return result
+
+    receipt = mutate_item(
+        item_path=json_path,
+        archive_root=archive_root,
+        journal_root=journal_root,
+        sku=sku,
+        kind=f"operator-command:{command_id}",
+        expected_generation=expected_generation,
+        payload=json.loads(json.dumps(dict(payload), ensure_ascii=False)),
+        mutate=guarded_mutate,
+        project=project,
+    )
+    if receipt.status == "REPAIR_REQUIRED":
+        receipt = reconcile_mutation(
+            item_path=json_path,
+            journal_root=journal_root,
+            operation_id=receipt.operation_id,
+            project=project,
+        )
+    if receipt.status != "COMMITTED":
+        _raise_operator_mutation_failure(
+            receipt,
+            refresh=f"/api/operator/items/{sku}",
+        )
+
+    after = before_after.get("after")
+    before = before_after.get("before")
+    if after is None:
+        current = load_item_doc(json_path)
+        if item_generation(current) == receipt.resulting_generation:
+            after = current
+    if before is not None and after is not None and receipt.changed:
+        try:
+            from .apis.nats_client import publish_mutation
+
+            for key in changed_keys:
+                publish_mutation(
+                    sku=sku,
+                    field=key,
+                    old_value=before.get(key),
+                    new_value=after.get(key),
+                    source="operator_object",
+                )
+        except Exception:
+            pass
+        old_location = str(before.get("location") or "").strip()
+        new_location = str(after.get("location") or "").strip()
+        if old_location != new_location:
+            try:
+                from .items import _rebuild_location_link, _remove_location_link
+
+                if old_location:
+                    _remove_location_link(_cfg, sku, old_location)
+                if new_location:
+                    _rebuild_location_link(_cfg, sku, new_location)
+            except Exception as exc:
+                _persist_finding(
+                    json_path,
+                    sku,
+                    "location_update_failed",
+                    f"location projection failed after CAS commit: {exc}",
+                    "operator_object",
+                )
+    if receipt.changed and ({"image", "photo_order"} & set(changed_keys)):
+        _enqueue_thumbnail_gen(sku, reason=f"operator_object:{command_id}")
+    _enqueue_catalog_rebuild(f"operator_object:{command_id}:{sku}")
+    return receipt
+
+
+def _apply_operator_patch_cas(
+    json_path: Path,
+    sku: str,
+    fields: Mapping[str, Any],
+    *,
+    expected_generation: str,
+    command_id: str,
+    operator_identity: str,
+) -> MutationReceipt:
+    frozen_fields = json.loads(json.dumps(dict(fields), ensure_ascii=False))
+    return _apply_operator_mutation_cas(
+        json_path,
+        sku,
+        expected_generation=expected_generation,
+        command_id=command_id,
+        payload={"fields": frozen_fields, "operator_identity": operator_identity},
+        mutate=lambda document: _operator_patch_document(
+            document,
+            frozen_fields,
+            operator_identity=operator_identity,
+        ),
+        changed_keys=tuple(frozen_fields),
+    )
+
+
 @app.post("/api/operator/items/{sku}/commands")
 def execute_item_operator_command(
     sku: str,
@@ -1264,9 +1766,41 @@ def execute_item_operator_command(
             status_code=409,
             detail={"code": "command_held", "reason": command.get("reason")},
         )
-    local_save_commands = {"save-inventory", "save-listing-draft"}
-    if body.command_id in local_save_commands and not body.values:
-        raise HTTPException(status_code=422, detail=f"{body.command_id} requires server-published field values")
+    if body.command_id in {"list-item", "update-item"} and not body.values:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{body.command_id} requires server-published field values",
+        )
+    if body.command_id in {"list-item", "update-item"}:
+        submitted_draft = body.values.get("draft_listing")
+        expected_draft_fields = set(
+            command.get("input_schema", {})
+            .get("properties", {})
+            .get("draft_listing", {})
+            .get("properties", {})
+        )
+        if not isinstance(submitted_draft, Mapping):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{body.command_id} requires the complete published listing editor",
+            )
+        missing_editor_fields = sorted(expected_draft_fields - set(submitted_draft))
+        if missing_editor_fields:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "incomplete_listing_editor",
+                    "missing_fields": missing_editor_fields,
+                    "reason": (
+                        "List and Update require every field from the exact "
+                        "server-published editor; refresh before submitting."
+                    ),
+                },
+            )
+    if body.command_id == "reorder-photos" and not body.values:
+        raise HTTPException(status_code=422, detail="reorder-photos requires the canonical media order")
+    if body.command_id == "reprice-item" and "search_terms" not in body.values:
+        raise HTTPException(status_code=422, detail="reprice-item requires published pricing search terms")
 
     checked_values: Dict[str, Any] = {}
     if body.values:
@@ -1282,38 +1816,76 @@ def execute_item_operator_command(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if body.command_id == "save-inventory":
             item_fields = checked_values.get("item_fields", {})
-            patch_fields = {**item_fields}
-            current_record = published["item"]["record"]
-            selected_group = patch_fields.get("category_group")
-            if selected_group and selected_group != current_record.get("category_group"):
-                options = published["field_schema"].get("category_groups", [])
-                selected = next((option for option in options if option.get("value") == selected_group), None)
-                if selected is None:
-                    raise HTTPException(status_code=422, detail="category_group is not a published TGW group")
-                patch_fields.update(category_group=selected_group, size_class=selected.get("size_class", ""), ai_hint=selected.get("ai_hint", ""))
-                current_draft = current_record.get("draft_listing") if isinstance(current_record.get("draft_listing"), dict) else {}
-                if not (current_draft.get("category_id") or current_record.get("ebay_category_id")):
-                    categories = selected.get("ebay_categories") or []
-                    if categories:
-                        patch_fields["draft_listing"] = {"category_id": categories[0]}
-        elif body.command_id == "save-listing-draft":
-            draft_fields = checked_values.get("draft_listing", {})
-            patch_fields = {"draft_listing": draft_fields} if draft_fields else {}
-        else:
-            patch_fields = {"draft_listing": checked_values}
-        if patch_fields:
-            patch_item(
-                sku,
-                PatchBody(
-                    fields=patch_fields,
-                    expected_generation=body.object_generation,
-                ),
-                Request({
-                    "type": "http",
-                    "headers": [],
-                    "_tgw_operator_object_capability": _OPERATOR_OBJECT_CAPABILITY,
-                }),
-                operator_identity,
+            patch_fields = dict(item_fields)
+            if "category_group" in patch_fields:
+                template_key = str(patch_fields["category_group"] or "").strip()
+                if not template_key:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="category_group must be one published template",
+                    )
+                descriptor = (
+                    published.get("field_schema", {})
+                    .get("item_fields", {})
+                    .get("category_group", {})
+                )
+                published_templates = {
+                    str(option.get("value") or "").strip(): option
+                    for option in descriptor.get("options", ())
+                    if isinstance(option, Mapping)
+                }
+                published_templates.pop("", None)
+                if template_key not in published_templates:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="category_group is not a published template",
+                    )
+                try:
+                    group = _category_group_table(_cfg)[template_key]
+                except (FileNotFoundError, json.JSONDecodeError, ValueError, KeyError) as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="published category-group templates changed; refresh the item",
+                    ) from exc
+                if (
+                    published_templates[template_key].get("template_fingerprint")
+                    != _category_group_template_fingerprint(group)
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="published category-group templates changed; refresh the item",
+                    )
+                current_document = published.get("item", {}).get("record", {})
+                prospective_document = {
+                    **(
+                        dict(current_document)
+                        if isinstance(current_document, Mapping)
+                        else {}
+                    ),
+                    **patch_fields,
+                }
+                try:
+                    template_fields = _category_group_template_fields(
+                        prospective_document,
+                        template_key,
+                        group,
+                    )
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="published category-group templates changed; refresh the item",
+                    ) from exc
+                patch_fields.update(template_fields)
+        elif body.command_id in {
+            "save-listing-draft",
+            "list-item",
+            "update-item",
+        }:
+            draft_fields = dict(checked_values.get("draft_listing", {}))
+            from .apis.ebay.taxonomy import get_cached_category_node
+
+            published_listing_fields = (
+                published.get("field_schema", {}).get("listing_fields", {})
             )
             published = _current_item_operator_object(sku)
             command = next(item for item in published["commands"] if item["id"] == body.command_id)
@@ -1323,12 +1895,392 @@ def execute_item_operator_command(
                     detail={"code": "command_held_after_update", "reason": command.get("reason")},
                 )
 
-    if body.command_id in local_save_commands:
+            # Business-policy IDs are provider values, not free text.  The
+            # current server projection is rebuilt at submit time, so validate
+            # changed values against those exact published choices before any
+            # item mutation.  An unchanged legacy value remains preservable
+            # even when it is absent from a newer reference snapshot.
+            for id_field, label in (
+                ("shipping_profile", "shipping policy"),
+                ("return_policy_id", "return policy"),
+            ):
+                if id_field not in draft_fields:
+                    continue
+                descriptor = (
+                    published_listing_fields.get(id_field, {})
+                    if isinstance(published_listing_fields, Mapping)
+                    else {}
+                )
+                requested_id = str(draft_fields.get(id_field) or "").strip()
+                current_id = str(descriptor.get("value") or "").strip()
+                if not requested_id or requested_id == current_id:
+                    continue
+                allowed_ids = {
+                    str(option.get("value") or "").strip()
+                    for option in descriptor.get("options", ())
+                    if isinstance(option, Mapping)
+                }
+                allowed_ids.discard("")
+                if requested_id not in allowed_ids:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"{id_field} is not a published eBay {label}",
+                    )
+
+            for id_field, name_field, path_field in (
+                ("category_id", "category_name", "category_path"),
+                (
+                    "secondary_category_id",
+                    "secondary_category_name",
+                    "secondary_category_path",
+                ),
+            ):
+                if id_field not in draft_fields:
+                    continue
+                requested_id = str(draft_fields.get(id_field) or "").strip()
+                current_id = str(
+                    (
+                        published_listing_fields.get(id_field, {})
+                        if isinstance(published_listing_fields, Mapping)
+                        else {}
+                    ).get("value")
+                    or ""
+                ).strip()
+                if not requested_id:
+                    draft_fields[name_field] = None
+                    draft_fields[path_field] = None
+                    continue
+                category_node = get_cached_category_node(_cfg, requested_id)
+                if category_node is None:
+                    if requested_id != current_id:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"{id_field} is not present in the local eBay "
+                                "taxonomy snapshot"
+                            ),
+                        )
+                    continue
+                if not category_node.get("leaf"):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"{id_field} must select an assignable leaf category",
+                    )
+                draft_fields[name_field] = category_node["name"]
+                draft_fields[path_field] = category_node["path"]
+
+            # Store-category IDs are the provider value; labels and ownership
+            # provenance are server-derived from the exact options published
+            # with this object.  Mark a changed selection (including an
+            # explicit clear) as operator-owned so a later AI redraft cannot
+            # silently replace it with a category-group default.
+            for id_field, name_field, source_field in (
+                (
+                    "store_category_id",
+                    "store_category_name",
+                    "store_category_source",
+                ),
+                (
+                    "secondary_store_category_id",
+                    "secondary_store_category_name",
+                    "secondary_store_category_source",
+                ),
+            ):
+                if id_field not in draft_fields:
+                    continue
+                descriptor = (
+                    published_listing_fields.get(id_field, {})
+                    if isinstance(published_listing_fields, Mapping)
+                    else {}
+                )
+                requested_id = str(draft_fields.get(id_field) or "").strip()
+                current_id = str(descriptor.get("value") or "").strip()
+                if requested_id != current_id:
+                    draft_fields[source_field] = "operator"
+                if not requested_id:
+                    draft_fields[name_field] = None
+                    continue
+                matching_option = next(
+                    (
+                        option
+                        for option in descriptor.get("options", ())
+                        if isinstance(option, Mapping)
+                        and str(option.get("value") or "").strip() == requested_id
+                    ),
+                    None,
+                )
+                if matching_option is None:
+                    if requested_id != current_id:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f"{id_field} is not a published Store category",
+                        )
+                    continue
+                draft_fields[name_field] = str(
+                    matching_option.get("label") or ""
+                ).strip() or None
+            requested_category = str(
+                (
+                    draft_fields.get("category_id")
+                    if "category_id" in draft_fields
+                    else published.get("field_schema", {})
+                    .get("category", {})
+                    .get("value")
+                )
+                or ""
+            ).strip()
+            requested_condition = str(draft_fields.get("condition_enum") or "").strip()
+            if requested_condition and requested_category and requested_category != "99":
+                refreshed_context = ebay_category_context(
+                    requested_category,
+                    current_condition=requested_condition,
+                )
+                allowed_conditions = {
+                    str(option.get("enum") or option.get("condition_enum") or "")
+                    for option in refreshed_context.get("conditions", ())
+                    if isinstance(option, Mapping)
+                }
+                allowed_conditions.discard("")
+                required = refreshed_context.get("item_condition_required")
+                policy_resolved = isinstance(required, bool)
+                if not policy_resolved:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="condition policy is unresolved for the selected category",
+                    )
+                if required is False or requested_condition not in allowed_conditions:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="condition is not valid for the selected category",
+                    )
+            patch_fields = {"draft_listing": draft_fields}
+        else:
+            patch_fields = {}
+        if patch_fields:
+            json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+            mutation_receipt = _apply_operator_patch_cas(
+                json_path,
+                sku,
+                patch_fields,
+                expected_generation=current_generation,
+                command_id=body.command_id,
+                operator_identity=operator_identity,
+            )
+            current_generation = str(mutation_receipt.resulting_generation or "")
+            published = _current_item_operator_object(sku)
+            if published["object_generation"] != current_generation:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "generation_conflict",
+                        "expected": published["object_generation"],
+                        "received": current_generation,
+                        "refresh": f"/api/operator/items/{sku}",
+                    },
+                )
+            command = next(item for item in published["commands"] if item["id"] == body.command_id)
+            if body.command_id not in {"save-inventory", "save-listing-draft"} and not command["enabled"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "command_held_after_update", "reason": command.get("reason")},
+                )
+
+    if body.command_id in {"save-inventory", "save-listing-draft"}:
         return {
             "ok": True,
             "command_id": body.command_id,
             "authority_scope": command["authority_scope"],
-            "object_generation": published["object_generation"],
+            "object_generation": current_generation,
+            "refresh": f"/api/operator/items/{sku}",
+        }
+
+    if body.command_id == "reprice-item":
+        from .workflow.listing_migration import request_item_goal
+        from .workflow.profiles import TGW_EBAY_PRICED
+        from .workflow.treatments import EBAY_PRICE
+
+        json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+        search_terms = checked_values["search_terms"].strip()
+        pricing_receipt = _apply_operator_patch_cas(
+            json_path,
+            sku,
+            {
+                "search_terms": search_terms or None,
+                "ai_reprice_requested": True,
+            },
+            expected_generation=current_generation,
+            command_id="reprice-item",
+            operator_identity=operator_identity,
+        )
+        current_generation = str(pricing_receipt.resulting_generation or "")
+        pricing_item = load_item_doc(json_path)
+        ebay_environment, ebay_rest_endpoint, _ = (
+            _workflow_provider_environment_binding()
+        )
+        try:
+            result = request_item_goal(
+                json_path,
+                TGW_EBAY_PRICED,
+                treatments=(EBAY_PRICE,),
+                origin="operator",
+                operator_identity=operator_identity,
+                operator_surface="http:operator-object:reprice-item",
+                item_document=pricing_item,
+                expected_generation=current_generation,
+                ebay_environment=ebay_environment,
+                ebay_rest_endpoint=ebay_rest_endpoint,
+            )
+        except (RuntimeError, ValueError) as exc:
+            try:
+                _apply_operator_patch_cas(
+                    json_path,
+                    sku,
+                    {"ai_reprice_requested": None},
+                    expected_generation=current_generation,
+                    command_id="reprice-item-release",
+                    operator_identity=operator_identity,
+                )
+            except HTTPException:
+                pass
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        dispatched = result.dispatched
+        if dispatched is None or dispatched.treatment_id != "ebay-price":
+            try:
+                _apply_operator_patch_cas(
+                    json_path,
+                    sku,
+                    {"ai_reprice_requested": None},
+                    expected_generation=result.graph.object_generation,
+                    command_id="reprice-item-release",
+                    operator_identity=operator_identity,
+                )
+            except HTTPException:
+                pass
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "pricing_refresh_held",
+                    "reason": "The exact governed pricing treatment is not currently eligible.",
+                    "held_external": list(result.held_external),
+                    "operator_gates": list(result.operator_gates),
+                },
+            )
+        return {
+            "ok": True,
+            "command_id": body.command_id,
+            "authority_scope": command["authority_scope"],
+            "graph_id": result.graph.graph_id,
+            "object_generation": result.graph.object_generation,
+            "dispatched": bool(dispatched.enqueued),
+            "job_id": dispatched.job_id,
+            "held_external": list(result.held_external),
+            "operator_gates": list(result.operator_gates),
+            "refresh": f"/api/operator/items/{sku}",
+        }
+
+    if body.command_id == "reorder-photos":
+        order = [name for name in checked_values["order"] if name]
+        json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+        receipt = _apply_operator_patch_cas(
+            json_path,
+            sku,
+            {"photo_order": order},
+            expected_generation=current_generation,
+            command_id=body.command_id,
+            operator_identity=operator_identity,
+        )
+        result = {
+            "ok": True,
+            "sku": sku,
+            "order": order,
+            "object_generation": receipt.resulting_generation,
+        }
+        return {
+            **result,
+            "command_id": body.command_id,
+            "authority_scope": command["authority_scope"],
+            "refresh": f"/api/operator/items/{sku}",
+        }
+
+    local_actions = {
+        "reidentify": "ai_identify",
+        "resync-photos": "resync_photos",
+        "sync-from-ebay": "sync_from_ebay",
+        "reset-draft-from-live": "reset_draft_from_live",
+        "archive-item": "archive",
+    }
+    if body.command_id in local_actions:
+        result = item_action(
+            sku,
+            ActionBody(action=local_actions[body.command_id]),
+            operator_identity=operator_identity,
+            expected_generation=current_generation,
+        )
+        return {
+            **result,
+            "command_id": body.command_id,
+            "authority_scope": command["authority_scope"],
+            "refresh": f"/api/operator/items/{sku}",
+        }
+    if body.command_id == "delete-item":
+        json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+        receipt = _apply_operator_patch_cas(
+            json_path,
+            sku,
+            {
+                "status": "deleted",
+                "deleted_at": datetime.now(timezone.utc).isoformat(),
+            },
+            expected_generation=current_generation,
+            command_id=body.command_id,
+            operator_identity=operator_identity,
+        )
+        result = {
+            "ok": True,
+            "sku": sku,
+            "status": "deleted",
+            "object_generation": receipt.resulting_generation,
+        }
+        return {
+            **result,
+            "command_id": body.command_id,
+            "authority_scope": command["authority_scope"],
+            "refresh": f"/api/operator/items/{sku}",
+        }
+    if body.command_id == "mark-sold":
+        json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+
+        def mark_one_sold(document: Dict[str, Any]) -> Dict[str, Any]:
+            updated = json.loads(json.dumps(document, ensure_ascii=False))
+            draft = dict(updated.get("draft_listing") or {})
+            current_quantity = int(draft.get("quantity") or 1)
+            remaining = max(0, current_quantity - 1)
+            draft["quantity"] = remaining
+            updated["draft_listing"] = draft
+            if remaining == 0:
+                updated["status"] = "Sold"
+            updated.pop("catalog_verified", None)
+            return updated
+
+        receipt = _apply_operator_mutation_cas(
+            json_path,
+            sku,
+            expected_generation=current_generation,
+            command_id=body.command_id,
+            payload={"units_sold": 1},
+            mutate=mark_one_sold,
+            changed_keys=("draft_listing", "status"),
+        )
+        result = {
+            "ok": True,
+            "sku": sku,
+            "status": "sold-one-unit",
+            "object_generation": receipt.resulting_generation,
+        }
+        return {
+            **result,
+            "command_id": body.command_id,
+            "authority_scope": command["authority_scope"],
             "refresh": f"/api/operator/items/{sku}",
         }
 
@@ -1336,6 +2288,9 @@ def execute_item_operator_command(
     if not provider_identity:
         raise HTTPException(status_code=503, detail="provider identity is not configured")
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
+    ebay_environment, ebay_rest_endpoint, ebay_trading_endpoint = (
+        _workflow_provider_environment_binding()
+    )
     try:
         if body.command_id == "list-item":
             from .workflow.listing_migration import authorize_and_dispatch_next_listing_effect
@@ -1346,8 +2301,12 @@ def execute_item_operator_command(
                 surface="http:operator-object:list-item",
                 provider_identity=provider_identity,
                 ttl_seconds=body.authority_ttl_seconds,
+                expected_generation=current_generation,
+                ebay_environment=ebay_environment,
+                ebay_rest_endpoint=ebay_rest_endpoint,
+                ebay_trading_endpoint=ebay_trading_endpoint,
             )
-        else:
+        elif body.command_id == "update-item":
             from .workflow.listing_migration import authorize_and_dispatch_update_item
 
             result, dispatched, authority_id, authority_created = authorize_and_dispatch_update_item(
@@ -1356,7 +2315,60 @@ def execute_item_operator_command(
                 surface="http:operator-object:update-item",
                 provider_identity=provider_identity,
                 ttl_seconds=body.authority_ttl_seconds,
+                expected_generation=current_generation,
+                ebay_environment=ebay_environment,
+                ebay_rest_endpoint=ebay_rest_endpoint,
+                ebay_trading_endpoint=ebay_trading_endpoint,
             )
+        else:
+            from .workflow.listing_migration import (
+                WithdrawalProjectionHeld,
+                authorize_and_execute_end_listing,
+            )
+
+            try:
+                (
+                    result,
+                    effect,
+                    authority_id,
+                    authority_created,
+                    projection_receipt,
+                ) = authorize_and_execute_end_listing(
+                    json_path,
+                    config=_cfg,
+                    operator_identity=operator_identity,
+                    surface="http:operator-object:end-listing",
+                    provider_identity=provider_identity,
+                    ttl_seconds=body.authority_ttl_seconds,
+                    expected_generation=current_generation,
+                )
+            except WithdrawalProjectionHeld as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "provider_effect_projection_held",
+                        "provider_effect_id": exc.effect_id,
+                        "reason": (
+                            "The provider withdrawal succeeded, but the local "
+                            "result projection did not complete. Reconcile this "
+                            "effect; do not repeat it."
+                        ),
+                        "mutation_detail": exc.receipt.detail,
+                        "refresh": f"/api/operator/items/{sku}",
+                    },
+                ) from exc
+            _enqueue_catalog_rebuild(f"end_listing:{sku}")
+            return {
+                "ok": True,
+                "command_id": body.command_id,
+                "authority_scope": command["authority_scope"],
+                "authority_id": authority_id,
+                "authority_created": authority_created,
+                "provider_effect_id": effect.effect_id,
+                "graph_id": result.graph_id,
+                "object_generation": projection_receipt.resulting_generation,
+                "refresh": f"/api/operator/items/{sku}",
+            }
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -1447,13 +2459,12 @@ def request_workflow_goal(
         raise HTTPException(status_code=400, detail="unknown workflow goal") from None
     if not goal.identity.startswith("tgw."):
         raise HTTPException(status_code=400, detail="only TGW item goals are accepted")
-    migration = _cfg.get("workflow_migration")
-    if migration is None and isinstance(_cfg.get("raw"), dict):
-        migration = _cfg["raw"].get("workflow_migration")
-    migration = migration if isinstance(migration, dict) else {}
-    provider_identity = migration.get("ebay_provider_identity", "")
+    provider_identity = _workflow_provider_identity()
     if not isinstance(provider_identity, str) or not provider_identity.strip():
         raise HTTPException(status_code=503, detail="provider identity is not configured")
+    ebay_environment, ebay_rest_endpoint, ebay_trading_endpoint = (
+        _workflow_provider_environment_binding()
+    )
     try:
         result, authority_id, authority_created = authorize_and_request_item_goal(
             json_path,
@@ -1463,6 +2474,9 @@ def request_workflow_goal(
             provider_identity=provider_identity,
             scopes=tuple(body.scopes),
             ttl_seconds=body.authority_ttl_seconds,
+            ebay_environment=ebay_environment,
+            ebay_rest_endpoint=ebay_rest_endpoint,
+            ebay_trading_endpoint=ebay_trading_endpoint,
         )
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -1525,15 +2539,23 @@ def get_item(sku: str) -> Dict[str, Any]:
                     SELECT job_id::text, queue_name, state, attempt_count,
                            created_at, updated_at, finished_at,
                            error_code, error_detail
-                      FROM queue_jobs
+                     FROM queue_jobs
                      WHERE payload_json->>'sku' = %s
                      ORDER BY created_at DESC
-                     LIMIT 50
                     """,
                     (sku,),
                 )
-                jobs = [dict(r) for r in cur.fetchall()]
+                environment = configured_ebay_environment(_cfg)
+                jobs = [
+                    dict(r) for r in cur.fetchall()
+                    if state_machine.queue_name_visible_in_environment(
+                        r["queue_name"], environment,
+                    )
+                ][:50]
                 for j in jobs:
+                    j["queue_name"] = state_machine.logical_queue_name(
+                        j["queue_name"],
+                    )
                     for k in ("created_at", "updated_at", "finished_at"):
                         if j[k] is not None:
                             j[k] = j[k].isoformat()
@@ -1591,6 +2613,11 @@ def patch_item(
     # envelope-shaped value here. X-TGW-Caller is attribution only: it is
     # client-controlled and therefore never an authorization signal.
     _is_machine_caller = operator_identity == "machine:item-write-fence"
+    machine_generation_bound = (
+        _is_machine_caller
+        and isinstance(body.expected_generation, str)
+        and bool(body.expected_generation)
+    )
     workflow_evidence_fields = {
         "ebay_offer",
         "ebay_listing",
@@ -1600,7 +2627,7 @@ def patch_item(
         "status",
     }
     forbidden_evidence = sorted(workflow_evidence_fields.intersection(fields))
-    if forbidden_evidence:
+    if forbidden_evidence and not machine_generation_bound:
         raise HTTPException(
             status_code=409,
             detail={
@@ -1612,7 +2639,11 @@ def patch_item(
                 ),
             },
         )
-    if "draft_listing" in fields and not operator_object_write:
+    if (
+        "draft_listing" in fields
+        and not operator_object_write
+        and not machine_generation_bound
+    ):
         raise HTTPException(
             status_code=409,
             detail={
@@ -1672,6 +2703,29 @@ def patch_item(
                     "field": "condition_enum",
                 },
             )
+
+    if machine_generation_bound:
+        # Machine-fence (CAS) path: only the separately authenticated
+        # item-write-fence caller may write provider/listing-lifecycle
+        # evidence and draft blocks through generic PATCH, and only when the
+        # request carries an exact expected_generation binding.  The durable
+        # receipt comes from the item-mutation journal (branch mechanism);
+        # non-machine callers fall through to the main locked PATCH flow.
+        receipt = _apply_operator_patch_cas(
+            json_path,
+            sku,
+            fields,
+            expected_generation=body.expected_generation or "",
+            command_id="machine-fence-patch",
+            operator_identity=operator_identity,
+        )
+        return {
+            "ok": True,
+            "sku": sku,
+            "updated": list(fields),
+            "resulting_generation": receipt.resulting_generation,
+            "mutation_status": receipt.status,
+        }
 
     try:
         with item_mutation_lock(
@@ -2013,8 +3067,14 @@ _EBAY_WRITE_PROTECTED: Dict[str, set] = {
 }
 
 
-@app.post("/api/items/{sku}/ebay-write", dependencies=[AUTH])
-def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
+@app.post("/api/items/{sku}/ebay-write")
+def ebay_write(
+    sku: str,
+    body: EbayWriteBody,
+    machine_identity: str = Depends(_require_fence_patch_auth),
+) -> Dict[str, Any]:
+    if machine_identity != "machine:item-write-fence":
+        raise HTTPException(status_code=403, detail="machine item-write credential required")
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
@@ -2028,21 +3088,37 @@ def ebay_write(sku: str, body: EbayWriteBody) -> Dict[str, Any]:
     if not any(v is not None for v in incoming.values()):
         raise HTTPException(status_code=400, detail="no eBay blocks provided")
 
-    changed_fields, resulting_generation = _apply_ebay_write(
-        json_path,
-        sku,
-        ebay_offer=body.ebay_offer,
-        ebay_listing=body.ebay_listing,
-        ebay_submitted=body.ebay_submitted,
-        ebay_live=body.ebay_live,
-        allow_protected=body.allow_protected,
-    )
-    _enqueue_catalog_rebuild(f"ebay_write:{sku}")
+    if body.expected_generation:
+        receipt = _apply_ebay_write_cas(
+            json_path,
+            sku,
+            expected_generation=body.expected_generation,
+            ebay_offer=body.ebay_offer,
+            ebay_listing=body.ebay_listing,
+            ebay_submitted=body.ebay_submitted,
+            ebay_live=body.ebay_live,
+            allow_protected=body.allow_protected,
+        )
+        resulting_generation = receipt.resulting_generation
+        mutation_status = receipt.status
+    else:
+        _, resulting_generation = _apply_ebay_write(
+            json_path,
+            sku,
+            ebay_offer=body.ebay_offer,
+            ebay_listing=body.ebay_listing,
+            ebay_submitted=body.ebay_submitted,
+            ebay_live=body.ebay_live,
+            allow_protected=body.allow_protected,
+        )
+        mutation_status = "COMMITTED"
+        _enqueue_catalog_rebuild(f"ebay_write:{sku}")
     return {
         "ok": True,
         "sku": sku,
-        "changed_fields": changed_fields,
+        "changed_fields": [key for key, value in incoming.items() if value is not None],
         "resulting_generation": resulting_generation,
+        "mutation_status": mutation_status,
     }
 
 
@@ -2245,6 +3321,20 @@ def _apply_patch_locked(
     *,
     expected_generation: Optional[str] = None,
 ) -> Tuple[List[str], str]:
+    _, journal_root = _operator_mutation_roots()
+    with item_write_lock(journal_root, json_path.stem):
+        return _apply_patch_locked(
+            json_path,
+            fields,
+            _skip_catalog_upsert=_skip_catalog_upsert,
+        )
+
+
+def _apply_patch_locked(
+    json_path: "Path",
+    fields: Dict[str, Any],
+    _skip_catalog_upsert: bool = False,
+) -> Tuple[List[str], str]:
     """Core item patch: deep-merge dict fields, write atomically, schedule rebuild.
 
     Fields with value None are deleted from the document.
@@ -2300,8 +3390,7 @@ def _apply_patch_locked(
             # envelope shape is always preserved.
             if dmk == "item_attributes" and not inventory_record.is_envelope(incoming):
                 patch = inventory_record.set_inventory_fields(doc, incoming, source="http_patch", applied_by="operator")
-                doc["item_attributes"] = patch["item_attributes"]
-                doc["item_attributes_history"] = patch["item_attributes_history"]
+                doc.update(patch)
             elif dmk == "draft_listing":
                 # todo #1416 point 3: the eBay Draft Editor's aspects form
                 # (saveEbayDraft()) now sends its edits nested inside
@@ -2319,12 +3408,11 @@ def _apply_patch_locked(
                 doc[dmk] = existing
                 if isinstance(incoming_specifics, dict) and not _is_ebay_draft_envelope(incoming_specifics):
                     sp_patch = set_ebay_aspects(doc, incoming_specifics, source="http_patch", applied_by="operator")
-                    existing["item_specifics"] = sp_patch["item_specifics"]
-                    existing["item_specifics_history"] = sp_patch["item_specifics_history"]
+                    existing.update(sp_patch)
                 elif incoming_specifics is not None:
                     # Already a full envelope (accessor output moving onward, e.g.
                     # accept_proposals) — plain replace, no re-diffing needed.
-                    existing["item_specifics"] = incoming_specifics
+                    existing.update({"item_specifics": incoming_specifics})
                 doc[dmk] = existing
 
                 # Padlock auto-sync (Dave, 2026-07-18): every eBay-draft save
@@ -2336,8 +3424,7 @@ def _apply_patch_locked(
                 _draft_fields: Dict[str, Any] = dict(get_ebay_aspects(doc))
                 if _draft_fields:
                     _ia_sync = inventory_record.sync_from_draft(doc, _draft_fields, source="draft_sync", applied_by="operator")
-                    doc["item_attributes"] = _ia_sync["item_attributes"]
-                    doc["item_attributes_history"] = _ia_sync["item_attributes_history"]
+                    doc.update(_ia_sync)
 
                 # Same padlock idea, applied to the "base data" fields that
                 # live at the TOP LEVEL of the item, not inside item_attributes
@@ -2446,6 +3533,60 @@ def _apply_patch_locked(
     return _changed_keys, resulting_generation
 
 
+def _apply_ebay_write_cas(
+    json_path: "Path",
+    sku: str,
+    *,
+    expected_generation: str,
+    ebay_offer: Optional[Dict[str, Any]] = None,
+    ebay_listing: Optional[Dict[str, Any]] = None,
+    ebay_submitted: Optional[Dict[str, Any]] = None,
+    ebay_live: Optional[Dict[str, Any]] = None,
+    allow_protected: Optional[List[str]] = None,
+) -> MutationReceipt:
+    incoming = {
+        "ebay_offer": ebay_offer,
+        "ebay_listing": ebay_listing,
+        "ebay_submitted": ebay_submitted,
+        "ebay_live": ebay_live,
+    }
+    frozen_incoming = json.loads(json.dumps(incoming, ensure_ascii=False))
+    allow_protected_set = set(allow_protected or ())
+
+    def merge_blocks(document: Dict[str, Any]) -> Dict[str, Any]:
+        updated = json.loads(json.dumps(document, ensure_ascii=False))
+        for block_key, incoming_block in frozen_incoming.items():
+            if incoming_block is None:
+                continue
+            existing = updated.get(block_key) or {}
+            if not isinstance(existing, dict):
+                existing = {}
+            merged = {**existing, **incoming_block}
+            for protected_field in _EBAY_WRITE_PROTECTED.get(block_key, set()):
+                if (
+                    protected_field in existing
+                    and protected_field not in allow_protected_set
+                ):
+                    merged[protected_field] = existing[protected_field]
+            updated[block_key] = merged
+        return updated
+
+    return _apply_operator_mutation_cas(
+        json_path,
+        sku,
+        expected_generation=expected_generation,
+        command_id="machine-ebay-write",
+        payload={
+            "blocks": frozen_incoming,
+            "allow_protected": sorted(allow_protected_set),
+        },
+        mutate=merge_blocks,
+        changed_keys=tuple(
+            key for key, value in frozen_incoming.items() if value is not None
+        ),
+    )
+
+
 def _apply_ebay_write(
     json_path: "Path",
     sku: str,
@@ -2456,6 +3597,29 @@ def _apply_ebay_write(
     ebay_live: Optional[Dict[str, Any]] = None,
     allow_protected: Optional[List[str]] = None,
     _item_lock_held: bool = False,
+) -> Tuple[List[str], str]:
+    _, journal_root = _operator_mutation_roots()
+    with item_write_lock(journal_root, sku):
+        return _apply_ebay_write_locked(
+            json_path,
+            sku,
+            ebay_offer=ebay_offer,
+            ebay_listing=ebay_listing,
+            ebay_submitted=ebay_submitted,
+            ebay_live=ebay_live,
+            allow_protected=allow_protected,
+        )
+
+
+def _apply_ebay_write_locked(
+    json_path: "Path",
+    sku: str,
+    *,
+    ebay_offer: Optional[Dict[str, Any]] = None,
+    ebay_listing: Optional[Dict[str, Any]] = None,
+    ebay_submitted: Optional[Dict[str, Any]] = None,
+    ebay_live: Optional[Dict[str, Any]] = None,
+    allow_protected: Optional[List[str]] = None,
 ) -> Tuple[List[str], str]:
     """eBay block deep-merge with field protection — same logic as POST /ebay-write.
 
@@ -2800,15 +3964,22 @@ def bulk_action(
                     # sale (ebay/pull.py mark_item_sold, via an eBay webhook)
                     # landing between them gets silently clobbered by a
                     # `remaining` value computed from the stale first read.
-                    doc = load_item_doc(json_path)
-                    draft = dict(doc.get("draft_listing") or {})
-                    current_qty = int(draft.get("quantity") or 1)
-                    remaining = max(0, current_qty - 1)
-                    draft["quantity"] = remaining
-                    doc["draft_listing"] = draft
-                    if remaining == 0:
-                        doc["status"] = new_status
-                    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
+                    _, journal_root = _operator_mutation_roots()
+                    with item_write_lock(journal_root, sku):
+                        doc = load_item_doc(json_path)
+                        draft = dict(doc.get("draft_listing") or {})
+                        current_qty = int(draft.get("quantity") or 1)
+                        remaining = max(0, current_qty - 1)
+                        draft["quantity"] = remaining
+                        doc["draft_listing"] = draft
+                        if remaining == 0:
+                            doc["status"] = new_status
+                        atomic_write_json(
+                            json_path,
+                            doc,
+                            pretty=_cfg.get("pretty", True),
+                            archive_root=_cfg.get("archive_root"),
+                        )
                 else:
                     fields = {"status": new_status}
                     if body.action == "delete":
@@ -2872,18 +4043,19 @@ def get_thumbnail(sku: str):
 # ---------------------------------------------------------------------------
 
 
-def _normalize_draft_condition_for_provider(json_path: "Path") -> Dict[str, str] | None:
-    """Persist the nearest honest category-valid condition before dispatch.
+def _normalize_draft_condition_for_provider(json_path: "Path") -> None:
+    """Refuse a stale category-invalid condition before provider dispatch.
 
     eBay accepts an inventory-item PUT containing a globally valid condition
     enum, but can reject the later publish because that enum is not valid for
-    the offer's category.  Authorization and staged-content identities must be
-    created *after* this deterministic downgrade, never around content the
-    provider will reject or silently reinterpret.
+    the offer's category.  A category change must never silently rewrite the
+    operator's grade.  The UI publishes an explicit same-or-worse suggestion;
+    dispatch proceeds only after the operator has selected a legal value.
     """
     from .apis.ebay.conditions import (
         allowed_conditions_for_category,
         best_condition_for_enum,
+        item_condition_required_for_category,
     )
 
     doc = load_item_doc(json_path)
@@ -2894,25 +4066,37 @@ def _normalize_draft_condition_for_provider(json_path: "Path") -> Dict[str, str]
     current = str(draft.get("condition_enum") or "").strip()
     if not category_id or not current:
         return None
+    required = item_condition_required_for_category(_cfg, category_id)
     allowed = allowed_conditions_for_category(_cfg, category_id)
-    if not allowed or any(item.get("condition_enum") == current for item in allowed):
-        return None
-    remap = best_condition_for_enum(_cfg, category_id, current)
-    if remap is None:
+    if not isinstance(required, bool):
+        raise HTTPException(
+            status_code=503,
+            detail="condition policy is unresolved for the selected category",
+        )
+    if required is False:
         raise HTTPException(
             status_code=409,
-            detail=(f"condition {current!r} is not valid for eBay category {category_id}; select a category-valid condition"),
+            detail=(
+                f"condition {current!r} is not valid for eBay category {category_id}; "
+                "this category does not require condition, so choose the blank option"
+            ),
         )
-    updated = dict(draft)
-    updated.update(
-        {
-            "condition_id": remap["condition_id"],
-            "condition_label": remap["condition_label"],
-            "condition_enum": remap["condition_enum"],
-        }
+    if any(item.get("condition_enum") == current for item in allowed):
+        return None
+    remap = best_condition_for_enum(_cfg, category_id, current)
+    suggestion = (
+        f"; suggested same-or-worse choice is {remap['condition_label']!r} "
+        f"({remap['condition_enum']})"
+        if remap is not None
+        else ""
     )
-    _apply_patch(json_path, {"draft_listing": updated})
-    return remap
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"condition {current!r} is not valid for eBay category {category_id}"
+            f"{suggestion}; select the displayed choice explicitly"
+        ),
+    )
 
 
 @app.post("/api/items/{sku}/action")
@@ -2920,6 +4104,7 @@ def item_action(
     sku: str,
     body: ActionBody,
     operator_identity: str = Depends(_require_auth),
+    expected_generation: str | None = None,
 ) -> Dict[str, Any]:
     action = body.action
     if action not in PIPELINE_ACTIONS:
@@ -2932,6 +4117,21 @@ def item_action(
     if not json_path.exists() and action != "catalog_rebuild":
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
 
+    bound_item: Dict[str, Any] | None = None
+    if expected_generation is not None and action != "catalog_rebuild":
+        bound_item = load_item_doc(json_path)
+        observed_generation = item_generation(bound_item)
+        if observed_generation != expected_generation:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "generation_conflict",
+                    "expected": observed_generation,
+                    "received": expected_generation,
+                    "refresh": f"/api/operator/items/{sku}",
+                },
+            )
+
     try:
         if action == "approve":
             # Human approval of AI draft — set status=Ready, no job enqueued
@@ -2941,9 +4141,28 @@ def item_action(
         elif action == "catalog_rebuild":
             state_machine.enqueue_catalog_rebuild(f"manual:{sku}", delay_seconds=5.0)
         elif action == "archive":
-            _apply_patch(json_path, {"status": "archived"})
+            if expected_generation is not None:
+                receipt = _apply_operator_patch_cas(
+                    json_path,
+                    sku,
+                    {"status": "archived"},
+                    expected_generation=expected_generation,
+                    command_id="archive-item",
+                    operator_identity=operator_identity,
+                )
+                resulting_generation = receipt.resulting_generation
+            else:
+                _, resulting_generation = _apply_patch(
+                    json_path, {"status": "archived"}
+                )
             _enqueue_catalog_rebuild(f"archive:{sku}")
-            return {"ok": True, "sku": sku, "action": "archive", "status": "archived"}
+            return {
+                "ok": True,
+                "sku": sku,
+                "action": "archive",
+                "status": "archived",
+                "object_generation": resulting_generation,
+            }
 
         elif action == "migrate_unblock":
             import json as _json
@@ -3016,8 +4235,7 @@ def item_action(
             dl2 = doc.get("draft_listing") or {}
             if dl_touched:
                 dl2 = dict(dl2)
-                dl2["item_specifics"] = dl_patch["item_specifics"]
-                dl2["item_specifics_history"] = dl_patch["item_specifics_history"]
+                dl2.update(dl_patch)
             if "title" in delta:
                 dl2["title"] = delta["title"]
                 dl_touched = True
@@ -3075,7 +4293,7 @@ def item_action(
                 reconcile_photo_state_to_live,
             )
 
-            doc = load_item_doc(json_path)
+            doc = bound_item or load_item_doc(json_path)
             local_photo_count = len(ordered_photos(doc, json_path.parent))
             hosted_count = len([entry for entry in (doc.get("ebay_photos") or []) if isinstance(entry, dict) and entry.get("url")])
             photo_ready, photo_reason, photo_fingerprint = _photo_sync_state(
@@ -3168,22 +4386,25 @@ def item_action(
                 from .workflow.listing_migration import authorize_and_request_item_goal
                 from .workflow.profiles import TGW_EBAY_STAGED
 
-                migration = _cfg.get("workflow_migration")
-                if migration is None and isinstance(_cfg.get("raw"), dict):
-                    migration = _cfg["raw"].get("workflow_migration")
-                migration = migration if isinstance(migration, dict) else {}
+                ebay_environment, ebay_rest_endpoint, ebay_trading_endpoint = (
+                    _workflow_provider_environment_binding()
+                )
                 result, authority_id, authority_created = authorize_and_request_item_goal(
                     json_path,
                     TGW_EBAY_STAGED,
                     operator_identity=operator_identity,
                     surface="http:item-action:resync-photos",
-                    provider_identity=migration.get("ebay_provider_identity", ""),
+                    provider_identity=_workflow_provider_identity(),
                     # Todo #1967: a photo resync uploads the current ItemData
                     # photos and nothing more — never a full content restage.
                     # Granting "stage" here let the evaluator push title /
                     # description / price / aspects from a possibly-diverged
                     # draft on the back of a "resync photos" click.
                     scopes=("upload",),
+                    expected_generation=expected_generation,
+                    ebay_environment=ebay_environment,
+                    ebay_rest_endpoint=ebay_rest_endpoint,
+                    ebay_trading_endpoint=ebay_trading_endpoint,
                 )
                 dispatched = result.dispatched
                 return {
@@ -3222,10 +4443,37 @@ def item_action(
             }
 
         elif action == "sync_from_ebay":
+            sync_generation = expected_generation
+            if sync_generation is None:
+                sync_generation = item_generation(load_item_doc(json_path))
+            else:
+                current_sync_item = load_item_doc(json_path)
+                observed_sync_generation = item_generation(current_sync_item)
+                if observed_sync_generation != sync_generation:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "generation_conflict",
+                            "expected": observed_sync_generation,
+                            "received": sync_generation,
+                            "refresh": f"/api/operator/items/{sku}",
+                        },
+                    )
+            ebay_environment, ebay_rest_endpoint, _ = (
+                _workflow_provider_environment_binding()
+            )
             try:
                 job_id = state_machine.enqueue_job(
                     queue_name="ebay_sync",
-                    payload={"sku": sku, "reason": "manual", "origin": "operator"},
+                    payload={
+                        "payload_schema_id": "ebay-sync-operator/v1",
+                        "sku": sku,
+                        "reason": "manual",
+                        "origin": "operator",
+                        "object_generation": sync_generation,
+                        "ebay_environment": ebay_environment,
+                        "ebay_endpoint": ebay_rest_endpoint,
+                    },
                     entity_type="item",
                     entity_id=sku,
                     max_attempts=2,
@@ -3240,12 +4488,44 @@ def item_action(
             # better, start over" — re-pin the draft to the ebay_live mirror
             # via the shared lifecycle primitive. C11-safe: guard findings
             # are cleared only if the pinned draft resolves them.
+            if expected_generation is not None:
+                try:
+                    draft_sync.pin_draft_to_live(bound_item or {})
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+                def reset_from_live(document: Dict[str, Any]) -> Dict[str, Any]:
+                    pin_fields = draft_sync.pin_draft_to_live(document)
+                    return _operator_patch_document(
+                        document,
+                        pin_fields,
+                        operator_identity=operator_identity,
+                    )
+
+                try:
+                    receipt = _apply_operator_mutation_cas(
+                        json_path,
+                        sku,
+                        expected_generation=expected_generation,
+                        command_id="reset-draft-from-live",
+                        payload={"source": "ebay_live"},
+                        mutate=reset_from_live,
+                        changed_keys=("draft_listing", "draft_listing_state"),
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                return {
+                    "ok": True,
+                    "sku": sku,
+                    "action": "reset_draft_from_live",
+                    "object_generation": receipt.resulting_generation,
+                }
             doc = load_item_doc(json_path)
             try:
-                _pin_fields = draft_sync.pin_draft_to_live(doc)
+                pin_fields = draft_sync.pin_draft_to_live(doc)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
-            _apply_patch(json_path, _pin_fields)
+            _apply_patch(json_path, pin_fields)
             return {"ok": True, "sku": sku, "action": "reset_draft_from_live"}
 
         elif action == "set_ready":
@@ -3296,23 +4576,53 @@ def item_action(
                 )
             if mode == "workflow":
                 from .workflow.listing_migration import request_item_goal
-                from .workflow.profiles import TGW_EBAY_DRAFTED
+                from .workflow.profiles import TGW_EBAY_PRICED
 
                 # Durable pending intent: the evaluator and queued treatment
                 # must bind the exact generation visible to a fresh worker.
-                _apply_patch(
-                    json_path,
+                identify_fields = {
+                    "ai_reidentify": True,
+                    "ai_redraft_requested": True,
+                    "ai_reprice_requested": True,
+                }
+                if expected_generation is not None:
+                    identify_receipt = _apply_operator_patch_cas(
+                        json_path,
+                        sku,
+                        identify_fields,
+                        expected_generation=expected_generation,
+                        command_id="reidentify",
+                        operator_identity=operator_identity,
+                    )
+                    identify_generation = str(
+                        identify_receipt.resulting_generation or ""
+                    )
+                else:
+                    _, identify_generation = _apply_patch(
+                        json_path,
+                        identify_fields,
+                    )
+                identify_item = load_item_doc(json_path)
+                ebay_environment, ebay_rest_endpoint, _ = (
+                    _workflow_provider_environment_binding()
+                )
+                identify_binding = (
                     {
-                        "ai_reidentify": True,
-                        "ai_redraft_requested": True,
-                    },
+                        "item_document": identify_item,
+                        "expected_generation": identify_generation,
+                    }
+                    if expected_generation is not None
+                    else {}
                 )
                 result = request_item_goal(
                     json_path,
-                    TGW_EBAY_DRAFTED,
+                    TGW_EBAY_PRICED,
                     origin="operator",
                     operator_identity=operator_identity,
                     operator_surface="http:item-action:ai-identify",
+                    ebay_environment=ebay_environment,
+                    ebay_rest_endpoint=ebay_rest_endpoint,
+                    **identify_binding,
                 )
                 if result.dispatched is None:
                     return {
@@ -3364,15 +4674,11 @@ def api_health() -> Dict[str, Any]:
 
     result = check_all(_cfg)
 
-    # Append dead_letter_count — quick postgres query, swallowed on error.
-    dead_letter_count = 0
+    # Append the count visible in this exact eBay environment.
     try:
-        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
-            with con.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM queue_jobs WHERE state = 'dead_letter'")
-                dead_letter_count = cur.fetchone()[0]
+        dead_letter_count = state_machine.dead_letter_count()
     except Exception:
-        pass
+        dead_letter_count = 0
     result["dead_letter_count"] = dead_letter_count
 
     if not result["ok"]:
@@ -3409,8 +4715,13 @@ def queue_status() -> Dict[str, Any]:
     # Restructure as {queue_name: {state: count}}
     by_queue: Dict[str, Dict[str, int]] = {}
     scheduled: Dict[str, int] = {}
+    environment = configured_ebay_environment(_cfg)
     for row in rows:
-        q = row["queue_name"]
+        if not state_machine.queue_name_visible_in_environment(
+            row["queue_name"], environment,
+        ):
+            continue
+        q = state_machine.logical_queue_name(row["queue_name"])
         s = row["state"]
         by_queue.setdefault(q, {})[s] = row["count"]
         scheduled[q] = scheduled.get(q, 0) + int(row.get("scheduled_count") or 0)
@@ -3505,8 +4816,13 @@ def queue_daily_stats(date: Optional[str] = None) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"postgres error: {e}")
 
     by_queue: Dict[str, Dict[str, Any]] = {}
+    environment = configured_ebay_environment(_cfg)
     for row in rows:
-        q = row["queue_name"]
+        if not state_machine.queue_name_visible_in_environment(
+            row["queue_name"], environment,
+        ):
+            continue
+        q = state_machine.logical_queue_name(row["queue_name"])
         entry = by_queue.setdefault(q, {"succeeded": 0, "failed": 0, "dead_letter": 0, "by_hour": []})
         state = row["state"]
         count = int(row["job_count"])
@@ -3688,6 +5004,16 @@ def requeue_job(
     if not isinstance(row, dict):
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
 
+    physical_queue_name = str(row.get("queue_name") or "")
+    if not state_machine.queue_name_visible_in_environment(
+        physical_queue_name, configured_ebay_environment(_cfg),
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="job belongs to a different configured eBay environment",
+        )
+    row["queue_name"] = state_machine.logical_queue_name(physical_queue_name)
+
     if row["state"] != "dead_letter":
         raise HTTPException(
             status_code=400,
@@ -3807,18 +5133,25 @@ def ebay_aspects(category_id: str) -> Dict[str, Any]:
 
 @app.get("/api/ebay/category-context/{category_id}", dependencies=[AUTH])
 def ebay_category_context(category_id: str, current_condition: str = "") -> Dict[str, Any]:
-    from .ebay.pricing import _groups_reverse, _load_groups
+    from .ebay.pricing import _group_for_category
 
     # ── Conditions — real per-category eBay policy, not a fabricated superset ──
     # (session 39: the old _CONDITION_ID_MAP fanned one real conditionId like 3000
     # "Used" out into three invented grades — USED_EXCELLENT/GOOD/ACCEPTABLE — none
     # of which eBay actually allows for categories with only a single "Used" bucket)
     conditions: List[Dict[str, str]] = []
+    # main-stream condition policy: conditions.py (resolved to main) exposes
+    # condition_policy_for_category() -> {recognized, item_condition_required,
+    # required_flag_valid}; the branch's item_condition_required_for_category
+    # helper was removed on main, so the policy-dict form is authoritative.
     category_recognized = False
     item_condition_required: Optional[bool] = None
     required_flag_valid = False
     try:
-        from .apis.ebay.conditions import allowed_conditions_for_category, condition_policy_for_category
+        from .apis.ebay.conditions import (
+            allowed_conditions_for_category,
+            condition_policy_for_category,
+        )
 
         try:
             policy = condition_policy_for_category(_cfg, category_id)
@@ -3842,7 +5175,11 @@ def ebay_category_context(category_id: str, current_condition: str = "") -> Dict
     # best_condition_for_enum() already implements the correct same-or-worse-only
     # remap; it just wasn't wired into the live category-change UI path.)
     condition_remap: Optional[Dict[str, str]] = None
-    if current_condition and current_condition not in {c["enum"] for c in conditions}:
+    if (
+        item_condition_required is True
+        and current_condition
+        and current_condition not in {c["enum"] for c in conditions}
+    ):
         try:
             from .apis.ebay.conditions import best_condition_for_enum
 
@@ -3869,13 +5206,11 @@ def ebay_category_context(category_id: str, current_condition: str = "") -> Dict
         aspects_error = str(exc)
 
     # ── Group data from category-groups.json ─────────────────────────────
-    _load_groups(_cfg)  # warm cache
-    grp_key = (_groups_reverse or {}).get(str(category_id))
-    grp: Dict[str, Any] = {}
-    if grp_key:
-        from .ebay.pricing import _groups_cache
-
-        grp = (_groups_cache or {}).get("groups", {}).get(grp_key, {})
+    # Resolve through the pricing module after it has loaded the table.  Importing
+    # ``_groups_reverse`` directly captured its initial ``None`` value, so a cold
+    # tgw-http process missed every configured category even though _load_groups()
+    # subsequently replaced the module global with a populated reverse index.
+    grp = _group_for_category(_cfg, category_id) or {}
 
     pricing = grp.get("pricing") or {}
     store_category = grp.get("store_category") or ""
@@ -3888,7 +5223,10 @@ def ebay_category_context(category_id: str, current_condition: str = "") -> Dict
     if not fulfillment_id:
         _pol_path = _cfg.get("catalog_root")
         if _pol_path:
-            _pol_file = _pol_path / "ebay-fulfillment-policies.json"
+            _pol_file = _ebay_reference_snapshot_path(
+                _cfg,
+                "ebay-fulfillment-policies.json",
+            )
             if _pol_file.exists():
                 try:
                     import json as _pj
@@ -3904,6 +5242,7 @@ def ebay_category_context(category_id: str, current_condition: str = "") -> Dict
         "ok": True,
         "category_id": category_id,
         "conditions": conditions,
+        "item_condition_required": item_condition_required,
         "condition_remap": condition_remap,
         "category_recognized": category_recognized,
         "item_condition_required": item_condition_required,
@@ -3933,9 +5272,9 @@ def ebay_category_search(q: str = "") -> Dict[str, Any]:
     if not q or len(q.strip()) < 2:
         return {"ok": True, "results": []}
     try:
-        from .apis.ebay.taxonomy import search_categories_local
+        from .apis.ebay.taxonomy import search_categories_cached
 
-        results = search_categories_local(_cfg, q.strip(), limit=20)
+        results = search_categories_cached(_cfg, q.strip(), limit=20)
         return {"ok": True, "results": results}
     except Exception as exc:
         log.warning("category-search error: %s", exc)
@@ -3949,9 +5288,9 @@ def ebay_category_search(q: str = "") -> Dict[str, Any]:
 @app.get("/api/ebay/category-node/{category_id}", dependencies=[AUTH])
 def ebay_category_node(category_id: str) -> Dict[str, Any]:
     try:
-        from .apis.ebay.taxonomy import get_category_node
+        from .apis.ebay.taxonomy import get_cached_category_node
 
-        node = get_category_node(_cfg, category_id)
+        node = get_cached_category_node(_cfg, category_id)
         if not node:
             return {"ok": False, "detail": "unknown category id"}
         return {"ok": True, **node}
@@ -3967,10 +5306,13 @@ def ebay_category_node(category_id: str) -> Dict[str, Any]:
 @app.get("/api/ebay/category-children", dependencies=[AUTH])
 def ebay_category_children(parent_id: str = "") -> Dict[str, Any]:
     try:
-        from .apis.ebay.taxonomy import get_category_children, get_category_node
+        from .apis.ebay.taxonomy import (
+            get_cached_category_children,
+            get_cached_category_node,
+        )
 
-        children = get_category_children(_cfg, parent_id or None)
-        parent = get_category_node(_cfg, parent_id) if parent_id else None
+        children = get_cached_category_children(_cfg, parent_id or None)
+        parent = get_cached_category_node(_cfg, parent_id) if parent_id else None
         return {"ok": True, "parent": parent, "children": children}
     except Exception as exc:
         log.warning("category-children error: %s", exc)
@@ -3988,7 +5330,7 @@ def ebay_category_children(parent_id: str = "") -> Dict[str, Any]:
 # against the live account (PP-SELLERHUB-001, todo #1546).
 # ---------------------------------------------------------------------------
 
-_LIVE_STORE_CATS_CACHE: Dict[str, Any] = {"data": None, "at": 0.0}
+_LIVE_STORE_CATS_CACHE: Dict[str, Dict[str, Any]] = {}
 _LIVE_STORE_CATS_TTL = 900  # 15 min — bounds live-call frequency without letting the list go stale for long
 
 
@@ -4024,8 +5366,7 @@ def _store_categories_snapshot(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, str]
     Returns (results, refreshed_at, error). A missing/corrupt snapshot is kept
     distinct from a legitimate, successfully refreshed empty eBay result.
     """
-    catalog_root = cfg.get("catalog_root")
-    path = (Path(catalog_root) / "ebay-store-categories.json") if catalog_root else None
+    path = _ebay_reference_snapshot_path(cfg, "ebay-store-categories.json")
     if not path or not path.exists():
         return [], None, "eBay Store category snapshot unavailable"
     try:
@@ -4060,8 +5401,9 @@ def _store_categories_snapshot(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, str]
 def _live_store_categories(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool]:
     """Return (results, used_fallback)."""
     now = time.time()
-    cached = _LIVE_STORE_CATS_CACHE["data"]
-    if cached is not None and (now - _LIVE_STORE_CATS_CACHE["at"]) < _LIVE_STORE_CATS_TTL:
+    cache = _ebay_reference_cache_slot(_LIVE_STORE_CATS_CACHE, cfg)
+    cached = cache["data"]
+    if cached is not None and (now - cache["at"]) < _LIVE_STORE_CATS_TTL:
         return cached, False
     try:
         from .apis.ebay.trading import get_store_categories
@@ -4089,15 +5431,15 @@ def _live_store_categories(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], b
         if not catalog_root:
             raise RuntimeError("catalog_root is not configured; cannot persist Store category snapshot")
         atomic_write_json(
-            Path(catalog_root) / "ebay-store-categories.json",
+            _ebay_reference_snapshot_path(cfg, "ebay-store-categories.json"),
             {
                 "source": "ebay_get_store",
                 "refreshed_at": datetime.now(timezone.utc).isoformat(),
                 "results": results,
             },
         )
-        _LIVE_STORE_CATS_CACHE["data"] = results
-        _LIVE_STORE_CATS_CACHE["at"] = now
+        cache["data"] = results
+        cache["at"] = now
         return results, False
     except Exception as exc:
         snapshot, _refreshed_at, snapshot_error = _store_categories_snapshot(cfg)
@@ -4140,14 +5482,15 @@ def ebay_store_categories() -> Dict[str, Any]:
 # by that static cache file, refreshed by nothing (PP-SELLERHUB-001, #1547).
 # ---------------------------------------------------------------------------
 
-_LIVE_FULFILLMENT_POLICIES_CACHE: Dict[str, Any] = {"data": None, "at": 0.0}
+_LIVE_FULFILLMENT_POLICIES_CACHE: Dict[str, Dict[str, Any]] = {}
 _LIVE_FULFILLMENT_POLICIES_TTL = 900  # 15 min
+_LIVE_RETURN_POLICIES_CACHE: Dict[str, Dict[str, Any]] = {}
+_LIVE_RETURN_POLICIES_TTL = 900  # 15 min
 
 
 def _fulfillment_policies_snapshot(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], Optional[str], Optional[str]]:
     """Load the validated last-known-good Account API fulfillment snapshot."""
-    catalog_root = cfg.get("catalog_root")
-    path = (Path(catalog_root) / "ebay-fulfillment-policies.json") if catalog_root else None
+    path = _ebay_reference_snapshot_path(cfg, "ebay-fulfillment-policies.json")
     if not path or not path.exists():
         return {}, None, "eBay fulfillment-policy snapshot unavailable"
     try:
@@ -4172,11 +5515,44 @@ def _fulfillment_policies_snapshot(cfg: Dict[str, Any]) -> Tuple[Dict[str, str],
         return {}, None, f"eBay fulfillment-policy snapshot invalid: {exc}"
 
 
+def _return_policies_snapshot(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], Optional[str], Optional[str]]:
+    """Load the validated last-known-good Account API return-policy section.
+
+    The return and fulfillment maps share one persisted reference-data file,
+    but each section is validated independently so damage or absence in one
+    never changes the other reader's established error semantics.
+    """
+    path = _ebay_reference_snapshot_path(cfg, "ebay-fulfillment-policies.json")
+    if not path or not path.exists():
+        return {}, None, "eBay return-policy snapshot unavailable"
+    try:
+        payload = json.loads(path.read_text())
+        raw = payload["return"]
+        if not isinstance(raw, dict):
+            raise ValueError("return is not an object")
+        results: Dict[str, str] = {}
+        for raw_id, raw_name in raw.items():
+            if not isinstance(raw_id, str) or not isinstance(raw_name, str):
+                raise ValueError("policy id and name must be strings")
+            policy_id = raw_id.strip()
+            name = raw_name.strip()
+            if not policy_id or not name:
+                raise ValueError("policy has a blank id or name")
+            results[policy_id] = name
+        raw_refreshed_at = payload.get("return_refreshed_at", payload.get("refreshed_at"))
+        if raw_refreshed_at is not None and not isinstance(raw_refreshed_at, str):
+            raise ValueError("return_refreshed_at must be a string or null")
+        return results, (raw_refreshed_at or "").strip() or None, None
+    except Exception as exc:
+        return {}, None, f"eBay return-policy snapshot invalid: {exc}"
+
+
 def _live_fulfillment_policies(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], bool]:
     """Return ({policy_id: name}, used_fallback)."""
     now = time.time()
-    cached = _LIVE_FULFILLMENT_POLICIES_CACHE["data"]
-    if cached is not None and (now - _LIVE_FULFILLMENT_POLICIES_CACHE["at"]) < _LIVE_FULFILLMENT_POLICIES_TTL:
+    cache = _ebay_reference_cache_slot(_LIVE_FULFILLMENT_POLICIES_CACHE, cfg)
+    cached = cache["data"]
+    if cached is not None and (now - cache["at"]) < _LIVE_FULFILLMENT_POLICIES_TTL:
         return cached, False
     try:
         from .ebay.sync import get_fulfillment_policies_full
@@ -4202,7 +5578,10 @@ def _live_fulfillment_policies(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], boo
         catalog_root = cfg.get("catalog_root")
         if not catalog_root:
             raise RuntimeError("catalog_root is not configured; cannot persist fulfillment-policy snapshot")
-        path = Path(catalog_root) / "ebay-fulfillment-policies.json"
+        path = _ebay_reference_snapshot_path(
+            cfg,
+            "ebay-fulfillment-policies.json",
+        )
         payload: Dict[str, Any] = {}
         if path.exists():
             try:
@@ -4219,8 +5598,8 @@ def _live_fulfillment_policies(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], boo
             }
         )
         atomic_write_json(path, payload)
-        _LIVE_FULFILLMENT_POLICIES_CACHE["data"] = results
-        _LIVE_FULFILLMENT_POLICIES_CACHE["at"] = now
+        cache["data"] = results
+        cache["at"] = now
         return results, False
     except Exception as exc:
         snapshot, _refreshed_at, snapshot_error = _fulfillment_policies_snapshot(cfg)
@@ -4231,15 +5610,82 @@ def _live_fulfillment_policies(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], boo
         return snapshot, True
 
 
+def _live_return_policies(cfg: Dict[str, Any]) -> Tuple[Dict[str, str], bool]:
+    """Return ({policy_id: name}, used_fallback) for account return policies."""
+    now = time.time()
+    cache = _ebay_reference_cache_slot(_LIVE_RETURN_POLICIES_CACHE, cfg)
+    cached = cache["data"]
+    if cached is not None and (now - cache["at"]) < _LIVE_RETURN_POLICIES_TTL:
+        return cached, False
+    try:
+        from .ebay.sync import get_return_policies_full
+
+        live = get_return_policies_full(cfg)
+        if not isinstance(live, list):
+            raise ValueError("Account API response is not a return-policy list")
+        results: Dict[str, str] = {}
+        for policy in live:
+            if not isinstance(policy, dict):
+                raise ValueError("return policy is not an object")
+            raw_id = policy.get("id")
+            raw_name = policy.get("name")
+            if not isinstance(raw_id, str) or not isinstance(raw_name, str):
+                raise ValueError("return policy id and name must be strings")
+            policy_id = raw_id.strip()
+            name = raw_name.strip()
+            if not policy_id or not name:
+                raise ValueError("return policy has a blank id or name")
+            if policy_id in results and results[policy_id] != name:
+                raise ValueError(f"duplicate return policy id {policy_id!r} has conflicting names")
+            results[policy_id] = name
+        catalog_root = cfg.get("catalog_root")
+        if not catalog_root:
+            raise RuntimeError("catalog_root is not configured; cannot persist return-policy snapshot")
+        path = _ebay_reference_snapshot_path(
+            cfg,
+            "ebay-fulfillment-policies.json",
+        )
+        payload: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text())
+                if isinstance(existing, dict):
+                    payload = existing
+            except Exception:
+                pass
+        refreshed_at = datetime.now(timezone.utc).isoformat()
+        payload.update(
+            {
+                "source": "ebay_account_api",
+                "refreshed_at": refreshed_at,
+                "return_refreshed_at": refreshed_at,
+                "return": results,
+            }
+        )
+        atomic_write_json(path, payload)
+        cache["data"] = results
+        cache["at"] = now
+        return results, False
+    except Exception as exc:
+        snapshot, _refreshed_at, snapshot_error = _return_policies_snapshot(cfg)
+        if snapshot_error:
+            log.warning("live return-policy fetch failed and no valid snapshot exists: %s", exc)
+            return {}, True
+        log.warning("live return-policy fetch failed; preserving last-known-good snapshot: %s", exc)
+        return snapshot, True
+
+
 @app.post("/api/ebay/reference-data/refresh", dependencies=[AUTH])
 def refresh_ebay_reference_data() -> Dict[str, Any]:
     """Explicitly reconcile stable eBay selector data into local snapshots."""
-    _LIVE_STORE_CATS_CACHE.update({"data": None, "at": 0.0})
-    _LIVE_FULFILLMENT_POLICIES_CACHE.update({"data": None, "at": 0.0})
+    _clear_ebay_reference_cache(_LIVE_STORE_CATS_CACHE, _cfg)
+    _clear_ebay_reference_cache(_LIVE_FULFILLMENT_POLICIES_CACHE, _cfg)
+    _clear_ebay_reference_cache(_LIVE_RETURN_POLICIES_CACHE, _cfg)
     store_categories, store_preserved = _live_store_categories(_cfg)
     fulfillment_policies, fulfillment_preserved = _live_fulfillment_policies(_cfg)
+    return_policies, return_preserved = _live_return_policies(_cfg)
     return {
-        "ok": not (store_preserved or fulfillment_preserved),
+        "ok": not (store_preserved or fulfillment_preserved or return_preserved),
         "store_categories": {
             "count": len(store_categories),
             "preserved_snapshot": store_preserved,
@@ -4247,6 +5693,10 @@ def refresh_ebay_reference_data() -> Dict[str, Any]:
         "fulfillment_policies": {
             "count": len(fulfillment_policies),
             "preserved_snapshot": fulfillment_preserved,
+        },
+        "return_policies": {
+            "count": len(return_policies),
+            "preserved_snapshot": return_preserved,
         },
     }
 
@@ -4322,13 +5772,112 @@ def catalog_snapshot(background_tasks: BackgroundTasks):
 # ---------------------------------------------------------------------------
 
 
+def _category_group_table(cfg: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Load the configured template table used by every operator surface."""
+    groups_path = cfg.get("category_groups_path")
+    if not groups_path or not Path(groups_path).exists():
+        raise FileNotFoundError("category-groups.json not found")
+    raw = json.loads(Path(groups_path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("category-groups.json must contain one JSON object")
+    groups = raw.get("groups", {})
+    if not isinstance(groups, dict) or not all(
+        isinstance(key, str) and key and isinstance(group, dict)
+        for key, group in groups.items()
+    ):
+        raise ValueError("category-groups.json groups must be an object of templates")
+    return groups
+
+
+def _category_group_choices(cfg: Mapping[str, Any]) -> List[Dict[str, str]]:
+    """Publish stable category-group choices without duplicating template policy."""
+    return [
+        {
+            "value": key,
+            "label": str(group.get("name") or key),
+            "template_fingerprint": _category_group_template_fingerprint(group),
+        }
+        for key, group in _category_group_table(cfg).items()
+    ]
+
+
+def _category_group_inventory_condition_context(
+    cfg: Mapping[str, Any],
+    document: Mapping[str, Any],
+    *,
+    groups: Mapping[str, Mapping[str, Any]] | None = None,
+) -> Dict[str, Any]:
+    """Project one TGW group's full inventory-condition vocabulary."""
+    selected_group_key = str(document.get("category_group") or "").strip()
+    group_table = groups if groups is not None else _category_group_table(cfg)
+    selected_group = group_table.get(selected_group_key)
+    if selected_group is None:
+        return {
+            "inventory_conditions": [],
+            "inventory_condition_group": "",
+        }
+    try:
+        from .apis.ebay.conditions import inventory_conditions_for_categories
+
+        conditions = inventory_conditions_for_categories(
+            dict(cfg),
+            selected_group.get("ebay_categories", ()),
+        )
+    except Exception as exc:
+        return {
+            "inventory_conditions": [],
+            "inventory_condition_group": selected_group_key,
+            "inventory_conditions_error": str(exc),
+        }
+    return {
+        "inventory_conditions": conditions,
+        "inventory_condition_group": selected_group_key,
+    }
+
+
+def _category_group_template_fingerprint(group: Mapping[str, Any]) -> str:
+    """Bind a published choice to the exact JSON template it represents."""
+    payload = json.dumps(
+        dict(group),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _category_group_template_fields(
+    document: Mapping[str, Any],
+    template_key: str,
+    group: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Return the existing PP-INTAKE-001 template mutation as one patch."""
+    fields: Dict[str, Any] = {"category_group": template_key}
+    if group.get("size_class"):
+        fields["size_class"] = group["size_class"]
+    group_hint = str(group.get("ai_hint") or "").strip()
+    if group_hint:
+        existing_hint = str(document.get("ai_hint") or "").strip()
+        if existing_hint and existing_hint != group_hint:
+            fields["ai_hint"] = f"{group_hint}; {existing_hint}"
+        else:
+            fields["ai_hint"] = group_hint
+    categories = group.get("ebay_categories", [])
+    if not isinstance(categories, list):
+        raise ValueError("category-group ebay_categories must be a list")
+    if categories and not document.get("ebay_category_id"):
+        fields["ebay_category_id"] = str(categories[0])
+    return fields
+
+
 @app.get("/api/category-groups", dependencies=[AUTH])
 def list_category_groups() -> Dict[str, Any]:
-    groups_path = _cfg.get("category_groups_path")
-    if not groups_path or not Path(groups_path).exists():
+    try:
+        groups = _category_group_table(_cfg)
+    except FileNotFoundError:
         raise HTTPException(status_code=503, detail="category-groups.json not found")
-    raw = json.loads(Path(groups_path).read_text(encoding="utf-8"))
-    groups = raw.get("groups", {})
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     result = []
     for key, grp in groups.items():
         result.append(
@@ -4351,12 +5900,13 @@ def list_category_groups() -> Dict[str, Any]:
 
 @app.post("/api/items/{sku}/set-template", dependencies=[AUTH])
 def set_item_template(sku: str, body: SetTemplateBody) -> Dict[str, Any]:
-    groups_path = _cfg.get("category_groups_path")
-    if not groups_path or not Path(groups_path).exists():
+    try:
+        groups = _category_group_table(_cfg)
+    except FileNotFoundError:
         raise HTTPException(status_code=503, detail="category-groups.json not found")
-
-    raw = json.loads(Path(groups_path).read_text(encoding="utf-8"))
-    grp = raw.get("groups", {}).get(body.template_key)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    grp = groups.get(body.template_key)
     if grp is None:
         raise HTTPException(status_code=400, detail=f"unknown template_key: {body.template_key!r}")
 
@@ -4366,20 +5916,7 @@ def set_item_template(sku: str, body: SetTemplateBody) -> Dict[str, Any]:
 
     doc = load_item_doc(json_path)
 
-    # Build template fields (same logic as tgw set-template CLI)
-    fields: Dict[str, Any] = {"category_group": body.template_key}
-    if grp.get("size_class"):
-        fields["size_class"] = grp["size_class"]
-    group_hint = grp.get("ai_hint", "").strip()
-    if group_hint:
-        existing_hint = doc.get("ai_hint", "").strip()
-        if existing_hint and existing_hint != group_hint:
-            fields["ai_hint"] = f"{group_hint}; {existing_hint}"
-        else:
-            fields["ai_hint"] = group_hint
-    cats = grp.get("ebay_categories", [])
-    if cats and not doc.get("ebay_category_id"):
-        fields["ebay_category_id"] = cats[0]
+    fields = _category_group_template_fields(doc, body.template_key, grp)
 
     _apply_patch(json_path, fields)
     _enqueue_catalog_rebuild(f"set_template:{sku}")
@@ -4482,15 +6019,10 @@ def apply_inventory_diff_endpoint(sku: str, body: InventoryDiffApplyBody) -> Dic
         # Nothing in the requested key set is still an active diff —
         # idempotent no-op, not an error (spec point 5).
         return {"ok": True, "sku": sku, "applied": [], "note": "no active diff for requested keys"}
-    _apply_patch(
-        json_path,
-        {
-            "item_attributes": patch["item_attributes"],
-            "item_attributes_history": patch["item_attributes_history"],
-        },
-    )
+    applied_keys = patch.pop("applied_keys")
+    _apply_patch(json_path, patch)
     _enqueue_catalog_rebuild(f"inventory_diff_apply:{sku}")
-    return {"ok": True, "sku": sku, "applied": patch["applied_keys"]}
+    return {"ok": True, "sku": sku, "applied": applied_keys}
 
 
 # ---------------------------------------------------------------------------
@@ -4542,16 +6074,10 @@ def apply_category_aspect_migration_endpoint(sku: str, body: CategoryAspectMigra
         # Nothing in the requested key set is still an active orphan —
         # idempotent no-op, not an error (same reasoning as inventory-diff).
         return {"ok": True, "sku": sku, "migrated": [], "note": "no active orphaned aspects for requested keys"}
-    _apply_patch(
-        json_path,
-        {
-            "item_attributes": patch["item_attributes"],
-            "item_attributes_history": patch["item_attributes_history"],
-            "draft_listing": patch["draft_listing"],
-        },
-    )
+    migrated_keys = patch.pop("migrated_keys")
+    _apply_patch(json_path, patch)
     _enqueue_catalog_rebuild(f"category_aspect_migration_apply:{sku}")
-    return {"ok": True, "sku": sku, "migrated": patch["migrated_keys"]}
+    return {"ok": True, "sku": sku, "migrated": migrated_keys}
 
 
 # ---------------------------------------------------------------------------
@@ -4616,26 +6142,40 @@ def remove_comp(sku: str, body: RemoveCompBody) -> Dict[str, Any]:
     json_path = _cfg["itemdata_root"] / sku / f"{sku}.json"
     if not json_path.exists():
         raise HTTPException(status_code=404, detail=f"sku not found: {sku}")
-    doc = load_item_doc(json_path)
-    eo = doc.get("ebay_offer") or {}
-    comps = eo.get("price_comps") or {}
-    items = comps.get("items") or []
-    before = len(items)
-    kept = [ci for ci in items if ci.get("url", "").split("&mkcid")[0] != body.url.split("&mkcid")[0]]
-    if len(kept) == before:
-        raise HTTPException(status_code=404, detail="comp not found by url")
-    # Recalculate stats from kept active items (exclude outliers/llm_dropped).
-    # Use the same nearest-rank formula as ebay/pricing.py._compute_stats —
-    # a separate linear-interpolation formula here made stored comps stats
-    # silently shift for unrelated reasons whenever an operator edited comps.
-    from .ebay.pricing import _compute_stats
+    _, journal_root = _operator_mutation_roots()
+    with item_write_lock(journal_root, sku):
+        doc = load_item_doc(json_path)
+        eo = doc.get("ebay_offer") or {}
+        comps = eo.get("price_comps") or {}
+        items = comps.get("items") or []
+        before = len(items)
+        kept = [
+            ci for ci in items
+            if ci.get("url", "").split("&mkcid")[0]
+            != body.url.split("&mkcid")[0]
+        ]
+        if len(kept) == before:
+            raise HTTPException(status_code=404, detail="comp not found by url")
+        # Recalculate stats from kept active items (exclude outliers/llm_dropped).
+        # Use the same nearest-rank formula as ebay/pricing.py._compute_stats.
+        from .ebay.pricing import _compute_stats
 
-    active_prices = [ci["price"] for ci in kept if not ci.get("outlier") and not ci.get("llm_dropped") and ci.get("price") is not None]
-    comps["items"] = kept
-    comps.update(_compute_stats(active_prices) or {"count": 0})
-    eo["price_comps"] = comps
-    doc["ebay_offer"] = eo
-    atomic_write_json(json_path, doc, pretty=_cfg.get("pretty", True), archive_root=_cfg.get("archive_root"))
+        active_prices = [
+            ci["price"] for ci in kept
+            if not ci.get("outlier")
+            and not ci.get("llm_dropped")
+            and ci.get("price") is not None
+        ]
+        comps["items"] = kept
+        comps.update(_compute_stats(active_prices) or {"count": 0})
+        eo["price_comps"] = comps
+        doc["ebay_offer"] = eo
+        atomic_write_json(
+            json_path,
+            doc,
+            pretty=_cfg.get("pretty", True),
+            archive_root=_cfg.get("archive_root"),
+        )
     return {"ok": True, "sku": sku, "removed": body.url, "remaining": len(kept)}
 
 
@@ -4870,8 +6410,62 @@ _CATEGORY_CONTEXT_IIFE = "function loadCatCtx(catId){\n  var prefill=window._DL_
 # The category-context script predates Python formatting and is deliberately a
 # single quoted constant. Apply validation additions as exact substitutions so
 # missing required data has both a visible state and an accessible DOM state.
+_CATEGORY_CONDITION_AUTO_REMAP = """    if(sel&&d.conditions&&d.conditions.length){
+      var curVal=sel.value;
+      var stillValid=d.conditions.some(function(c){return c.enum===curVal;});
+      var html='';
+      if(!curVal)html+='<option value="" selected disabled>\\u2014 select \\u2014</option>';
+      d.conditions.forEach(function(c){
+        html+='<option value="'+c.enum+'"'+(c.enum===curVal?' selected':'')+'>'+c.label+'</option>';
+      });
+      if(curVal&&!stillValid){
+        if(d.condition_remap){
+          curVal=d.condition_remap.enum;
+          html=html.replace('<option value="'+curVal+'"','<option value="'+curVal+'" selected');
+        }else{
+          html+='<option value="'+curVal+'" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';
+        }
+      }
+      sel.innerHTML=html;
+      flagFieldInvalid(sel,!!(curVal&&!stillValid&&!d.condition_remap));
+      if(d.condition_remap&&curVal===d.condition_remap.enum){
+        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',
+          headers:authHeaders({'Content-Type':'application/json'}),
+          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});
+      }
+      var cn=document.getElementById('condition-policy-note');
+      var nl=d.conditions.length;
+      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');
+    }
+"""
+_CATEGORY_CONDITION_EXPLICIT_CHOICE = """    if(sel&&Array.isArray(d.conditions)){
+      var curVal=sel.value;
+      var policyResolved=typeof d.item_condition_required==='boolean';
+      var stillValid=policyResolved&&d.item_condition_required!==false&&d.conditions.some(function(c){return c.enum===curVal;});
+      var emptyLabel=d.item_condition_required===false?'No condition — not required for this category':'— select —';
+      var html='<option value=""'+(!curVal?' selected':'')+'>'+emptyLabel+'</option>';
+      if(curVal&&!stillValid){
+        html+='<option value="'+curVal+'" selected disabled>'+curVal+' — not valid for this category</option>';
+      }
+      if(policyResolved&&d.item_condition_required!==false){
+        d.conditions.forEach(function(c){
+          html+='<option value="'+c.enum+'"'+(c.enum===curVal?' selected':'')+'>'+c.label+'</option>';
+        });
+      }
+      sel.innerHTML=html;
+      sel.disabled=!policyResolved;
+      flagFieldInvalid(sel,!policyResolved||!!(curVal&&!stillValid));
+      var cn=document.getElementById('condition-policy-note');
+      var nl=d.conditions.length;
+      if(cn)cn.textContent=!policyResolved?'Condition policy unresolved — retry before selecting a listing condition':nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' — suggested same-or-worse choice: '+d.condition_remap.label:'')+((curVal&&!stillValid)?(d.item_condition_required===false?' — choose the blank option to remove the prior condition':' — choose a valid condition explicitly'):'');
+    }
+"""
 _CATEGORY_CONTEXT_IIFE = (
     _CATEGORY_CONTEXT_IIFE.replace(
+        _CATEGORY_CONDITION_AUTO_REMAP,
+        _CATEGORY_CONDITION_EXPLICIT_CHOICE,
+    )
+    .replace(
         "if(!catId){if(loading)loading.textContent='No category.';return;}",
         "if(!catId){flagFieldInvalid('dl-cat-search',true);if(loading){loading.textContent='Category required before item specifics can be checked.';loading.style.color='#e88';}return;}",
     )
@@ -6899,9 +8493,13 @@ def _build_condition_options(current_enum: str, category_id: str = "") -> Tuple[
     category (e.g. not yet in the Metadata API cache).
     """
     conds: List[Tuple[str, str]] = []
+    item_condition_required: Optional[bool] = None
     if category_id:
         try:
-            from .apis.ebay.conditions import allowed_conditions_for_category
+            from .apis.ebay.conditions import (
+                allowed_conditions_for_category,
+                item_condition_required_for_category,
+            )
 
             seen: set = set()
             for c in allowed_conditions_for_category(_cfg, category_id):
@@ -6909,11 +8507,20 @@ def _build_condition_options(current_enum: str, category_id: str = "") -> Tuple[
                 if pair[0] not in seen:
                     conds.append(pair)
                     seen.add(pair[0])
+            item_condition_required = item_condition_required_for_category(
+                _cfg, category_id
+            )
         except Exception as exc:
             log.warning("condition options: policy lookup failed for category %s: %s", category_id, exc)
 
-    if not conds:
+    if not category_id:
         conds = list(_GENERIC_CONDITION_FALLBACK)
+
+    # Choices without the matching required/optional flag are an incomplete
+    # policy projection. Keep a prior value visible, but offer no selectable
+    # legal value until the exact policy is complete.
+    if category_id and item_condition_required is None:
+        conds = []
 
     # If the currently-saved enum isn't in the allowed set (e.g. a stale value from
     # before this fix, or the category changed since it was set), surface it anyway
@@ -6923,12 +8530,23 @@ def _build_condition_options(current_enum: str, category_id: str = "") -> Tuple[
     # same shared flagFieldInvalid() treatment the dynamic loadCatCtx() JS
     # re-render path already applies via its own `stillValid` check.
     is_invalid = bool(current_enum) and current_enum not in {v for v, _ in conds}
-    if is_invalid:
-        conds = [(current_enum, f"{current_enum} — not valid for this category, please fix")] + conds
-
     opts = []
-    if not current_enum:
-        opts.append('<option value="" selected disabled>— select —</option>')
+    if item_condition_required is False:
+        opts.append(
+            '<option value=""'
+            f'{" selected" if not current_enum else ""}>'
+            'No condition — not required for this category</option>'
+        )
+    elif not current_enum:
+        label = "— select —" if conds else "— condition policy unavailable —"
+        opts.append(f'<option value="" selected disabled>{label}</option>')
+    else:
+        opts.append('<option value=""></option>')
+    if is_invalid:
+        opts.append(
+            f'<option value="{current_enum}" selected disabled>'
+            f'{current_enum} — not valid for this category</option>'
+        )
     for val, lbl in conds:
         sel = " selected" if val == current_enum else ""
         opts.append(f'<option value="{val}"{sel}>{lbl}</option>')
@@ -7924,8 +9542,10 @@ def _render_item_detail_html(
         )
     import json as _json2
 
-    _cat_root = _cfg.get("catalog_root")
-    _pol_cache = (_cat_root / "ebay-fulfillment-policies.json") if _cat_root else None
+    _pol_cache = _ebay_reference_snapshot_path(
+        _cfg,
+        "ebay-fulfillment-policies.json",
+    )
     _return_opts: dict = {}
     if _pol_cache and _pol_cache.exists():
         try:
@@ -9603,8 +11223,16 @@ def _retired_item_detail_form_source(sku: str):  # pragma: no cover
         from .operator_objects import build_item_operator_object
 
         draft = item.get("draft_listing") if isinstance(item.get("draft_listing"), dict) else {}
-        category_id = str(draft.get("category_id") or item.get("ebay_category_id") or "")
-        current_condition = str(draft.get("condition_enum") or draft.get("condition") or "")
+        category_id = str(
+            draft["category_id"]
+            if "category_id" in draft
+            else item.get("ebay_category_id") or ""
+        )
+        current_condition = str(
+            draft["condition_enum"]
+            if "condition_enum" in draft
+            else draft.get("condition") or ""
+        )
         category_context = ebay_category_context(category_id, current_condition=current_condition) if category_id and category_id != "99" else {}
         operator_object = build_item_operator_object(
             item=item,
@@ -9699,14 +11327,11 @@ def dashboard() -> Dict[str, Any]:
         result.update(needs_review=None, needs_photos=None, has_revision_draft=None, ready_count=None, blocked_count=None)
 
     # --- PostgreSQL: dead_letter_count ---
-    dead_letter_count = 0
     try:
-        with psycopg2.connect(_cfg["postgres_dsn"]) as con:
-            with con.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM queue_jobs WHERE state = 'dead_letter'")
-                dead_letter_count = cur.fetchone()[0]
+        dead_letter_count = state_machine.dead_letter_count()
     except Exception as exc:
         log.warning("dashboard: dead_letter query failed: %s", exc)
+        dead_letter_count = 0
     result["dead_letter_count"] = dead_letter_count
 
     # --- eBay pending_offers (cached, null on failure) ---
@@ -9767,15 +11392,22 @@ def activity(limit: int = 15) -> Dict[str, Any]:
                     SELECT job_id, queue_name, state,
                            payload_json->>'sku' AS sku,
                            finished_at, error_detail
-                      FROM queue_jobs
+                     FROM queue_jobs
                      WHERE finished_at IS NOT NULL
                      ORDER BY finished_at DESC
-                     LIMIT %s
-                    """,
-                    (n,),
+                    """
                 )
-                jobs = [dict(r) for r in cur.fetchall()]
+                environment = configured_ebay_environment(_cfg)
+                jobs = [
+                    dict(r) for r in cur.fetchall()
+                    if state_machine.queue_name_visible_in_environment(
+                        r["queue_name"], environment,
+                    )
+                ][:n]
                 for j in jobs:
+                    j["queue_name"] = state_machine.logical_queue_name(
+                        j["queue_name"],
+                    )
                     fa = j.get("finished_at")
                     if fa is not None and hasattr(fa, "isoformat"):
                         j["finished_at"] = fa.isoformat()
@@ -9835,8 +11467,20 @@ def _build_pm_context() -> str:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("SELECT queue_name, state, COUNT(*) AS n FROM queue_jobs GROUP BY queue_name, state ORDER BY queue_name, state")
                 qrows = [dict(r) for r in cur.fetchall()]
-        active = {r["queue_name"]: r["n"] for r in qrows if r["state"] in ("queued", "claimed")}
-        dead = sum(r["n"] for r in qrows if r["state"] == "dead_letter")
+        environment = configured_ebay_environment(_cfg)
+        visible = [
+            r for r in qrows
+            if state_machine.queue_name_visible_in_environment(
+                r["queue_name"], environment,
+            )
+        ]
+        active: Dict[str, int] = {}
+        for row in visible:
+            if row["state"] not in ("queued", "claimed"):
+                continue
+            queue_name = state_machine.logical_queue_name(row["queue_name"])
+            active[queue_name] = active.get(queue_name, 0) + row["n"]
+        dead = sum(r["n"] for r in visible if r["state"] == "dead_letter")
         lines.append("Active queues: " + (", ".join(f"{k}={v}" for k, v in active.items()) or "all idle"))
         lines.append(f"Dead-letter jobs: {dead}" + (" — NEEDS ATTENTION" if dead else ""))
     except Exception as exc:
@@ -11531,14 +13175,23 @@ def pipeline_jobs() -> Dict[str, Any]:
                          WHEN 'dead_letter' THEN 4
                        END,
                        created_at DESC
-                     LIMIT 200
                     """
                 )
                 jobs = [dict(r) for r in cur.fetchall()]
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"postgres error: {exc}")
 
+    environment = configured_ebay_environment(_cfg)
+    jobs = [
+        job for job in jobs
+        if state_machine.queue_name_visible_in_environment(
+            job.get("queue_name"), environment,
+        )
+    ][:200]
     for j in jobs:
+        j["queue_name"] = state_machine.logical_queue_name(
+            str(j.get("queue_name") or ""),
+        )
         j["consumer"] = _queue_consumers([str(j.get("queue_name") or "")]).get(str(j.get("queue_name") or ""), {})
         for ts_field in ("started_at", "finished_at", "created_at"):
             v = j.get(ts_field)
@@ -11560,7 +13213,7 @@ def cancel_job(job_id: str) -> Dict[str, Any]:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT state FROM queue_jobs WHERE job_id = %s",
+                    "SELECT state, queue_name FROM queue_jobs WHERE job_id = %s",
                     (job_id,),
                 )
                 row = cur.fetchone()
@@ -11569,6 +13222,13 @@ def cancel_job(job_id: str) -> Dict[str, Any]:
 
     if not isinstance(row, dict):
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+    if not state_machine.queue_name_visible_in_environment(
+        row.get("queue_name"), configured_ebay_environment(_cfg),
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="job belongs to a different configured eBay environment",
+        )
 
     cancellable = {"dead_letter", "queued", "retry_wait", "failed"}
     if row["state"] not in cancellable:
@@ -11674,9 +13334,18 @@ def system_info() -> Dict[str, Any]:
     try:
         with psycopg2.connect(_cfg["postgres_dsn"]) as con:
             with con.cursor() as cur:
-                cur.execute("SELECT state, COUNT(*) FROM queue_jobs GROUP BY state ORDER BY state")
-                for row in cur.fetchall():
-                    job_states[str(row[0])] = int(row[1])
+                cur.execute(
+                    "SELECT queue_name, state, COUNT(*) FROM queue_jobs "
+                    "GROUP BY queue_name, state ORDER BY queue_name, state"
+                )
+                environment = configured_ebay_environment(_cfg)
+                for queue_name, state, count in cur.fetchall():
+                    if state_machine.queue_name_visible_in_environment(
+                        queue_name, environment,
+                    ):
+                        job_states[str(state)] = (
+                            job_states.get(str(state), 0) + int(count)
+                        )
     except Exception as exc:
         job_states["_error"] = str(exc)
 

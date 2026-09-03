@@ -58,77 +58,32 @@ _MIGRATION_SCRIPT = _SCRIPTS / "migrate_field_set_envelope.py"
 #       neither is the item's envelope).
 # A new entry here must be justified the same way, in code review.
 _ALLOWLIST = {
-    (_SRC / "tgw" / "draft_sync.py", 90),
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 621),  # (b) AI model response
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 715),  # (a) required-schema accessor patch write
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 736),  # (a) accessor patch write
-    (_SRC / "tgw" / "workers" / "ai_identify.py", 831),  # (a) accessor patch write to fence payload
-    # Refreshed 2026-07-18 (this packet — todo #1499/#1500/#1506/#1507, the
-    # same stale-line-numbers report independently rediscovered 4 times by
-    # different tgw-coder packets today, each correctly declining to fix an
-    # unrelated file out-of-scope): every line below re-verified against
-    # current HEAD. Position-independent line-number pinning is inherently
-    # fragile against unrelated edits shifting the file — that's a known,
-    # accepted tradeoff of this detector's design (see module docstring),
-    # not a defect; expect to refresh this list again after future edits.
-    # Refreshed again 2026-07-18 (PP-CATALOG-INCR-001 CI-1+CI-2+CI-3 packets:
-    # Google Lens context-menu removal, live store-category/fulfillment-policy
-    # dropdown fetch helpers, and _apply_patch/_apply_ebay_write's new
-    # publish_mutation + sqlite upsert-on-write + thumbnail-gen fence hooks —
-    # all shifted every line below by varying amounts; re-verified against
-    # current HEAD).
-    # Refreshed 2026-07-19 (PP-CONDITION-ENUM-001 / todo #1562): the
-    # condition_enum PATCH-validation block added before _apply_patch, plus
-    # the flagFieldInvalid()/pipeline_error.field wiring in
-    # _render_item_detail_html, shifted every line below by varying
-    # amounts — re-verified against current HEAD, no accessor-routing
-    # behavior changed, only positions.
-    # Refreshed 2026-07-20 (todo #1608, PP-STATEMACHINE-001): added
-    # `import psycopg2.errors` near the top of http_server.py, shifting
-    # every line below by +1 — re-verified against current HEAD, no
-    # accessor-routing behavior changed, only position.
-    # Refreshed 2026-08-15: governed execution/authority additions shifted
-    # existing HTTP access sites only; each remains an approved envelope gate,
-    # accessor-patch handoff, or unrelated revision proposal field.
-    # Refreshed 2026-08-20 after the W13 direct-publication branches were
-    # retired; the same reviewed sites moved, with no accessor bypass added.
-    # Refreshed 2026-08-28 for Todo 1920 after the shared-lock atomic-save
-    # remediation shifted these same twelve reviewed sites. The C12 scan's
-    # unexpected/stale sets matched one-for-one; no new direct accessor exists.
-    # Refreshed 2026-09-02 for Todo 1966 — the sanctioned machine sold-evidence
-    # route (SoldEvidenceBody, POST /api/items/{sku}/sold-evidence,
-    # _apply_sold_evidence) inserted before each of these twelve sites and
-    # shifted them one-for-one. _apply_sold_evidence touches only
-    # draft_listing.quantity / ebay_listing.status, never item_attributes or
-    # item_specifics; no new direct accessor exists.
-    (_SRC / "tgw" / "http_server.py", 1626),  # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 1633),  # (c) todo #1464 envelope-shape gate — is_envelope() check only, not a contents read
-    (_SRC / "tgw" / "http_server.py", 2303),  # (a) accessor patch write
-    (_SRC / "tgw" / "http_server.py", 2322),  # (a) accessor patch write (todo #1416, draft_listing.item_specifics)
-    (_SRC / "tgw" / "http_server.py", 2327),  # (a) accessor output (full envelope) moving onward
-    (_SRC / "tgw" / "http_server.py", 2339),  # (a) accessor patch write — padlock auto-sync
-    (_SRC / "tgw" / "http_server.py", 3013),  # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 3014),  # (b) revision_draft.delta
-    (_SRC / "tgw" / "http_server.py", 3019),  # (a) accessor patch write (todo #1416)
-    (_SRC / "tgw" / "http_server.py", 4488),  # (a) accessor output (inventory_diff.apply_inventory_diff's patch) onward into _apply_patch (#1417)
-    (_SRC / "tgw" / "http_server.py", 4548),  # (a) category_aspect_migration's patch moving onward into _apply_patch (#1471)
-    # Refreshed 2026-07-20 (todo #1582, PP-AGENTTRACE-001 Phase 3): the new
-    # /form/runs route + _render_runs_html() inserted ~186 lines before this
-    # entry, shifting it from 5855 to 6041 — re-verified against current
-    # HEAD, no accessor-routing behavior changed, only position.
-    (_SRC / "tgw" / "http_server.py", 7825),  # (b) revision_draft.delta
+    (_SRC / "tgw" / "draft_sync.py", 90),  # (a) wrap_ebay_specifics accessor output assigned onward
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 619),  # (b) AI model raw response
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 713),  # (a) inventory_record.set_inventory_fields() patch write
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 734),  # (a) ensure_required_category_fields() patch write
+    (_SRC / "tgw" / "workers" / "ai_identify.py", 829),  # (a) accessor patch write to fence payload
+    # Refreshed 2026-09-03 for the todo-1961 operator-stream merge: branch
+    # operator/command content merged into http_server.py, ai_identify.py,
+    # ebay_draft.py and operator_objects.py shifted every site below; each was
+    # re-verified against the merged tree and no direct envelope accessor
+    # bypass exists — the entries are the same reviewed code at new positions
+    # plus the operator-object display read of the revision proposal delta.
+    (_SRC / "tgw" / "http_server.py", 2657),  # (c) todo #1464 envelope-shape gate — is_envelope() check only (Set A)
+    (_SRC / "tgw" / "http_server.py", 2664),  # (c) todo #1464 envelope-shape gate — is_envelope() check only (Set B)
+    (_SRC / "tgw" / "http_server.py", 4232),  # (b) accept_proposals revision_draft.delta — different dict, fed to set_ebay_aspects()
+    (_SRC / "tgw" / "http_server.py", 4233),  # (a) accept_proposals — set_ebay_aspects() accessor call on the proposal dict
+    (_SRC / "tgw" / "http_server.py", 9443),  # (b) revision_draft.delta proposal read for item-detail display
+    (_SRC / "tgw" / "operator_objects.py", 1492),  # (b) revision_draft.delta proposal read (operator-object proposed-aspect view; read-only builder)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "inventory_diff.py", 159),  # (a) accessor patch output moving onward (todo #1417 apply_inventory_diff)
     (_SRC / "tgw" / "ebay" / "inventory_diff.py", 163),  # (a) accessor patch output moving onward (todo #1417 apply_inventory_diff)
-    (_SRC / "tgw" / "workers" / "ebay_draft.py", 636),  # (a) required-schema accessor patch write
-    (_SRC / "tgw" / "workers" / "ebay_draft.py", 944),  # (a) required-schema accessor patch write to fence payload
-    # Refreshed 2026-07-20 (todo #1598, PP-MULTIMODEL-001 / invariant E15
-    # sweep): removed a dead `_OLLAMA_FALLBACK_MODEL` module constant + docstring
-    # rewrite in ai_identify.py, net +3 lines before these entries — shifted
-    # from 273/333/428 to 276/336/431. No accessor-routing behavior changed.
+    (_SRC / "tgw" / "workers" / "ebay_draft.py", 745),  # (a) ensure_required_category_fields() accessor patch write
+    (_SRC / "tgw" / "workers" / "ebay_draft.py", 1060),  # (a) ensure_required_category_fields() accessor patch write to fence payload
 }
+
 
 
 def _scan() -> set:

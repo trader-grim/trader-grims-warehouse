@@ -160,6 +160,7 @@ def test_fresh_governed_price_checkpoints_before_single_cas_write(tmp_path, monk
     monkeypatch.setattr(price_mod, "suggest_price", lambda *a, **k: {
         "price": 10.0,
         "source": "test-comps",
+        "query": "exact winning query",
         "comps": {"count": 3, "min": 8.0, "p25": 10.0,
                   "median": 12.0, "p75": 14.0, "max": 15.0},
         "comp_items": [],
@@ -182,4 +183,70 @@ def test_fresh_governed_price_checkpoints_before_single_cas_write(tmp_path, monk
     assert checkpoints and checkpoints[0]["schema"] == "ebay-price-observation/v1"
     assert after["draft_listing"]["price"] == 16.99
     assert after["ebay_offer"]["target_price"] == 10.0
+    assert checkpoints[0]["fields"]["ebay_offer"]["price_comps"]["query"] == "exact winning query"
+    assert after["ebay_offer"]["price_comps"]["query"] == "exact winning query"
+    assert receipt["outcome"] == "satisfied"
+
+
+def test_governed_reprice_clears_request_marker_in_observation_commit(
+    tmp_path, monkeypatch,
+):
+    sku = "SKU-5"
+    item = {
+        "sku": sku,
+        "title": "Item",
+        "condition": "New",
+        "ai_reprice_requested": True,
+        "draft_listing": {
+            "title": "Item",
+            "category_id": "123",
+            "price": 42.0,
+        },
+    }
+    path = _write(tmp_path, sku, item)
+    job = _job(sku, item_generation(item), {})
+    job["payload_json"].pop("observation_checkpoint")
+    checkpoints = []
+
+    def checkpoint(_job_id, _owner, _token, value):
+        checkpoints.append(value)
+        return value
+
+    monkeypatch.setattr(price_mod.state_machine, "checkpoint_running_job", checkpoint)
+    monkeypatch.setattr(price_mod, "suggest_price", lambda *a, **k: {
+        "price": 10.0,
+        "source": "test-comps",
+        "query": "refreshed winning query",
+        "comps": {
+            "count": 3,
+            "min": 8.0,
+            "p25": 10.0,
+            "median": 12.0,
+            "p75": 14.0,
+            "max": 15.0,
+        },
+        "comp_items": [],
+        "queried_at": "2026-08-10T00:00:00+00:00",
+        "price_confidence": "medium",
+    })
+    monkeypatch.setattr(price_mod, "upsert_catalog_row", lambda *_: {"ok": True})
+    monkeypatch.setattr(
+        price_mod,
+        "fence_ebay_write",
+        lambda *a, **k: pytest.fail("governed price must not use legacy eBay fence"),
+    )
+    monkeypatch.setattr(
+        price_mod,
+        "fence_patch_item",
+        lambda *a, **k: pytest.fail("governed price must not use legacy item fence"),
+    )
+
+    receipt = _worker(tmp_path).handle(job)
+
+    after = json.loads(path.read_text())
+    assert checkpoints[0]["fields"]["ai_reprice_requested"] is None
+    assert after["ai_reprice_requested"] is None
+    assert after["draft_listing"]["price"] == 42.0
+    assert after["ebay_offer"]["suggested_price"] == 10.0
+    assert after["ebay_offer"]["price_comps"]["query"] == "refreshed winning query"
     assert receipt["outcome"] == "satisfied"

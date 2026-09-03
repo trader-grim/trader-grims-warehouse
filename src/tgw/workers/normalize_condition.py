@@ -48,7 +48,11 @@ def apply_condition_mutation(
 ) -> Any:
     """Adapt this treatment to the generic durable item-mutation boundary."""
     from tgw.config import sku_json
-    from tgw.item_mutation import mutate_item, operation_identity
+    from tgw.item_mutation import (
+        mutate_item,
+        operation_identity,
+        resolve_item_mutation_journal_root,
+    )
     from tgw.sqlite_catalog import upsert_catalog_row
 
     mutation_payload = {"graph_id": graph_id, "request_id": job_id}
@@ -75,7 +79,7 @@ def apply_condition_mutation(
             raise RuntimeError("SQLite projection did not report success")
 
     data_root = Path(config.get("data_root", "/opt/TGW/data"))
-    journal_root = Path(config.get("item_mutation_journal_root", data_root.parent / "var/item-mutations"))
+    journal_root = resolve_item_mutation_journal_root(config)
     return mutate_item(
         item_path=sku_json(dict(config), sku),
         archive_root=Path(config.get("archive_root", data_root / "ItemArchive")),

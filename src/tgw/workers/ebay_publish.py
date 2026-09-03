@@ -22,17 +22,31 @@ import psycopg2.errors
 import requests
 
 import tgw.logging as tgw_logging
-from tgw.apis.ebay import conditions
-from tgw.apis.ebay.client import ebay_get, ebay_put
+from tgw.apis.ebay.client import ebay_get
 from tgw.apis.fence import ebay_write as fence_ebay_write
 from tgw.apis.fence import patch_item as fence_patch_item
-from tgw.config import DEFAULT_CONFIG, load_config
+from tgw.config import (
+    DEFAULT_CONFIG,
+    bind_ebay_provider_identity,
+    configured_ebay_environment,
+    ebay_environment_settings,
+    load_config,
+)
 from tgw.draft_sync import baseline_fields
 from tgw.ebay.pricing import to_99
-from tgw.ebay.sync import enqueue_post_push_sync, publish_offer
+from tgw.ebay.sync import (
+    enqueue_post_push_sync,
+    publish_offer,
+    validate_listing_condition_for_stage,
+)
 from tgw.ebay.sync import extract_ebay_error_field as _extract_ebay_error_field
 from tgw.ebay.sync import format_ebay_error as _format_ebay_error
 from tgw.errors import TreatmentFailure
+from tgw.item_mutation import (
+    item_generation,
+    item_write_lock,
+    resolve_item_mutation_journal_root,
+)
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure, QueueWorker
 from tgw.workflow.item_snapshot import inventory_available
@@ -40,6 +54,14 @@ from tgw.workflow.item_snapshot import inventory_available
 log = logging.getLogger(__name__)
 
 QUEUE_NAME = 'ebay_publish'
+
+
+def _committed_generation(response: Dict[str, Any]) -> str:
+    value = response.get('resulting_generation')
+    if (not isinstance(value, str) or len(value) != 64
+            or any(ch not in '0123456789abcdef' for ch in value)):
+        raise HardFailure('item fence returned no valid committed generation')
+    return value
 
 
 def _rejection_detail(exc: requests.exceptions.HTTPError) -> Dict[str, Any]:
@@ -108,6 +130,22 @@ def _build_reprice_schedule(stages: List[Dict[str, Any]],
 
 class EbayPublishWorker(QueueWorker):
 
+    def _item_write_lock(self, sku: str):
+        return item_write_lock(resolve_item_mutation_journal_root(self.config), sku)
+
+    def _bind_job_environment(self, payload: Dict[str, Any]) -> tuple[str, str]:
+        environment = configured_ebay_environment(self.config)
+        endpoint = ebay_environment_settings(environment)['rest_api_root']
+        if payload.get('ebay_environment') not in (None, environment):
+            raise HardFailure(
+                'ebay_publish job environment differs from worker configuration'
+            )
+        if payload.get('ebay_endpoint') not in (None, endpoint):
+            raise HardFailure('ebay_publish job endpoint differs from closed provider root')
+        payload['ebay_environment'] = environment
+        payload['ebay_endpoint'] = endpoint
+        return environment, endpoint
+
     def _provider_effect_mode(self) -> str:
         migration = self.config.get('workflow_migration')
         if migration is None and isinstance(self.config.get('raw'), dict):
@@ -126,7 +164,9 @@ class EbayPublishWorker(QueueWorker):
             migration = self.config['raw'].get('workflow_migration')
         migration = migration if isinstance(migration, dict) else {}
         value = migration.get('ebay_provider_identity')
-        return value if isinstance(value, str) else ''
+        return bind_ebay_provider_identity(
+            value, configured_ebay_environment(self.config),
+        )
 
     @staticmethod
     def _require_provider_binding(payload: Dict[str, Any]) -> None:
@@ -151,30 +191,60 @@ class EbayPublishWorker(QueueWorker):
         )
         from tgw.workflow.operator_authority import listing_content_identity
 
+        # Staging and publishing have separate external effects. Recheck the
+        # exact current listing condition before reserving the publish effect;
+        # a policy/cache change or operator edit after staging is a local hold,
+        # never permission to publish or reserve an attempted dispatch.
+        validate_listing_condition_for_stage(self.config, sku, item)
+        self._bind_job_environment(payload)
         provider_identity = self._provider_identity()
+        environment = payload['ebay_environment']
+        endpoint = payload['ebay_endpoint']
         try:
-            effect = reserve_and_begin_authorized_effect(
-                authority_id=payload.get('operator_authority_id', ''),
-                authority_scope='publish', authority_binding={
-                    'entity_id': sku, 'goal_profile_id': payload['goal_profile_id'],
-                    'goal_profile_version': payload['goal_profile_version'],
-                    'object_generation': payload['object_generation'],
-                    'pre_authority_condition_hash': payload.get(
-                        'pre_authority_condition_hash', ''),
-                    'content_identity': listing_content_identity(item),
-                    'provider_identity': provider_identity or '',
-                }, provider='ebay', operation='publish-offer', entity_type='item',
-                entity_id=sku, object_generation=payload['object_generation'],
-                graph_id=payload['graph_id'], treatment_id=payload['treatment_id'],
-                treatment_version=payload['treatment_version'],
-                condition_hash=payload['condition_hash'], request={
-                    'offer_id': offer_id,
-                    # The category-condition fallback is part of this one
-                    # authorized operation.  It must never become an
-                    # unledgered inventory PUT followed by a blind publish.
-                    'condition_fallback': 'USED_EXCELLENT',
-                },
-            )
+            json_path = Path(self.config['itemdata_root']) / sku / f'{sku}.json'
+            content_identity = listing_content_identity(item)
+            # The exact generation check and durable effect reservation form
+            # one local critical section. Once reserved, provider dispatch is
+            # authorized even if a later operator edit makes projection conflict.
+            with self._item_write_lock(sku):
+                current_item = json.loads(json_path.read_text(encoding='utf-8'))
+                observed_generation = item_generation(current_item)
+                if observed_generation != payload['object_generation']:
+                    raise HardFailure(
+                        f'{sku}: publish generation conflict before effect reservation: '
+                        f'expected {payload["object_generation"]}, '
+                        f'observed {observed_generation}'
+                    )
+                if listing_content_identity(current_item) != content_identity:
+                    raise HardFailure(
+                        f'{sku}: publish content changed before effect reservation'
+                    )
+                effect = reserve_and_begin_authorized_effect(
+                    authority_id=payload.get('operator_authority_id', ''),
+                    authority_scope='publish', authority_binding={
+                        'entity_id': sku,
+                        'goal_profile_id': payload['goal_profile_id'],
+                        'goal_profile_version': payload['goal_profile_version'],
+                        'object_generation': payload['object_generation'],
+                        'pre_authority_condition_hash': payload.get(
+                            'pre_authority_condition_hash', ''),
+                        'content_identity': content_identity,
+                        'provider_identity': provider_identity or '',
+                    }, provider='ebay', operation='publish-offer', entity_type='item',
+                    entity_id=sku, object_generation=payload['object_generation'],
+                    graph_id=payload['graph_id'], treatment_id=payload['treatment_id'],
+                    treatment_version=payload['treatment_version'],
+                    condition_hash=payload['condition_hash'], request={
+                        'offer_id': offer_id,
+                        # Retained only as an existing provider-effect identity
+                        # field so historical succeeded receipts still validate.
+                        # Runtime fallback is disabled: a rejection returns to
+                        # explicit operator condition selection.
+                        'condition_fallback': 'USED_EXCELLENT',
+                        'ebay_environment': environment,
+                        'endpoint': endpoint,
+                    },
+                )
         except ProviderEffectConflict as exc:
             raise HardFailure(f'{sku}: provider effect admission failed: {exc}') from exc
         except ProviderEffectReconciliationRequired as exc:
@@ -186,7 +256,14 @@ class EbayPublishWorker(QueueWorker):
                 ),
             ) from exc
         if effect.state == 'succeeded' and effect.result:
-            return {**effect.result, '_provider_effect_id': effect.effect_id}
+            if (effect.result.get('ebay_environment') != environment
+                    or effect.result.get('endpoint') != endpoint):
+                raise HardFailure('succeeded publish effect environment evidence mismatch')
+            return {
+                **effect.result,
+                '_provider_effect_id': effect.effect_id,
+                '_publish_content_identity': content_identity,
+            }
         if effect.state == 'rejected':
             raise TreatmentFailure(
                 f'{sku}: prior provider publish was definitively rejected',
@@ -203,58 +280,50 @@ class EbayPublishWorker(QueueWorker):
             if status in (400, 422):
                 rejection = _rejection_detail(exc)
                 body_text = exc.response.text if exc.response is not None else ''
-                errors = rejection.get('response', {}).get('errors', [])
-                if any(error.get('errorId') == 25021 for error in errors):
-                    # Both calls remain inside the already-reserved provider
-                    # effect. A crash or ambiguous response marks that effect
-                    # for reconciliation; a retry cannot dispatch it again.
-                    try:
-                        ebay_put(
-                            self.config,
-                            f'/sell/inventory/v1/inventory_item/{sku}',
-                            {'condition': 'USED_EXCELLENT'},
-                        )
-                        result = publish_offer(self.config, offer_id)
-                        condition_fallback_applied = True
-                    except Exception as fallback_exc:
-                        ambiguous = finish_provider_effect(
-                            effect.effect_id, state='ambiguous',
-                            error_detail=(
-                                'condition fallback dispatch: '
-                                f'{type(fallback_exc).__name__}: {fallback_exc}'
-                            ),
-                        )
-                        raise TreatmentFailure(
-                            f'{sku}: provider condition fallback outcome ambiguous; '
-                            'reconciliation required',
-                            self._provider_effect_receipt(
-                                payload, sku, ambiguous.effect_id, 'ambiguous',
-                                'PROVIDER_EFFECT_CONDITION_FALLBACK_AMBIGUOUS', None,
-                            ),
-                        ) from fallback_exc
-                else:
-                    # The governed path retains the provider rejection in
-                    # Postgres and persists the C11 item finding used by the
-                    # editor to flag the exact invalid control.
-                    fence_patch_item(self.config, sku, {'pipeline_error': {
-                        'code': 'ebay_rejected',
-                        'detail': _format_ebay_error(body_text, status),
-                        'raw': body_text[:800],
-                        'ts': datetime.now(timezone.utc).isoformat(),
-                        'source': 'ebay_publish',
-                        'field': _extract_ebay_error_field(body_text),
-                    }})
-                    rejected = finish_provider_effect(
-                        effect.effect_id, state='rejected',
-                        error_detail=json.dumps(rejection, sort_keys=True),
+                # A condition rejection is operator-visible evidence, never
+                # permission to replace the selected grade and retry.  The
+                # category-context projection supplies an explicit
+                # same-or-worse choice for a later operator command.
+                rejected = finish_provider_effect(
+                    effect.effect_id, state='rejected',
+                    error_detail=json.dumps(rejection, sort_keys=True),
+                )
+                try:
+                    fence_patch_item(
+                        self.config, sku, {'pipeline_error': {
+                            'code': 'ebay_rejected',
+                            'detail': _format_ebay_error(body_text, status),
+                            'raw': body_text[:800],
+                            'ts': datetime.now(timezone.utc).isoformat(),
+                            'source': 'ebay_publish',
+                            'field': _extract_ebay_error_field(body_text),
+                        }},
+                        expected_generation=payload['object_generation'],
                     )
+                except Exception as projection_exc:
                     raise TreatmentFailure(
-                        f'{sku}: provider definitively rejected publish',
+                        f'{sku}: provider rejection recorded but item finding '
+                        'projection conflicted; reconciliation required',
                         self._provider_effect_receipt(
-                            payload, sku, rejected.effect_id, 'failed',
-                            'PROVIDER_EFFECT_REJECTED', rejection,
+                            payload, sku, rejected.effect_id,
+                            'reconciliation_required',
+                            'PROVIDER_REJECTION_PROJECTION_FAILED',
+                            {
+                                **rejection,
+                                'projection_error': (
+                                    f'{type(projection_exc).__name__}: '
+                                    f'{projection_exc}'
+                                ),
+                            },
                         ),
-                    ) from exc
+                    ) from projection_exc
+                raise TreatmentFailure(
+                    f'{sku}: provider definitively rejected publish',
+                    self._provider_effect_receipt(
+                        payload, sku, rejected.effect_id, 'failed',
+                        'PROVIDER_EFFECT_REJECTED', rejection,
+                    ),
+                ) from exc
             else:
                 ambiguous = finish_provider_effect(
                     effect.effect_id, state='ambiguous',
@@ -282,9 +351,15 @@ class EbayPublishWorker(QueueWorker):
         durable_result = {
             **result,
             'condition_fallback_applied': condition_fallback_applied,
+            'ebay_environment': environment,
+            'endpoint': endpoint,
         }
         finish_provider_effect(effect.effect_id, state='succeeded', result=durable_result)
-        return {**durable_result, '_provider_effect_id': effect.effect_id}
+        return {
+            **durable_result,
+            '_provider_effect_id': effect.effect_id,
+            '_publish_content_identity': content_identity,
+        }
 
     @staticmethod
     def _provider_effect_receipt(
@@ -299,6 +374,8 @@ class EbayPublishWorker(QueueWorker):
             'established_conditions': [], 'artifacts': [f'item:{sku}'],
             'evidence': {
                 'reason_code': reason_code, 'provider': 'ebay',
+                'ebay_environment': payload['ebay_environment'],
+                'ebay_endpoint': payload['ebay_endpoint'],
                 'provider_effect_id': effect_id,
                 'provider_result': provider_result,
                 'operator_origin': payload.get('origin') == 'operator',
@@ -327,6 +404,7 @@ class EbayPublishWorker(QueueWorker):
             'goal_profile_version': payload['goal_profile_version'],
             'object_generation': payload['object_generation'],
             'condition_hash': payload['condition_hash'],
+            'ebay_environment': payload['ebay_environment'],
             'entity_id': sku,
             'outcome': 'satisfied',
             'established_conditions': ['published'],
@@ -406,6 +484,7 @@ class EbayPublishWorker(QueueWorker):
         sku = payload.get('sku', '')
         if not sku:
             raise HardFailure('ebay_publish job missing sku in payload')
+        environment, _endpoint = self._bind_job_environment(payload)
         if job.get('entity_type') not in (None, 'item'):
             raise HardFailure('ebay_publish job entity_type must be item')
         if job.get('entity_id') not in (None, sku):
@@ -441,8 +520,15 @@ class EbayPublishWorker(QueueWorker):
         # re-publish or overwrite the reprice_schedule (markdown clock).
         existing_listing = item.get('ebay_listing', {})
         if existing_listing.get('status') == 'Active':
+            active_generation = item_generation(item)
             governed = self._governed_success_receipt(payload, sku) is not None
             published_at = existing_listing.get('published_at')
+            publish_content_identity = existing_listing.get(
+                'publish_content_identity'
+            )
+            projected_content_identity = existing_listing.get(
+                'projected_content_identity'
+            )
             projection_complete = (
                 item.get('draft_listing_state') == 'baseline'
                 and isinstance(published_at, str)
@@ -450,6 +536,10 @@ class EbayPublishWorker(QueueWorker):
                 and isinstance(item.get('baseline_at'), str)
                 and item['baseline_at'] == published_at
                 and (item.get('ebay_offer') or {}).get('published_at') == published_at
+                and isinstance(publish_content_identity, str)
+                and bool(publish_content_identity.strip())
+                and isinstance(projected_content_identity, str)
+                and bool(projected_content_identity.strip())
             )
             if governed and not projection_complete:
                 raise self._projection_reconciliation_failure(
@@ -477,7 +567,7 @@ class EbayPublishWorker(QueueWorker):
                             'object_generation': payload['object_generation'],
                             'pre_authority_condition_hash': payload.get(
                                 'pre_authority_condition_hash', ''),
-                            'content_identity': listing_content_identity(item),
+                            'content_identity': publish_content_identity,
                             'provider_identity': self._provider_identity(),
                         }, expected_binding={
                             'provider': 'ebay', 'operation': 'publish-offer',
@@ -490,10 +580,27 @@ class EbayPublishWorker(QueueWorker):
                             'request': {
                                 'offer_id': (item.get('ebay_offer') or {}).get('offer_id'),
                                 'condition_fallback': 'USED_EXCELLENT',
+                                'ebay_environment': payload['ebay_environment'],
+                                'endpoint': payload['ebay_endpoint'],
                             },
                         },
                     )
-                    if effect.result.get('listing_id') != existing_listing.get('listing_id'):
+                    offer = item.get('ebay_offer') or {}
+                    if (
+                        listing_content_identity(item) != projected_content_identity
+                        or existing_listing.get('ebay_environment')
+                        != payload['ebay_environment']
+                        or offer.get('ebay_environment')
+                        != payload['ebay_environment']
+                        or offer.get('status') != 'PUBLISHED'
+                        or effect.result.get('listing_id')
+                        != existing_listing.get('listing_id')
+                        or effect.result.get('listing_url')
+                        != existing_listing.get('listing_url')
+                        or effect.result.get('ebay_environment')
+                        != payload['ebay_environment']
+                        or effect.result.get('endpoint') != payload['ebay_endpoint']
+                    ):
                         raise ProviderEffectConflict('provider listing evidence mismatch')
                 except (ProviderEffectConflict,
                         ProviderEffectReconciliationRequired) as exc:
@@ -508,14 +615,16 @@ class EbayPublishWorker(QueueWorker):
             photo_verify = self._refresh_photo_verify(sku, item)
             if photo_verify is not None:
                 existing_listing['photo_verify'] = photo_verify
-                fence_ebay_write(self.config, sku, ebay_listing=existing_listing)
+                fence_ebay_write(
+                    self.config, sku, ebay_listing=existing_listing,
+                    expected_generation=active_generation,
+                )
             enqueue_post_push_sync(
                 sku, config=self.config,
                 source_provider_effect_id=str(existing_listing.get('provider_effect_id') or ''),
             )
             return self._governed_success_receipt(payload, sku)
 
-        from tgw.item_mutation import item_generation
         observed_generation = item_generation(item)
         if observed_generation != payload['object_generation']:
             raise HardFailure(
@@ -598,26 +707,6 @@ class EbayPublishWorker(QueueWorker):
         tgw_logging.log_event('ebay_publish_start', sku=sku, offer_id=offer_id)
 
         result = self._publish_with_provider_effect(payload, sku, offer_id, item)
-        if result.get('condition_fallback_applied') and item.get('draft_listing'):
-            label = 'Used'
-            category_id = str(item.get('ebay_category_id', ''))
-            try:
-                for condition in conditions.allowed_conditions_for_category(
-                        self.config, category_id):
-                    if condition['condition_id'] == '3000':
-                        label = condition['condition_label']
-                        break
-            except Exception as exc:
-                log.warning(
-                    '%s: could not resolve conditionId 3000 label (%s); using %r',
-                    sku, exc, label,
-                )
-            item['draft_listing'].update({
-                'condition_id': '3000',
-                'condition_label': label,
-                'condition_enum': conditions.condition_enum('3000'),
-            })
-
         now = datetime.now(timezone.utc)
         item['ebay_listing'] = {
             'offer_id':     offer_id,
@@ -626,11 +715,16 @@ class EbayPublishWorker(QueueWorker):
             'status':       'Active',
             'api':          'inventory',
             'published_at': now.isoformat(),
+            'ebay_environment': environment,
         }
         if result.get('_provider_effect_id'):
             item['ebay_listing']['provider_effect_id'] = result['_provider_effect_id']
+            item['ebay_listing']['publish_content_identity'] = result.get(
+                '_publish_content_identity'
+            )
         ebay_offer['status']       = 'PUBLISHED'
         ebay_offer['published_at'] = now.isoformat()
+        ebay_offer['ebay_environment'] = environment
         # ebay_offer.price = what is actually live on eBay = what ebay_stage PUT there.
         # The reprice schedule has its own per-stage price fields; don't overwrite the
         # live price with schedule data here.
@@ -669,6 +763,48 @@ class EbayPublishWorker(QueueWorker):
             item['draft_listing']['listing_description'] = build_listing_description(
                 item, self.config)
 
+            # The generic fence PATCH normalizes a supported legacy bare
+            # item_specifics dict to the Set-B envelope.  Do that once here
+            # through the sanctioned accessor so the identity below describes
+            # the exact draft document the fence will commit.
+            from tgw.ebay.draft_specifics import normalize_legacy_ebay_specifics
+
+            normalized_draft = normalize_legacy_ebay_specifics(
+                item,
+                source='ebay_publish_projection', applied_by='system',
+            )
+            if normalized_draft is not None:
+                item['draft_listing'] = normalized_draft
+
+        # ``fence_patch_item`` routes draft_listing through the same padlock
+        # projection as an operator PATCH.  In particular, an unlocked draft
+        # title/description is copied to the canonical top-level field.  Model
+        # that final projection here (and send the fields explicitly) before
+        # minting the replay identity; otherwise the identity stored by the
+        # first fence can describe the intermediate document rather than the
+        # fully projected canonical document written by the second fence.
+        post_publish_fields = {
+            'reprice_schedule': item.get('reprice_schedule'),
+            'price_history':    item.get('price_history', []),
+            'draft_listing':    item.get('draft_listing'),
+            **baseline_fields(now),
+        }
+        if isinstance(item.get('draft_listing'), dict):
+            from tgw import inventory_record
+
+            for base_key in ('title', 'description'):
+                draft_value = item['draft_listing'].get(base_key)
+                if draft_value and not inventory_record.is_locked(item, base_key):
+                    item[base_key] = draft_value
+                    post_publish_fields[base_key] = draft_value
+
+        if result.get('_provider_effect_id'):
+            from tgw.workflow.operator_authority import listing_content_identity
+
+            item['ebay_listing']['projected_content_identity'] = (
+                listing_content_identity(item)
+            )
+
         # PP-EBAY-SNAPSHOT-001 Phase 2 / PP-PHOTOSYNC-001 P1: verify photos
         # survived publish. One extra GET; logged but never blocks completion.
         photo_verify = self._refresh_photo_verify(sku, item)
@@ -676,9 +812,13 @@ class EbayPublishWorker(QueueWorker):
             item['ebay_listing']['photo_verify'] = photo_verify
 
         try:
-            fence_ebay_write(self.config, sku,
-                             ebay_listing=item.get('ebay_listing'),
-                             ebay_offer=item.get('ebay_offer'))
+            projection_response = fence_ebay_write(
+                self.config, sku,
+                ebay_listing=item.get('ebay_listing'),
+                ebay_offer=item.get('ebay_offer'),
+                expected_generation=payload['object_generation'],
+            )
+            projection_generation = _committed_generation(projection_response)
         except Exception as exc:
             # The provider has confirmed publication, but the canonical Active
             # guard did not land.  An ordinary worker retry would call publish
@@ -713,12 +853,10 @@ class EbayPublishWorker(QueueWorker):
         # the draft re-baselined. The next manipulation (AI or operator)
         # starts from a correct base, and drift is detectable again.
         try:
-            fence_patch_item(self.config, sku, {
-                'reprice_schedule': item.get('reprice_schedule'),
-                'price_history':    item.get('price_history', []),
-                'draft_listing':    item.get('draft_listing'),
-                **baseline_fields(now),
-            })
+            fence_patch_item(
+                self.config, sku, post_publish_fields,
+                expected_generation=projection_generation,
+            )
         except Exception as exc:
             raise self._projection_reconciliation_failure(
                 payload, sku, item,

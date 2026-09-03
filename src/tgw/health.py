@@ -184,6 +184,7 @@ def check_postgres(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     t = time.time()
     try:
+        from tgw.config import configured_ebay_environment
         from tgw.queue.state_machine import (
             dead_letter_count,
             dead_letter_errors,
@@ -192,7 +193,7 @@ def check_postgres(cfg: Dict[str, Any]) -> Dict[str, Any]:
             zero_work_queues,
         )
         dsn = cfg.get('postgres_dsn', 'dbname=state_machine user=tgw')
-        init(dsn)
+        init(dsn, configured_ebay_environment(cfg))
         depths = queue_depths()
         dl = dead_letter_count()
         dl_classified = classify_dead_letter_errors(dead_letter_errors())

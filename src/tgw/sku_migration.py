@@ -109,7 +109,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 
-from .config import location_dir, sku_dir, sku_json
+from .config import configured_ebay_environment, location_dir, sku_dir, sku_json
 from .items import atomic_write_json
 from .queue import state_machine
 from .resolver import iter_all_skus, load_item_doc
@@ -461,7 +461,9 @@ def run_migration(
 
     if not dry_run:
         ensure_sku_history_table(cfg)
-        state_machine.init(cfg['postgres_dsn'])
+        state_machine.init(
+            cfg['postgres_dsn'], configured_ebay_environment(cfg),
+        )
 
     # Build the full collision-resolved migration map upfront
     migration_map, unresolvable = build_migration_map(cfg)

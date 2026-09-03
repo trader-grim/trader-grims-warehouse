@@ -39,29 +39,43 @@ def make_fake_fence_write(itemdata_root):
     """
     def fake_fence_ebay_write(cfg, sku, ebay_offer=None, ebay_listing=None,
                               ebay_submitted=None, ebay_live=None,
-                              allow_protected=None):
+                              allow_protected=None, expected_generation=None):
         root = Path(cfg.get('itemdata_root', itemdata_root))
         p = root / sku / f'{sku}.json'
         doc = json.loads(p.read_text(encoding='utf-8'))
+        from tgw.item_mutation import item_generation
+        observed_generation = item_generation(doc)
+        if (expected_generation is not None
+                and observed_generation != expected_generation):
+            raise RuntimeError(
+                'generation conflict: '
+                f'expected {expected_generation}, observed {observed_generation}'
+            )
         for key, val in [('ebay_offer', ebay_offer), ('ebay_listing', ebay_listing),
                          ('ebay_submitted', ebay_submitted), ('ebay_live', ebay_live)]:
             if val is not None:
                 doc[key] = {**doc.get(key, {}), **val}
         p.write_text(json.dumps(doc), encoding='utf-8')
-        from tgw.item_mutation import item_generation
         return {'ok': True, 'resulting_generation': item_generation(doc)}
     return fake_fence_ebay_write
 
 
 def make_fake_patch_item(itemdata_root):
     """Return a fake fence_patch_item that merges top-level fields into item JSON."""
-    def fake_fence_patch_item(cfg, sku, fields):
+    def fake_fence_patch_item(cfg, sku, fields, *, expected_generation=None):
         root = Path(cfg.get('itemdata_root', itemdata_root))
         p = root / sku / f'{sku}.json'
         doc = json.loads(p.read_text(encoding='utf-8'))
+        from tgw.item_mutation import item_generation
+        observed_generation = item_generation(doc)
+        if (expected_generation is not None
+                and observed_generation != expected_generation):
+            raise RuntimeError(
+                'generation conflict: '
+                f'expected {expected_generation}, observed {observed_generation}'
+            )
         doc.update(fields)
         p.write_text(json.dumps(doc), encoding='utf-8')
-        from tgw.item_mutation import item_generation
         return {'ok': True, 'resulting_generation': item_generation(doc)}
     return fake_fence_patch_item
 
@@ -152,7 +166,7 @@ def make_fake_fence_write_tmp(tmp_path):
 
     def fake_fence_ebay_write(cfg, sku, ebay_offer=None, ebay_listing=None,
                               ebay_submitted=None, ebay_live=None,
-                              allow_protected=None):
+                              allow_protected=None, expected_generation=None):
         # Try cfg['itemdata_root'] first, then fall back to tmp_path
         root = cfg.get('itemdata_root') or tmp_path
         p = Path(root) / sku / f'{sku}.json'
@@ -161,12 +175,19 @@ def make_fake_fence_write_tmp(tmp_path):
             p = Path(tmp_path) / sku / f'{sku}.json'
         if p.exists():
             doc = json.loads(p.read_text(encoding='utf-8'))
+            from tgw.item_mutation import item_generation
+            observed_generation = item_generation(doc)
+            if (expected_generation is not None
+                    and observed_generation != expected_generation):
+                raise RuntimeError(
+                    'generation conflict: '
+                    f'expected {expected_generation}, observed {observed_generation}'
+                )
             for key, val in [('ebay_offer', ebay_offer), ('ebay_listing', ebay_listing),
                              ('ebay_submitted', ebay_submitted), ('ebay_live', ebay_live)]:
                 if val is not None:
                     doc[key] = {**doc.get(key, {}), **val}
             p.write_text(json.dumps(doc), encoding='utf-8')
-            from tgw.item_mutation import item_generation
             return {'ok': True, 'resulting_generation': item_generation(doc)}
         return {'ok': True}
     return fake_fence_ebay_write
@@ -177,7 +198,7 @@ def make_fake_patch_item_tmp(tmp_path):
     import json
     from pathlib import Path
 
-    def fake_fence_patch_item(cfg, sku, fields):
+    def fake_fence_patch_item(cfg, sku, fields, *, expected_generation=None):
         root = cfg.get('itemdata_root') or tmp_path
         p = Path(root) / sku / f'{sku}.json'
         if not p.exists():

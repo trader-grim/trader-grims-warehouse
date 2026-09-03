@@ -114,6 +114,43 @@ class ApiClient {
     }
   }
 
+  Future<ApiResponse<Map<String, dynamic>>> getPublishedOperatorData(
+    String endpoint,
+  ) async {
+    await ensureInitialized();
+    final uri = Uri.tryParse(endpoint);
+    if (uri == null ||
+        uri.hasScheme ||
+        uri.hasAuthority ||
+        !uri.path.startsWith('/api/')) {
+      return ApiResponse(
+        ok: false,
+        error: 'Published lookup endpoint is not a same-origin API path',
+      );
+    }
+    try {
+      final response = await _dio.getUri(uri);
+      if (response.statusCode == 200 && response.data is Map) {
+        final data = Map<String, dynamic>.from(response.data as Map);
+        if (data['ok'] == false) {
+          return ApiResponse(
+            ok: false,
+            error:
+                (data['detail'] ?? data['error'] ?? 'Lookup failed').toString(),
+          );
+        }
+        return ApiResponse(ok: true, data: data);
+      }
+      return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
+    } on DioException catch (e) {
+      final detail =
+          e.response?.data is Map ? e.response?.data['detail'] : null;
+      return ApiResponse(ok: false, error: detail?.toString() ?? e.toString());
+    } catch (e) {
+      return ApiResponse(ok: false, error: e.toString());
+    }
+  }
+
   Future<ApiResponse<Map<String, dynamic>>> executeOperatorCommand(
     String sku,
     OperatorCommandDescriptor command,
@@ -138,9 +175,8 @@ class ApiClient {
       }
       return ApiResponse(ok: false, error: 'Status: ${response.statusCode}');
     } on DioException catch (e) {
-      final detail = e.response?.data is Map
-          ? e.response?.data['detail']
-          : null;
+      final detail =
+          e.response?.data is Map ? e.response?.data['detail'] : null;
       return ApiResponse(ok: false, error: detail?.toString() ?? e.toString());
     } catch (e) {
       return ApiResponse(ok: false, error: e.toString());
@@ -494,6 +530,7 @@ class ApiClient {
   }
 
   Map<String, String> get authHeaders => {
-    if (_token != null && _token!.isNotEmpty) 'Authorization': 'Bearer $_token',
-  };
+        if (_token != null && _token!.isNotEmpty)
+          'Authorization': 'Bearer $_token',
+      };
 }

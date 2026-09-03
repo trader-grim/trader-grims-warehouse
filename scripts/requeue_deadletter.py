@@ -98,7 +98,7 @@ def main() -> int:
         queue=args.queue, error_like=args.error_like, apply=args.apply, limit=args.limit,
     )
 
-    state_machine.init('dbname=state_machine user=tgw')
+    state_machine.init('dbname=state_machine user=tgw', 'production')
 
     with state_machine._conn() as con:  # noqa: SLF001 — one-shot script, direct query
         with con.cursor() as cur:
