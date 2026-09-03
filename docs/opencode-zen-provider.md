@@ -9,17 +9,25 @@ direct provider alongside `google_direct`, `deepseek_direct`, and
 ## Why
 
 The operator's OpenCode Zen key exposes a free `deepseek-v4-flash-free` model.
-Routing TGW's small DeepSeek text jobs there:
+Routing TGW's small DeepSeek text jobs there gives a genuinely free, unmetered
+primary for work that was previously spending the pay-as-you-go DeepSeek key
+(and its OpenRouter fallback markup).
 
-- **removes the `background halted: direct-LLM provider low balance/spend`
-  health warning** — that line trips whenever `check_deepseek_balance()`
-  reports the pay-as-you-go DeepSeek balance under `$2`
-  (`quota_deepseek_low_balance_usd`). It is a **WARN**, not a hard stop —
-  `precheck()` never consults the dollar balance, and a real insufficient-balance
-  error from `api.deepseek.com` already falls back to OpenRouter automatically —
-  but it is noise on every `tgw health` and it means the fallback path is
-  paying OpenRouter's markup.
-- gives a genuinely free, unmetered primary for those jobs.
+### DeepSeek cost caps, removed 2026-09-03 (same change)
+
+By operator instruction, the `deepseek_direct` path now runs to `$0` before
+falling back to OpenRouter — no early cut-off:
+
+- `_DEFAULT_BUDGETS['llm_deepseek']` → `None` (count-only). The old `500/day`
+  synthetic call cap used to raise `QuotaBudgetExceeded` at 70% and push
+  background jobs to OpenRouter well before the key was actually spent.
+- `_DEFAULT_DEEPSEEK_LOW_BALANCE_USD` → `0.0`. `check_deepseek_balance()` still
+  reports the real number in `tgw health`, but never tags it `[LOW]` or emits
+  a `background halted` line.
+- The post-429 cooldown in `precheck()` is untouched — that is a rate-limit
+  guard, not a cost cap.
+- `llm_google` / `llm_anthropic` keep their provisional caps (no balance API,
+  real per-call cost).
 
 ## Not restricted — satisfies the requirement
 

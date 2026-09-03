@@ -45,14 +45,19 @@ _DEFAULT_INCIDENT_LOG = '/opt/TGW/var/log/quota-incidents.jsonl'
 # Daily budgets per pool — from the live getRateLimits probe (2026-07-02),
 # snapshot at /opt/TGW/var/run/ebay-rate-limits-probe.json. None = count-only
 # (no enforcement) — used where the real limit is unconfirmed (LLM free tiers).
-# llm_google/llm_deepseek/llm_anthropic: paid direct-API keys as of
-# 2026-07-08 (Dave) — these are now PROVISIONAL SAFETY CAPS, not measured
-# rate limits. See invariants.md E8 (superseded) and E9 for why: a prior
-# session's requeue script caused a runaway resubmission storm, so Dave is
-# deliberately keeping billing credit low and these caps conservative until
-# that class of bug (todo #1250) is confirmed resolved. Override per-pool
-# via `quota_budgets` in tgw-api-config.json; raise once real usage patterns
-# and loaded credit justify it — don't just delete the cap.
+# llm_google/llm_anthropic: paid direct-API keys with no balance endpoint —
+# these stay as PROVISIONAL SAFETY CAPS (invariants.md E8 superseded, E9): a
+# prior session's requeue script caused a runaway resubmission storm, so the
+# cap is the circuit-breaker until todo #1250 is confirmed resolved. Override
+# per-pool via `quota_budgets` in tgw-api-config.json.
+#
+# llm_deepseek: cap REMOVED 2026-09-03 (Dave, direct instruction) — count-only.
+# DeepSeek has a real balance endpoint and most DeepSeek-class jobs now route
+# to the free OpenCode Zen tier, so the pay-as-you-go key is allowed to run to
+# $0 (at which point _call_deepseek_direct's real API error falls back to
+# OpenRouter) rather than being cut off early at a synthetic call count. The
+# post-429 cooldown in precheck() still applies — that's a rate-limit guard,
+# not a cost cap.
 _DEFAULT_BUDGETS: Dict[str, Optional[int]] = {
     'ebay_taxonomy':      5_000,
     'ebay_taxonomy_bulk':   100,
@@ -65,7 +70,7 @@ _DEFAULT_BUDGETS: Dict[str, Optional[int]] = {
     'ebay_eps':           5_000,
     'ebay_other':          None,
     'llm_google':           300,
-    'llm_deepseek':         500,
+    'llm_deepseek':        None,
     'llm_anthropic':        100,
     'llm_openrouter':      None,
     # llm_opencode: OpenCode Zen free tier (deepseek-v4-flash-free). Unmetered,
@@ -123,10 +128,14 @@ _DEFAULT_COST_WARN_USD: Dict[str, float] = {
     'llm_anthropic': 3.00,
 }
 
-# DeepSeek is a paid pay-as-you-go balance (confirmed live: $9.83 remaining
-# 2026-07-17) — warn well before it hits $0 and calls start failing.
-# Override via `quota_deepseek_low_balance_usd` in tgw-api-config.json.
-_DEFAULT_DEEPSEEK_LOW_BALANCE_USD = 2.00
+# DeepSeek is a paid pay-as-you-go balance with a live `/user/balance`
+# endpoint. Default low-balance threshold is 0.0 (Dave, 2026-09-03): the key
+# is meant to run to $0 before falling back to OpenRouter, so `low` never
+# trips and `tgw health` shows the balance figure without a [LOW] tag or a
+# "background halted" line. `check_deepseek_balance` still reports the real
+# number. Set `quota_deepseek_low_balance_usd` in tgw-api-config.json to
+# re-arm the early warning if a top-up cushion is wanted again.
+_DEFAULT_DEEPSEEK_LOW_BALANCE_USD = 0.0
 
 
 def estimate_cost_usd(model: str, prompt_tokens: Optional[int],

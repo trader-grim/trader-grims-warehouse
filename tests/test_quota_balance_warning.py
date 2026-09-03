@@ -184,6 +184,9 @@ class TestBalanceStatus:
 
 class TestHealthCheckQuotaWiring:
     def test_check_quota_surfaces_deepseek_low_balance_as_warn(self):
+        # Default threshold is 0.0 (the key is meant to run to $0), so the
+        # early-warning must be explicitly re-armed to test the health wiring.
+        cfg = _cfg(quota_deepseek_low_balance_usd=2.0)
         with mock.patch('tgw.quota.status', return_value={'incidents_today': 0, 'pools': {}}), \
              mock.patch('tgw.apis.secrets.get_api_key',
                        side_effect=lambda p: 'sk-test' if p in ('openrouter', 'deepseek') else (_ for _ in ()).throw(RuntimeError())), \
@@ -197,10 +200,33 @@ class TestHealthCheckQuotaWiring:
                                                'limit_remaining': 5}})
             mget.side_effect = _side_effect
             from tgw.health import check_quota
-            result = check_quota({})
+            result = check_quota(cfg)
         assert result['warn'] is True
         assert 'deepseek' in result['detail'].lower()
         assert result['balance']['deepseek']['low'] is True
+
+    def test_check_quota_does_not_warn_on_low_deepseek_balance_by_default(self):
+        # Cap removed 2026-09-03: a near-empty DeepSeek balance is reported,
+        # not flagged — no [LOW], no "background halted" line.
+        with mock.patch('tgw.quota.status', return_value={'incidents_today': 0, 'pools': {}}), \
+             mock.patch('tgw.apis.secrets.get_api_key',
+                       side_effect=lambda p: 'sk-test' if p in ('openrouter', 'deepseek') else (_ for _ in ()).throw(RuntimeError())), \
+             mock.patch('requests.get') as mget, \
+             mock.patch('tgw.quota.today_cost_usd_by_provider', return_value={}):
+            def _side_effect(url, **kwargs):
+                if 'deepseek' in url:
+                    return _FakeResponse({'is_available': True,
+                                          'balance_infos': [{'currency': 'USD',
+                                                              'total_balance': '0.10'}]})
+                return _FakeResponse({'data': {'limit': 5, 'limit_reset': 'daily',
+                                               'limit_remaining': 5}})
+            mget.side_effect = _side_effect
+            from tgw.health import check_quota
+            result = check_quota({})
+        assert result['ok'] is True
+        assert result.get('warn') is not True
+        assert result['balance']['deepseek']['low'] is False
+        assert result['balance']['deepseek']['total_balance_usd'] == 0.10
 
     def test_check_quota_stays_green_when_all_providers_healthy(self):
         with mock.patch('tgw.quota.status', return_value={'incidents_today': 0, 'pools': {}}), \
