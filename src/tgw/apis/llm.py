@@ -1,8 +1,10 @@
 """
 tgw.apis.llm — Unified LLM/vision model dispatcher.
 
-Routes calls to OpenRouter or local Ollama based on the models config
-(tgw-models.json, loaded into cfg['models']).
+Routes calls to OpenRouter, local Ollama, or a direct provider gateway
+(google_direct, deepseek_direct, anthropic_direct, opencode) based on the
+models config (tgw-models.json, loaded into cfg['models']). Every direct
+path falls back to OpenRouter automatically on any failure.
 
 Usage:
     from tgw.apis.llm import call_model, get_task_model
@@ -209,6 +211,35 @@ def call_model(
                 log.warning(
                     'deepseek_direct unavailable for task %r (%s) — falling back to '
                     'openrouter/%s: %s', task, model, fallback_model, ds_exc,
+                )
+                text, usage = _call_openrouter(
+                    fallback_model, system_prompt, user_prompt, cfg,
+                    img_b64_list=_images, messages=messages,
+                )
+        elif provider == 'opencode':
+            from tgw import quota
+
+            oc_exc: Optional[Exception] = None
+            try:
+                quota.precheck(cfg, 'llm_opencode')
+            except quota.QuotaBudgetExceeded as exc:
+                oc_exc = exc
+            if oc_exc is None:
+                try:
+                    text, usage = _call_opencode(
+                        model, system_prompt, user_prompt, cfg, messages=messages,
+                    )
+                except Exception as exc:
+                    oc_exc = exc
+            if oc_exc is not None:
+                # OpenCode Zen's free ids carry a '-free' suffix the OpenRouter
+                # catalog doesn't (e.g. 'deepseek-v4-flash-free' ->
+                # 'deepseek/deepseek-v4-flash') — strip it for the fallback.
+                base_id = model[:-5] if model.endswith('-free') else model
+                fallback_model = base_id if base_id.startswith('deepseek/') else f'deepseek/{base_id}'
+                log.warning(
+                    'opencode unavailable for task %r (%s) — falling back to '
+                    'openrouter/%s: %s', task, model, fallback_model, oc_exc,
                 )
                 text, usage = _call_openrouter(
                     fallback_model, system_prompt, user_prompt, cfg,
@@ -479,6 +510,88 @@ def _call_deepseek_direct(
         quota.record(cfg, 'llm_deepseek')
         if resp.status_code == 429:
             quota.record_429(cfg, 'llm_deepseek', model)
+        if resp.status_code == 429 and attempt < max_retries - 1:
+            time.sleep(15 * (attempt + 1))
+            continue
+        break
+
+    resp.raise_for_status()
+    body = resp.json()
+    text = body['choices'][0]['message']['content']
+    raw_usage = body.get('usage') or {}
+    usage = {
+        'prompt_tokens':     raw_usage.get('prompt_tokens'),
+        'completion_tokens': raw_usage.get('completion_tokens'),
+        'total_tokens':      raw_usage.get('total_tokens'),
+    }
+    return text, usage
+
+
+def _load_opencode_key(cfg: Dict[str, Any]) -> str:
+    """Load the OpenCode Zen key via the single-facility OPENCODE_API_KEY env
+    var (tgw.apis.secrets.get_api_key) — see secrets_root/tgw.env."""
+    from tgw.apis.secrets import get_api_key
+
+    return get_api_key('opencode')
+
+
+def _call_opencode(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    cfg: Dict[str, Any],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    max_retries: int = 3,
+) -> tuple:
+    """Call OpenCode Zen's OpenAI-compatible chat/completions gateway directly.
+
+    *model* is a bare Zen model id, e.g. 'deepseek-v4-flash-free'. Zen routes
+    DeepSeek through https://opencode.ai/zen/v1/chat/completions with Bearer
+    auth — the same request shape as _call_deepseek_direct, different host/key.
+
+    Why this provider exists (Dave, 2026-09-03): the free
+    'deepseek-v4-flash-free' id on the operator's OpenCode Zen key is
+    **unmetered — no prepaid balance to deplete, no documented rate cap** — so
+    it removes the 'background halted: direct-LLM provider low balance' stall
+    that gates pm_intake and the helper jobs. Its only limit versus the native
+    DeepSeek key is context length: 256k tokens (native v4-flash is 1M). Every
+    TGW task routed here is a small text transform — pm_intake (a truncated
+    inbox note), suggestions_classify (one string), simple_llm_jobs
+    (bounded summarize/classify/extract), Aider edits (repo-map + a few files)
+    — all far below 256k, so the cap is not a real restriction for any of
+    them. No image support, same as _call_deepseek_direct.
+
+    Raises on any failure; call_model() catches and falls back to OpenRouter
+    (deepseek/<model without -free>). Returns (text, usage_dict).
+    """
+    api_key = _load_opencode_key(cfg)
+
+    if messages is not None:
+        msg_list: Any = messages
+    else:
+        msg_list = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user',   'content': user_prompt},
+        ]
+
+    payload = {'model': model, 'messages': msg_list}
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json',
+    }
+
+    from tgw import quota
+
+    for attempt in range(max_retries):
+        resp = requests.post(
+            'https://opencode.ai/zen/v1/chat/completions',
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
+        quota.record(cfg, 'llm_opencode')
+        if resp.status_code == 429:
+            quota.record_429(cfg, 'llm_opencode', model)
         if resp.status_code == 429 and attempt < max_retries - 1:
             time.sleep(15 * (attempt + 1))
             continue
