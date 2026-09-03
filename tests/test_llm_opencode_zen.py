@@ -54,12 +54,12 @@ class TestCallOpencode:
         monkeypatch.setattr(llm_mod.requests, 'post', _fake_post)
         monkeypatch.setattr(llm_mod, '_call_openrouter',
                             lambda *a, **k: or_calls.append(1) or ('', {}))
-        monkeypatch.setattr(llm_mod, '_load_opencode_key', lambda cfg: 'sk-test-zen')
+        monkeypatch.setattr(llm_mod, '_load_opencode_zen_key', lambda cfg: 'sk-test-zen')
         monkeypatch.setattr(llm_mod, '_record_usage', lambda *a, **k: None)
 
         text = llm_mod.call_model(
             'simple_llm_jobs', 'sys', 'user', _cfg(tmp_path),
-            provider='opencode', model='deepseek-v4-flash-free',
+            provider='opencode_zen', model='deepseek-v4-flash-free',
         )
 
         assert text == 'zen says hi'
@@ -70,7 +70,7 @@ class TestCallOpencode:
 
     def test_failure_falls_back_to_openrouter_stripping_free_suffix(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            llm_mod, '_call_opencode',
+            llm_mod, '_call_opencode_zen',
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError('zen 500')),
         )
         or_calls = []
@@ -82,7 +82,7 @@ class TestCallOpencode:
 
         text = llm_mod.call_model(
             'pm_intake', 'sys', 'user', _cfg(tmp_path),
-            provider='opencode', model='deepseek-v4-flash-free',
+            provider='opencode_zen', model='deepseek-v4-flash-free',
         )
 
         assert text == 'fallback text'
@@ -90,7 +90,7 @@ class TestCallOpencode:
 
     def test_fallback_does_not_double_prefix_an_already_qualified_model(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            llm_mod, '_call_opencode',
+            llm_mod, '_call_opencode_zen',
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError('boom')),
         )
         or_calls = []
@@ -102,25 +102,25 @@ class TestCallOpencode:
 
         llm_mod.call_model(
             'pm_intake', 'sys', 'user', _cfg(tmp_path),
-            provider='opencode', model='deepseek/deepseek-v4-flash',
+            provider='opencode_zen', model='deepseek/deepseek-v4-flash',
         )
 
         assert or_calls == ['deepseek/deepseek-v4-flash']
 
-    def test_get_task_model_routes_a_task_to_opencode(self, tmp_path):
+    def test_get_task_model_routes_a_task_to_opencode_zen(self, tmp_path):
         cfg = {'models': {
-            'pm_intake': {'provider': 'opencode', 'model': 'deepseek-v4-flash-free'},
+            'pm_intake': {'provider': 'opencode_zen', 'model': 'deepseek-v4-flash-free'},
         }}
         provider, model = llm_mod.get_task_model(cfg, 'pm_intake')
-        assert (provider, model) == ('opencode', 'deepseek-v4-flash-free')
+        assert (provider, model) == ('opencode_zen', 'deepseek-v4-flash-free')
 
 
 class TestOpencodeQuotaPool:
-    def test_llm_opencode_pool_is_count_only_never_halts_background(self, tmp_path):
+    def test_llm_opencode_zen_pool_is_count_only_never_halts_background(self, tmp_path):
         from tgw import quota
 
         cfg = _cfg(tmp_path)
         # count-only pool: recording is fine and precheck never raises
-        quota.record(cfg, 'llm_opencode', 5)
-        quota.precheck(cfg, 'llm_opencode')  # must not raise
-        assert quota._budgets(cfg).get('llm_opencode') is None
+        quota.record(cfg, 'llm_opencode_zen', 5)
+        quota.precheck(cfg, 'llm_opencode_zen')  # must not raise
+        assert quota._budgets(cfg).get('llm_opencode_zen') is None
