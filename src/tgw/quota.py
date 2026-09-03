@@ -68,6 +68,11 @@ _DEFAULT_BUDGETS: Dict[str, Optional[int]] = {
     'llm_deepseek':         500,
     'llm_anthropic':        100,
     'llm_openrouter':      None,
+    # llm_opencode: OpenCode Zen free tier (deepseek-v4-flash-free). Unmetered,
+    # no prepaid balance, no documented rate cap (Dave, 2026-09-03) — count-only,
+    # like llm_openrouter. Deliberately not a low-balance pool: routing a task
+    # here is how you get OUT of the 'background halted' stall, not into it.
+    'llm_opencode':       None,
 }
 
 _DEFAULT_HALT_FRACTION = 0.70

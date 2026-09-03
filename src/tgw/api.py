@@ -1029,7 +1029,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", default=None, help="vision model ID (default: from tgw-models.json's 'alt_text' task config)")
     p.add_argument(
         "--provider", default=None,
-        choices=["openrouter", "ollama", "google_direct", "deepseek_direct", "anthropic_direct"],
+        choices=["openrouter", "ollama", "google_direct", "deepseek_direct", "anthropic_direct", "opencode"],
         help="provider (default: from tgw-models.json's 'alt_text' task config)",
     )
     p.add_argument("--dry-run", action="store_true", help="show what would happen without calling the model or writing files")
