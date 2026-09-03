@@ -63,17 +63,22 @@ _ALLOWLIST = {
     (_SRC / "tgw" / "workers" / "ai_identify.py", 713),  # (a) inventory_record.set_inventory_fields() patch write
     (_SRC / "tgw" / "workers" / "ai_identify.py", 734),  # (a) ensure_required_category_fields() patch write
     (_SRC / "tgw" / "workers" / "ai_identify.py", 829),  # (a) accessor patch write to fence payload
-    # Refreshed 2026-09-03 for the todo-1961 operator-stream merge: branch
-    # operator/command content merged into http_server.py, ai_identify.py,
-    # ebay_draft.py and operator_objects.py shifted every site below; each was
-    # re-verified against the merged tree and no direct envelope accessor
-    # bypass exists — the entries are the same reviewed code at new positions
-    # plus the operator-object display read of the revision proposal delta.
+    # Refreshed 2026-09-03 for the todo-1961 operator-stream merge (and again
+    # in remediation generation 1, which collapsed a duplicated
+    # _apply_patch_locked / _apply_ebay_write_locked pair and folded the
+    # category-context condition projection back onto the shared helper —
+    # shifting the http_server.py sites below without changing their code):
+    # branch operator/command content merged into http_server.py,
+    # ai_identify.py, ebay_draft.py and operator_objects.py shifted every site
+    # below; each was re-verified against the merged tree and no direct
+    # envelope accessor bypass exists — the entries are the same reviewed code
+    # at new positions plus the operator-object display read of the revision
+    # proposal delta.
     (_SRC / "tgw" / "http_server.py", 2657),  # (c) todo #1464 envelope-shape gate — is_envelope() check only (Set A)
     (_SRC / "tgw" / "http_server.py", 2664),  # (c) todo #1464 envelope-shape gate — is_envelope() check only (Set B)
-    (_SRC / "tgw" / "http_server.py", 4232),  # (b) accept_proposals revision_draft.delta — different dict, fed to set_ebay_aspects()
-    (_SRC / "tgw" / "http_server.py", 4233),  # (a) accept_proposals — set_ebay_aspects() accessor call on the proposal dict
-    (_SRC / "tgw" / "http_server.py", 9443),  # (b) revision_draft.delta proposal read for item-detail display
+    (_SRC / "tgw" / "http_server.py", 4193),  # (b) accept_proposals revision_draft.delta — different dict, fed to set_ebay_aspects()
+    (_SRC / "tgw" / "http_server.py", 4194),  # (a) accept_proposals — set_ebay_aspects() accessor call on the proposal dict
+    (_SRC / "tgw" / "http_server.py", 9385),  # (b) revision_draft.delta proposal read for item-detail display
     (_SRC / "tgw" / "operator_objects.py", 1492),  # (b) revision_draft.delta proposal read (operator-object proposed-aspect view; read-only builder)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)

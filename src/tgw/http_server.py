@@ -3321,20 +3321,6 @@ def _apply_patch_locked(
     *,
     expected_generation: Optional[str] = None,
 ) -> Tuple[List[str], str]:
-    _, journal_root = _operator_mutation_roots()
-    with item_write_lock(journal_root, json_path.stem):
-        return _apply_patch_locked(
-            json_path,
-            fields,
-            _skip_catalog_upsert=_skip_catalog_upsert,
-        )
-
-
-def _apply_patch_locked(
-    json_path: "Path",
-    fields: Dict[str, Any],
-    _skip_catalog_upsert: bool = False,
-) -> Tuple[List[str], str]:
     """Core item patch: deep-merge dict fields, write atomically, schedule rebuild.
 
     Fields with value None are deleted from the document.
@@ -3598,29 +3584,6 @@ def _apply_ebay_write(
     allow_protected: Optional[List[str]] = None,
     _item_lock_held: bool = False,
 ) -> Tuple[List[str], str]:
-    _, journal_root = _operator_mutation_roots()
-    with item_write_lock(journal_root, sku):
-        return _apply_ebay_write_locked(
-            json_path,
-            sku,
-            ebay_offer=ebay_offer,
-            ebay_listing=ebay_listing,
-            ebay_submitted=ebay_submitted,
-            ebay_live=ebay_live,
-            allow_protected=allow_protected,
-        )
-
-
-def _apply_ebay_write_locked(
-    json_path: "Path",
-    sku: str,
-    *,
-    ebay_offer: Optional[Dict[str, Any]] = None,
-    ebay_listing: Optional[Dict[str, Any]] = None,
-    ebay_submitted: Optional[Dict[str, Any]] = None,
-    ebay_live: Optional[Dict[str, Any]] = None,
-    allow_protected: Optional[List[str]] = None,
-) -> Tuple[List[str], str]:
     """eBay block deep-merge with field protection — same logic as POST /ebay-write.
 
     Protected sub-fields (price_comps, staged_at, photo_verify) are restored
@@ -3631,10 +3594,8 @@ def _apply_ebay_write_locked(
     allow_protected to intentionally refresh/clear it.
     """
     if not _item_lock_held:
-        with item_mutation_lock(
-            journal_root=_item_mutation_journal_root(json_path),
-            sku=sku,
-        ):
+        _, journal_root = _operator_mutation_roots()
+        with item_write_lock(journal_root, sku):
             return _apply_ebay_write(
                 json_path,
                 sku,
@@ -5140,10 +5101,11 @@ def ebay_category_context(category_id: str, current_condition: str = "") -> Dict
     # "Used" out into three invented grades — USED_EXCELLENT/GOOD/ACCEPTABLE — none
     # of which eBay actually allows for categories with only a single "Used" bucket)
     conditions: List[Dict[str, str]] = []
-    # main-stream condition policy: conditions.py (resolved to main) exposes
-    # condition_policy_for_category() -> {recognized, item_condition_required,
-    # required_flag_valid}; the branch's item_condition_required_for_category
-    # helper was removed on main, so the policy-dict form is authoritative.
+    # conditions.py exposes both the full policy dict (condition_policy_for_category
+    # -> {recognized, item_condition_required, required_flag_valid}) and the
+    # item_condition_required_for_category flag accessor.  The resolved
+    # requirement flag drives the editor's condition selector; the policy dict
+    # supplies the recognized/flag-valid projection the browser needs.
     category_recognized = False
     item_condition_required: Optional[bool] = None
     required_flag_valid = False
@@ -5151,15 +5113,24 @@ def ebay_category_context(category_id: str, current_condition: str = "") -> Dict
         from .apis.ebay.conditions import (
             allowed_conditions_for_category,
             condition_policy_for_category,
+            item_condition_required_for_category,
         )
 
         try:
             policy = condition_policy_for_category(_cfg, category_id)
             category_recognized = policy["recognized"]
-            item_condition_required = policy["item_condition_required"]
             required_flag_valid = policy["required_flag_valid"]
         except Exception:
             pass
+        try:
+            item_condition_required = item_condition_required_for_category(_cfg, category_id)
+        except Exception:
+            item_condition_required = None
+        if not isinstance(item_condition_required, bool):
+            item_condition_required = None
+        required_flag_valid = required_flag_valid or isinstance(
+            item_condition_required, bool
+        )
 
         seen: set = set()
         for c in allowed_conditions_for_category(_cfg, category_id):
@@ -5242,7 +5213,6 @@ def ebay_category_context(category_id: str, current_condition: str = "") -> Dict
         "ok": True,
         "category_id": category_id,
         "conditions": conditions,
-        "item_condition_required": item_condition_required,
         "condition_remap": condition_remap,
         "category_recognized": category_recognized,
         "item_condition_required": item_condition_required,
@@ -6445,7 +6415,7 @@ _CATEGORY_CONDITION_EXPLICIT_CHOICE = """    if(sel&&Array.isArray(d.conditions)
       var emptyLabel=d.item_condition_required===false?'No condition — not required for this category':'— select —';
       var html='<option value=""'+(!curVal?' selected':'')+'>'+emptyLabel+'</option>';
       if(curVal&&!stillValid){
-        html+='<option value="'+curVal+'" selected disabled>'+curVal+' — not valid for this category</option>';
+        html+='<option value="'+curVal+'" selected disabled>'+curVal+' — not valid for this category, please fix</option>';
       }
       if(policyResolved&&d.item_condition_required!==false){
         d.conditions.forEach(function(c){
@@ -6457,7 +6427,7 @@ _CATEGORY_CONDITION_EXPLICIT_CHOICE = """    if(sel&&Array.isArray(d.conditions)
       flagFieldInvalid(sel,!policyResolved||!!(curVal&&!stillValid));
       var cn=document.getElementById('condition-policy-note');
       var nl=d.conditions.length;
-      if(cn)cn.textContent=!policyResolved?'Condition policy unresolved — retry before selecting a listing condition':nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' — suggested same-or-worse choice: '+d.condition_remap.label:'')+((curVal&&!stillValid)?(d.item_condition_required===false?' — choose the blank option to remove the prior condition':' — choose a valid condition explicitly'):'');
+      if(cn)cn.textContent=!policyResolved?'Condition policy unresolved — retry before selecting a listing condition':nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' — condition remap available — suggested same-or-worse choice: '+d.condition_remap.label:'')+((curVal&&!stillValid)?(d.item_condition_required===false?' — choose the blank option to remove the prior condition':' — choose a valid condition explicitly'):'');
     }
 """
 _CATEGORY_CONTEXT_IIFE = (
@@ -6468,34 +6438,6 @@ _CATEGORY_CONTEXT_IIFE = (
     .replace(
         "if(!catId){if(loading)loading.textContent='No category.';return;}",
         "if(!catId){flagFieldInvalid('dl-cat-search',true);if(loading){loading.textContent='Category required before item specifics can be checked.';loading.style.color='#e88';}return;}",
-    )
-    .replace(
-        """      if(curVal&&!stillValid){
-        if(d.condition_remap){
-          curVal=d.condition_remap.enum;
-          html=html.replace('<option value="'+curVal+'"','<option value="'+curVal+'" selected');
-        }else{
-          html+='<option value="'+curVal+'" selected>'+curVal+' \\u2014 not valid for this category, please fix</option>';
-        }
-      }
-      sel.innerHTML=html;
-      flagFieldInvalid(sel,!!(curVal&&!stillValid&&!d.condition_remap));
-      if(d.condition_remap&&curVal===d.condition_remap.enum){
-        fetch('/api/items/'+window._ITEM_SKU,{method:'PATCH',
-          headers:authHeaders({'Content-Type':'application/json'}),
-          body:JSON.stringify({fields:{draft_listing:{condition_enum:curVal}}})});
-      }
-      var cn=document.getElementById('condition-policy-note');
-      var nl=d.conditions.length;
-      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 category changed, condition auto-matched to nearest same-or-worse: '+d.condition_remap.label:'')+((curVal&&!stillValid&&!d.condition_remap)?' \\u2014 current value invalid, please re-select':'');""",
-        """      if(curVal&&!stillValid){
-        html+='<option value="'+curVal+'" selected disabled>'+curVal+' \\u2014 not valid for this category, please fix</option>';
-      }
-      sel.innerHTML=html;
-      flagFieldInvalid(sel,!!(curVal&&!stillValid));
-      var cn=document.getElementById('condition-policy-note');
-      var nl=d.conditions.length;
-      if(cn)cn.textContent=nl+(nl===1?' condition':' conditions')+' allowed'+(d.condition_remap?' \\u2014 condition remap available: '+d.condition_remap.label+'; select it explicitly':'')+((curVal&&!stillValid)?' \\u2014 current value invalid, please re-select or clear':'');""",
     )
     .replace(
         "var html='';\n    d.aspects.forEach",

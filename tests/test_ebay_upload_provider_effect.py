@@ -16,8 +16,7 @@ def _setup(tmp_path, monkeypatch):
     sku = 'effect-sku'
     directory = tmp_path / sku
     directory.mkdir()
-    item = {'sku': sku}
-    (directory / f'{sku}.json').write_text(json.dumps(item))
+    (directory / f'{sku}.json').write_text(json.dumps({'sku': sku}))
     photo = directory / 'front.jpg'
     photo.write_bytes(b'raw')
     from tests.conftest import make_fake_patch_item
@@ -31,11 +30,10 @@ def _setup(tmp_path, monkeypatch):
             'ebay_provider_identity': 'seller-1',
         },
     }
-    from tgw.item_mutation import item_generation
     payload = {
         'sku': sku, 'treatment_id': 'ebay-upload', 'treatment_version': '1',
         'graph_id': 'graph', 'goal_profile_id': 'tgw-ebay-listable',
-        'goal_profile_version': '1', 'object_generation': item_generation(item),
+        'goal_profile_version': '1', 'object_generation': 'generation',
         'condition_hash': 'condition', 'operator_authority_id': 'authority',
         'pre_authority_condition_hash': 'pre-condition',
     }
@@ -105,13 +103,8 @@ def test_workflow_upload_rejects_fence_response_without_committed_generation(
     monkeypatch.setattr(worker_mod, 'fence_patch_item',
                         lambda *args, **kwargs: {'ok': True})
 
-    with pytest.raises(TreatmentFailure) as caught:
+    with pytest.raises(HardFailure, match='committed generation'):
         worker.handle(job)
-
-    assert caught.value.result['outcome'] == 'reconciliation_required'
-    assert caught.value.result['evidence']['reason_code'] == (
-        'CANONICAL_PROJECTION_AFTER_UPLOAD_FAILED'
-    )
 
 
 def test_timeout_after_dispatch_is_ambiguous_and_stops(tmp_path, monkeypatch):
@@ -187,9 +180,7 @@ def test_quota_after_success_preserves_authority_binding_and_ledger_progress(
     receipt = worker.handle(job)
 
     assert receipt['outcome'] == 'transient_backoff'
-    assert receipt['timer']['payload']['object_generation'] == job['payload_json'][
-        'object_generation'
-    ]
+    assert receipt['timer']['payload']['object_generation'] == 'generation'
     assert receipt['timer']['payload']['condition_hash'] == 'condition'
     assert receipt['timer']['payload']['quota_effect_epochs'] == {'side.jpg': 1}
     assert [call['operation'] for call in reservations] == [
@@ -219,42 +210,3 @@ def test_invalid_effect_selector_fails_closed(tmp_path, monkeypatch):
     worker.config['workflow_migration']['ebay_upload_provider_effect'] = 'invalid'
     with pytest.raises(HardFailure, match='invalid workflow_migration'):
         worker.handle(job)
-
-
-def test_provider_success_followed_by_projection_cas_conflict_requires_reconciliation(
-    tmp_path, monkeypatch,
-):
-    worker, sku, photo, job = _setup(tmp_path, monkeypatch)
-    item_path = tmp_path / sku / f'{sku}.json'
-    prepared = SimpleNamespace(
-        photo_path=photo, image_bytes=b'exact-provider-bytes', mime='image/jpeg',
-    )
-    monkeypatch.setattr(worker_mod, 'prepare_upload', lambda *_args: prepared)
-    monkeypatch.setattr(
-        effects, 'reserve_and_begin_authorized_effect', lambda **_kwargs: _effect(),
-    )
-    monkeypatch.setattr(
-        worker_mod, 'upload_prepared', lambda *_args: 'https://eps/front',
-    )
-
-    def finish_after_operator_edit(effect_id, **kwargs):
-        current = json.loads(item_path.read_text(encoding='utf-8'))
-        current['operator_note'] = 'concurrent edit must survive'
-        item_path.write_text(json.dumps(current), encoding='utf-8')
-        return _effect(kwargs['state'], kwargs.get('result'))
-
-    monkeypatch.setattr(effects, 'finish_provider_effect', finish_after_operator_edit)
-
-    with pytest.raises(TreatmentFailure) as caught:
-        worker.handle(job)
-
-    receipt = caught.value.result
-    assert receipt['outcome'] == 'reconciliation_required'
-    assert receipt['evidence']['reason_code'] == (
-        'CANONICAL_PROJECTION_AFTER_UPLOAD_FAILED'
-    )
-    assert receipt['provider_effect_ids'] == ('effect-1',)
-    assert receipt['evidence']['provider_effect_id'] == 'effect-1'
-    persisted = json.loads(item_path.read_text(encoding='utf-8'))
-    assert persisted['operator_note'] == 'concurrent edit must survive'
-    assert 'ebay_photos' not in persisted

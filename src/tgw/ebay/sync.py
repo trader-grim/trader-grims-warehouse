@@ -32,8 +32,8 @@ import requests
 from tgw.apis.ebay.client import ebay_get, ebay_post, ebay_put
 from tgw.apis.ebay.conditions import (
     allowed_conditions_for_category,
-    condition_policy_for_category,
     is_known_condition_enum,
+    item_condition_required_for_category,
 )
 from tgw.config import configured_ebay_environment
 from tgw.ebay.draft_specifics import get_ebay_aspects
@@ -628,10 +628,10 @@ def validate_listing_condition_for_stage(
     category_id = str(draft.get('category_id') or '').strip()
     selected = str(draft.get('condition_enum') or '').strip()
     try:
-        # conditions.py (main stream) exposes the policy dict; the legacy
-        # item_condition_required_for_category helper was removed on main.
-        policy = condition_policy_for_category(cfg, category_id)
-        required = policy["item_condition_required"]
+        # conditions.py exposes both the full policy dict and the
+        # item_condition_required_for_category flag accessor; this path only
+        # needs the requirement flag plus the allowed-enum set.
+        required = item_condition_required_for_category(cfg, category_id)
         allowed = allowed_conditions_for_category(cfg, category_id)
     except Exception as exc:
         raise ValueError(

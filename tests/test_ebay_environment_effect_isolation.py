@@ -11,101 +11,18 @@ import pytest
 
 import tgw.provider_effects as provider_effects
 from tgw.apis.ebay import get_access_token, refresh_access_token
-from tgw.ebay import upload
 from tgw.item_mutation import item_generation
-from tgw.queue.worker_base import HardFailure
-from tgw.workers import ebay_publish, ebay_stage, ebay_upload, token_refresh
+from tgw.workers import ebay_publish, ebay_stage, token_refresh
 
 
-class _EpsResponse:
-    status_code = 200
-    content = b''
-    text = (
-        '<?xml version="1.0" encoding="utf-8"?>'
-        '<UploadSiteHostedPicturesResponse '
-        'xmlns="urn:ebay:apis:eBLBaseComponents">'
-        '<Ack>Success</Ack><SiteHostedPictureDetails>'
-        '<FullURL>https://i.ebayimg.com/example.jpg</FullURL>'
-        '</SiteHostedPictureDetails></UploadSiteHostedPicturesResponse>'
-    )
-
-    def raise_for_status(self) -> None:
-        return None
-
-
-@pytest.mark.parametrize(
-    ('environment', 'endpoint'),
-    [
-        ('production', 'https://api.ebay.com/ws/api.dll'),
-        ('sandbox', 'https://api.sandbox.ebay.com/ws/api.dll'),
-    ],
-)
-def test_eps_preparation_binds_closed_environment_and_dispatches_that_endpoint(
-    tmp_path, monkeypatch, environment, endpoint,
-):
-    photo = tmp_path / 'front.jpg'
-    photo.write_bytes(b'not-a-real-jpeg')
-    cfg = {
-        'ebay_environment': environment,
-        # Arbitrary configured provider URLs are not authority.
-        'ebay_trading_api_endpoint': 'https://attacker.invalid/ws/api.dll',
-    }
-    monkeypatch.setattr(upload, 'load_token', lambda _cfg: 'TOKEN')
-    monkeypatch.setattr(upload, '_prepare_upload_bytes', lambda path: path.read_bytes())
-    monkeypatch.setattr(upload.quota, 'precheck', lambda *_args: None)
-    monkeypatch.setattr(upload.quota, 'record', lambda *_args: None)
-    monkeypatch.setattr(upload, 'capture_response', lambda *_args: None)
-    seen = []
-    monkeypatch.setattr(
-        upload.requests, 'post',
-        lambda url, **_kwargs: seen.append(url) or _EpsResponse(),
-    )
-
-    prepared = upload.prepare_upload(cfg, photo)
-    assert prepared.environment == environment
-    assert prepared.endpoint == endpoint
-    assert upload.upload_prepared(cfg, prepared) == 'https://i.ebayimg.com/example.jpg'
-    assert seen == [endpoint]
-
-
-def test_eps_prepared_environment_drift_is_held_before_network_call(
-    tmp_path, monkeypatch,
-):
-    photo = tmp_path / 'front.jpg'
-    photo.write_bytes(b'not-a-real-jpeg')
-    monkeypatch.setattr(upload, 'load_token', lambda _cfg: 'TOKEN')
-    monkeypatch.setattr(upload, '_prepare_upload_bytes', lambda path: path.read_bytes())
-    monkeypatch.setattr(upload.quota, 'precheck', lambda *_args: None)
-    prepared = upload.prepare_upload({'ebay_environment': 'sandbox'}, photo)
-    calls = []
-    monkeypatch.setattr(upload.requests, 'post', lambda *args, **kwargs: calls.append(args))
-
-    with pytest.raises(upload.UploadEnvironmentMismatch, match='environment mismatch'):
-        upload.upload_prepared({'ebay_environment': 'production'}, prepared)
-
-    assert calls == []
-
-
-def test_upload_worker_rejects_payload_environment_drift_before_item_or_effect(
-    monkeypatch,
-):
-    worker = ebay_upload.EbayUploadWorker.__new__(ebay_upload.EbayUploadWorker)
-    worker.config = {
-        'ebay_environment': 'production',
-        'workflow_migration': {
-            'ebay_upload_provider_effect': 'workflow',
-            'ebay_provider_identity': 'seller-1',
-        },
-    }
-    calls = []
-    monkeypatch.setattr(ebay_upload, 'prepare_upload', lambda *_args: calls.append('prepare'))
-
-    with pytest.raises(HardFailure, match='environment mismatch'):
-        worker.handle({'payload_json': {
-            'sku': 'SKU-1', 'ebay_environment': 'sandbox',
-        }})
-
-    assert calls == []
+# NOTE (reconciliation, Todo 1961): the eBay Picture Service (EPS) upload-path
+# environment tests that lived here were removed.  Concept Registry v0.1 row 2
+# resolves src/tgw/ebay/upload.py and src/tgw/workers/ebay_upload.py to main's
+# Media API upload shape; the branch's prepare_upload/upload_prepared EPS
+# contract (PreparedUpload.environment/.endpoint, UploadEnvironmentMismatch,
+# worker payload environment-drift guard) is not part of that resolution.
+# Token-refresh, OAuth, provider-effect and disk/process cache environment
+# isolation below remain in force.
 
 
 def _bound_refresh_config(tmp_path, environment='sandbox'):

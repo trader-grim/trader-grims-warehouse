@@ -841,6 +841,7 @@ def test_update_dispatch_requires_fresh_stage_even_when_item_is_published(monkey
             operator_identity="operator:test",
             surface="http:operator-object:update-item",
             provider_identity="ebay:account",
+            item_document={"sku": "SKU-1"},
         )
     )
 

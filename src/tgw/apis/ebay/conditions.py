@@ -30,9 +30,10 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from tgw.apis.ebay.client import ebay_get
+from tgw.config import ebay_cache_filename
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +71,31 @@ CONDITION_RANK: Dict[str, int] = {
     '5000': 7,   # Good
     '6000': 8,   # Acceptable
     '7000': 9,   # For Parts or Not Working
+}
+
+# Stable TGW inventory vocabulary.  Provider descriptions vary by category
+# (for example conditionId 3000 may be labelled "Used" or "Pre-Owned"), but
+# the inventory record is offer-independent.  A TGW category group's choices
+# are the union of these stable labels for every eBay category in that group;
+# the selected listing category is narrowed separately by the provider policy.
+CONDITION_ID_TO_INVENTORY_LABEL: Dict[str, str] = {
+    '1000': 'New',
+    '1500': 'New Other',
+    '1750': 'New With Defects',
+    '2000': 'Certified Refurbished',
+    '2010': 'Excellent Refurbished',
+    '2020': 'Very Good Refurbished',
+    '2030': 'Good Refurbished',
+    '2500': 'Seller Refurbished',
+    '2750': 'Like New',
+    '2990': 'Pre-loved Refurbished',
+    '3000': 'Used',
+    '3010': 'Generic Refurbished',
+    '3500': 'Manufacturer Refurbished',
+    '4000': 'Very Good',
+    '5000': 'Good',
+    '6000': 'Acceptable',
+    '7000': 'For Parts or Not Working',
 }
 
 # conditionId → Inventory API enum string
@@ -134,7 +160,9 @@ _DEFAULT_PREFERRED = ['3000', '5000', '6000']   # fallback when condition unknow
 # ---------------------------------------------------------------------------
 
 def _cache_path(cfg: Dict[str, Any]) -> Path:
-    return cfg['catalog_root'] / 'ebay-condition-policies.json'
+    return Path(cfg['catalog_root']) / ebay_cache_filename(
+        cfg, 'ebay-condition-policies.json'
+    )
 
 
 def _load_cache(cfg: Dict[str, Any]) -> Optional[Dict[str, List[Tuple[str, str]]]]:
@@ -340,6 +368,58 @@ def allowed_conditions_for_category(
     policies = _get_policies(cfg)
     allowed = policies.get(str(category_id), [])
     return [_make_result(cid, desc) for cid, desc in allowed]
+
+
+def item_condition_required_for_category(
+    cfg: Dict[str, Any], category_id: str
+) -> Optional[bool]:
+    """Return eBay's resolved item-condition requirement flag for *category_id*,
+    or ``None`` when the policy observation is unresolved.
+
+    Thin accessor over :func:`condition_policy_for_category` (the unified policy
+    shape) for callers that only need the requirement flag and not the full
+    policy dict.
+    """
+    required = condition_policy_for_category(cfg, category_id).get(
+        "item_condition_required"
+    )
+    return required if isinstance(required, bool) else None
+
+
+def inventory_conditions_for_categories(
+    cfg: Dict[str, Any], category_ids: Iterable[str]
+) -> List[Dict[str, str]]:
+    """Return the stable TGW condition vocabulary for a category group.
+
+    The vocabulary is the union of provider condition IDs present anywhere in
+    the TGW group's configured eBay categories.  It is deliberately distinct
+    from :func:`allowed_conditions_for_category`, which is the narrower listing
+    selector for one exact category.
+    """
+    policies = _get_policies(cfg)
+    provider_condition_ids = {
+        condition_id
+        for category_id in category_ids
+        for condition_id, _description in policies.get(str(category_id), ())
+    }
+    missing_tgw_vocabulary = sorted(
+        provider_condition_ids.difference(CONDITION_ID_TO_INVENTORY_LABEL)
+    )
+    if missing_tgw_vocabulary:
+        raise ValueError(
+            "TGW inventory condition vocabulary has no stable label for "
+            f"provider condition IDs: {', '.join(missing_tgw_vocabulary)}"
+        )
+    return [
+        {
+            'value': CONDITION_ID_TO_INVENTORY_LABEL[condition_id],
+            'label': CONDITION_ID_TO_INVENTORY_LABEL[condition_id],
+        }
+        for condition_id in sorted(
+            provider_condition_ids,
+            key=lambda value: (CONDITION_RANK.get(value, 99), value),
+        )
+    ]
 
 
 def best_condition_for_enum(
