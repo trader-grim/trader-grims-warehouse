@@ -476,7 +476,20 @@ def _archive_prior_implementation_receipt(
 def _replace_prior_lifecycle_negative_receipt(
     path: Path, *, receipt: dict[str, Any]
 ) -> bool:
-    """Allow the fixed receipt projection to follow a new lifecycle generation."""
+    """Allow the fixed receipt projection to follow a new lifecycle generation.
+
+    Controller-verify and claude-review keep no dedicated append-only attempt
+    chain of their own (unlike codex-implement's ``history()``), so this
+    cannot reconcile a generation change by replaying attempt lineage the way
+    ``_archive_prior_implementation_receipt`` does. It instead trusts the
+    lifecycle's own generation fence: every queued job's
+    ``implementation_intent_hash`` is stamped from the record's current
+    remediation/resume intent and cryptographically verified against that
+    intent's canonical hash before this worker ever builds a receipt
+    (``validate_implementation_intent_payload`` in ``handle()``). A new,
+    differing intent hash on the incoming receipt is therefore proof the
+    write belongs to a later generation than whatever is archived on disk.
+    """
 
     try:
         existing = json.loads(_regular_file_bytes(path))
@@ -495,9 +508,7 @@ def _replace_prior_lifecycle_negative_receipt(
         "closure_hash",
     )
     if (
-        existing.get("status") != "FAIL"
-        or receipt.get("status") != "FAIL"
-        or existing.get("outcome") != OUTCOME_FAILED
+        receipt.get("status") != "FAIL"
         or receipt.get("outcome") != OUTCOME_FAILED
         or existing.get("treatment_id") != receipt.get("treatment_id")
         or existing.get("plan_binding") != receipt.get("plan_binding")
@@ -512,10 +523,30 @@ def _replace_prior_lifecycle_negative_receipt(
         raise HardFailure(
             "prior coding receipt does not bind the archived lifecycle generation"
         )
-    return (
-        existing.get("implementation_intent_hash")
-        != receipt.get("implementation_intent_hash")
-        and old_lifecycle == new_lifecycle
+    if existing.get("status") == "FAIL" and existing.get("outcome") == OUTCOME_FAILED:
+        # Same-generation retry is unchanged: the archived FAIL projection
+        # stays the fixed slot until this exact generation's intent hash
+        # actually moves on.
+        return (
+            existing.get("implementation_intent_hash")
+            != receipt.get("implementation_intent_hash")
+            and old_lifecycle == new_lifecycle
+        )
+    if existing.get("status") == "PASS" and existing.get("outcome") == OUTCOME_SATISFIED:
+        # A satisfied projection is terminal for its own generation: this
+        # queue's dispatch fencing never lets a second job land on a
+        # generation whose treatment already resolved, so a later FAIL write
+        # against an archived PASS can only be a genuinely new remediation
+        # generation -- e.g. controller-verify passing generation N and
+        # failing generation N+2 after review kept remediating in between.
+        new_intent = receipt.get("implementation_intent_hash")
+        return (
+            isinstance(new_intent, str)
+            and bool(new_intent)
+            and new_intent != existing.get("implementation_intent_hash")
+        )
+    raise HardFailure(
+        "prior coding receipt does not bind the archived lifecycle generation"
     )
 
 

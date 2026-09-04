@@ -57,7 +57,7 @@ def _git_worktree(path: Path) -> None:
     subprocess.run(["git", "commit", "--allow-empty", "-m", "initial"], cwd=path, check=True, capture_output=True)
 
 
-@pytest.mark.parametrize("failure_rounds", [2, 3])
+@pytest.mark.parametrize("failure_rounds", [1, 2, 3])
 def test_negative_review_receipt_tracks_each_remediation_generation(
     tmp_path: Path, failure_rounds: int
 ) -> None:
@@ -89,6 +89,105 @@ def test_negative_review_receipt_tracks_each_remediation_generation(
         }
         _write_receipt(path, receipt)
         assert json.loads(path.read_text()) == receipt
+
+
+def _lifecycle_fence() -> dict:
+    return {
+        "root_id": "root-" + "1" * 32,
+        "binding_hash": "sha256:" + "2" * 64,
+        "plan_binding_hash": "sha256:" + "3" * 64,
+        "execution_root_identity": "sha256:" + "4" * 64,
+        "card_idempotency_key": "sha256:" + "5" * 64,
+        "closure_hash": "sha256:" + "6" * 64,
+        "job_binding_hash": "sha256:" + "4" * 64,
+    }
+
+
+@pytest.mark.parametrize("treatment_id", ["controller-verify", "claude-review"])
+@pytest.mark.parametrize("trailing_failures", [1, 2, 3])
+def test_negative_lifecycle_receipt_rotates_past_a_prior_satisfied_generation(
+    tmp_path: Path, treatment_id: str, trailing_failures: int
+) -> None:
+    """1930 sibling: an archived PASS from an earlier generation (this
+    treatment succeeded once, e.g. controller-verify passing generation 1)
+    must not hard-fail a later generation's genuinely new FAIL write, up to
+    and including the lifecycle's maximum consecutive remediation rounds."""
+    receipt_name = "controller-harness-receipt.json" if treatment_id == "controller-verify" else "review-receipt.json"
+    path = tmp_path / receipt_name
+    fence = _lifecycle_fence()
+    plan = {"todo_id": 1978}
+
+    passed_receipt = {
+        "status": "PASS",
+        "outcome": "satisfied",
+        "treatment_id": treatment_id,
+        "object_id": str(tmp_path),
+        "plan_binding": plan,
+        "coding_lifecycle": fence,
+        "established_conditions": ["tested"] if treatment_id == "controller-verify" else ["reviewed"],
+        "artifacts": [],
+    }
+    _write_receipt(path, passed_receipt)
+    assert json.loads(path.read_text()) == passed_receipt
+
+    for generation in range(1, trailing_failures + 1):
+        failed_receipt = {
+            "status": "FAIL",
+            "outcome": "failed",
+            "treatment_id": treatment_id,
+            "object_id": str(tmp_path),
+            "plan_binding": plan,
+            "coding_lifecycle": fence,
+            "implementation_intent_hash": "sha256:" + str(generation) * 64,
+            "artifacts": [{"generation": generation}],
+        }
+        _write_receipt(path, failed_receipt)
+        assert json.loads(path.read_text()) == failed_receipt
+
+
+@pytest.mark.parametrize("treatment_id", ["controller-verify", "claude-review"])
+def test_negative_lifecycle_receipt_ignores_replay_over_satisfied_generation(
+    tmp_path: Path, treatment_id: str
+) -> None:
+    """A FAIL write over an archived PASS with no new (or an unchanged)
+    intent hash cannot prove it is a genuinely later generation, so -- like
+    a same-generation FAIL retry -- it is treated as a no-op rather than
+    overwriting or discarding the satisfied receipt."""
+    receipt_name = "controller-harness-receipt.json" if treatment_id == "controller-verify" else "review-receipt.json"
+    path = tmp_path / receipt_name
+    fence = _lifecycle_fence()
+    plan = {"todo_id": 1978}
+
+    passed_receipt = {
+        "status": "PASS",
+        "outcome": "satisfied",
+        "treatment_id": treatment_id,
+        "object_id": str(tmp_path),
+        "plan_binding": plan,
+        "coding_lifecycle": fence,
+        "implementation_intent_hash": "sha256:" + "7" * 64,
+        "established_conditions": ["tested"] if treatment_id == "controller-verify" else ["reviewed"],
+        "artifacts": [],
+    }
+    _write_receipt(path, passed_receipt)
+
+    for missing_or_repeated in (None, "sha256:" + "7" * 64):
+        failed_receipt = {
+            "status": "FAIL",
+            "outcome": "failed",
+            "treatment_id": treatment_id,
+            "object_id": str(tmp_path),
+            "plan_binding": plan,
+            "coding_lifecycle": fence,
+            "artifacts": [{"kind": "mechanical_failure", "detail": "replay"}],
+            **(
+                {"implementation_intent_hash": missing_or_repeated}
+                if missing_or_repeated is not None
+                else {}
+            ),
+        }
+        _write_receipt(path, failed_receipt)
+        assert json.loads(path.read_text()) == passed_receipt
 
 
 def _install_controller_lineage(
