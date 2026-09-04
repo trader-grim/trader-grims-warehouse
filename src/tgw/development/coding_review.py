@@ -346,11 +346,21 @@ def run_local_review(
         "context_hash": _hash(review_context_unsigned),
     }
     backend = semantic_backend
-    executor = os.environ.get("TGW_REVIEW_EXECUTOR", "codex")
+    from tgw.model_selector import ModelSelectorError, select_executor
+
+    try:
+        selection = select_executor("review")
+    except ModelSelectorError as exc:
+        raise ReviewRunnerError(f"review executor selection failed: {exc}") from exc
+    if selection.status != "SELECTED" or selection.executor is None:
+        raise ReviewRunnerError(f"no review executor available: {selection.reason}")
+    executor = selection.executor
     if executor == "manual":
         backend = _manual_review_executor
     elif executor == "claude":
         backend = run_claude_review
+    elif executor != "codex":
+        raise ReviewRunnerError(f"selected review executor {executor!r} has no backend here")
     try:
         semantic_report = dict(backend(request, worktree))
     except (CodexReviewBackendError, ClaudeReviewBackendError, OSError, ValueError) as exc:
@@ -434,6 +444,7 @@ def run_local_review(
         "report_bytes": report_bytes.decode(),
         "report_sha256": _bytes_hash(report_bytes),
         "checks": checks,
+        "model_selection": selection.receipt(),
     }
     return {
         "outcome": "satisfied" if passed else "failed",

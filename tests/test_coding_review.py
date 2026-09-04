@@ -346,3 +346,115 @@ def test_claude_review_out_of_snapshot_finding_carries_raw_report_to_artifact(
     assert artifact["kind"] == "independent_review_failure"
     assert artifact["raw_report"] == model_report
     assert "provider_stdout" in artifact
+
+
+def _write_availability(directory, data):
+    path = directory / "model-availability.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def test_review_executor_is_read_from_the_model_selector_not_a_hardcoded_default(
+    tmp_path, monkeypatch
+):
+    """No env pin: the config's 'review' policy, not a hardcoded default,
+    must decide which backend actually runs, and the decision must be
+    recorded on the review artifact.
+    """
+    repo, base, commit, tree = _repo(tmp_path)
+    monkeypatch.delenv("TGW_REVIEW_EXECUTOR", raising=False)
+    availability = _write_availability(
+        tmp_path,
+        {
+            "updated": "2026-09-04",
+            "executors": {
+                "codex": {"available": False, "reason": "20x Pro lapsed"},
+                "claude": {"available": True},
+                "manual": {"available": True},
+            },
+            "roles": {
+                "implementation": {"prefer": ["codex", "claude", "manual"]},
+                "review": {"prefer": ["codex", "claude", "manual"]},
+            },
+        },
+    )
+    monkeypatch.setenv("TGW_MODEL_AVAILABILITY", str(availability))
+    calls = []
+
+    def fake(request, worktree):
+        calls.append(request)
+        return {
+            "schema": "tgw-code-review/v1",
+            "verdict": "PASS",
+            "snapshot_hash": request["snapshot_hash"],
+            "summary": "clean",
+            "findings": [],
+        }
+
+    monkeypatch.setattr(coding_review, "run_claude_review", fake)
+
+    result = coding_review.run_local_review(_payload(base, commit, tree), repo)
+
+    assert result["outcome"] == "satisfied"
+    assert calls  # the claude backend, not the default codex backend, ran
+    selection = result["artifacts"][0]["model_selection"]
+    assert selection["schema"] == "tgw-model-selection/v1"
+    assert selection["role"] == "review"
+    assert selection["status"] == "SELECTED"
+    assert selection["executor"] == "claude"
+    assert "policy" in selection["reason"]
+    assert "pinned" not in selection["reason"]
+
+
+def test_committed_availability_file_routes_review_to_claude(tmp_path, monkeypatch):
+    """The committed config/model-availability.json (codex + opencode both
+    unavailable) must fall through to claude for the review role too.
+    """
+    repo, base, commit, tree = _repo(tmp_path)
+    monkeypatch.delenv("TGW_REVIEW_EXECUTOR", raising=False)
+    monkeypatch.delenv("TGW_MODEL_AVAILABILITY", raising=False)
+    from tgw import model_selector
+
+    monkeypatch.setattr(model_selector, "_CONFIG_PATH", model_selector._REPO_DEFAULT)
+    calls = []
+
+    def fake(request, worktree):
+        calls.append(request)
+        return {
+            "schema": "tgw-code-review/v1",
+            "verdict": "PASS",
+            "snapshot_hash": request["snapshot_hash"],
+            "summary": "clean",
+            "findings": [],
+        }
+
+    monkeypatch.setattr(coding_review, "run_claude_review", fake)
+
+    result = coding_review.run_local_review(_payload(base, commit, tree), repo)
+
+    assert result["outcome"] == "satisfied"
+    assert calls
+    assert result["artifacts"][0]["model_selection"]["executor"] == "claude"
+
+
+def test_review_aborts_with_no_available_executor_no_silent_fallback(tmp_path, monkeypatch):
+    repo, base, commit, tree = _repo(tmp_path)
+    monkeypatch.delenv("TGW_REVIEW_EXECUTOR", raising=False)
+    availability = _write_availability(
+        tmp_path,
+        {
+            "updated": "2026-09-04",
+            "executors": {
+                "codex": {"available": False, "reason": "20x Pro lapsed"},
+                "claude": {"available": False, "reason": "not authenticated"},
+                "manual": {"available": False, "reason": "no supervising session"},
+            },
+            "roles": {
+                "implementation": {"prefer": ["codex", "claude", "manual"]},
+                "review": {"prefer": ["codex", "claude", "manual"]},
+            },
+        },
+    )
+    monkeypatch.setenv("TGW_MODEL_AVAILABILITY", str(availability))
+    with pytest.raises(coding_review.ReviewRunnerError, match="no review executor available"):
+        coding_review.run_local_review(_payload(base, commit, tree), repo)
