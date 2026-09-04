@@ -1,13 +1,102 @@
 {
-  "_comment": "Which coding executors are currently usable, and the per-role preference order. Operator-maintained until the live availability prober (Todo 1916) lands and writes this file on a schedule. Edit the copy at /opt/TGW/tgw-lib/config/model-availability.json to change it live (this repo copy is the committed default). 'manual' means a supervising tgw-coders session services a filesystem task card; it is always available.",
+  "_comment": "Semi-automatic model/executor selection for the coding lifecycle. Operator-maintained until the live availability prober (Todo 1916) writes this file on a schedule; the prober will emit the same shape. tgw.model_selector.select_executor() consumes only 'executors' and 'roles.<role>.prefer' (today: roles 'implementation' and 'review'). The per-role 'model' hints and the 'role_chart' block are carried for humans and the future prober / model-aware executor. Edit /opt/TGW/tgw-lib/config/model-availability.json to change it live; this repo copy is the committed default.",
+  "schema": "tgw-model-availability/v1",
   "updated": "2026-09-04",
+  "role_chart_source": "reference/research/source/catio-model-role-research-20260827.md (10-role best / least-expensive-acceptable / other table)",
+  "cost_policy": "Preserve the operator Claude subscription (the valuable resource) for judgement roles; route bulk / mechanical / draft work to the free opencode-zen DeepSeek and Groq keys via the opencode executor once its backend is wired (coding-workflow plan item).",
+
   "executors": {
-    "codex":  { "available": false, "reason": "20x Pro subscription lapsed 2026-08-29 — usage limit until reset" },
-    "claude": { "available": true },
-    "manual": { "available": true }
+    "claude": {
+      "available": true,
+      "harness": "claude-code CLI (TGW_CLAUDE_BIN / TGW_CLAUDE_REVIEW_BIN)",
+      "models": ["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5"],
+      "note": "operator Claude subscription — reserve for orchestration, semantic review, high-risk gates, and complex implementation"
+    },
+    "opencode": {
+      "available": false,
+      "reason": "executor backend not wired — needs _execute_opencode() in codex_implement.py + the review worker, an opencode prompt-translator profile, and the opencode user's opencode.jsonc model config. Coding-workflow plan item.",
+      "harness": "opencode CLI (/home/opencode/.local/bin/opencode; tgw-context already integrated 2026-08-21)",
+      "models": ["opencode-zen/deepseek-v4-flash-free", "groq/llama-3.3-70b", "groq/*"],
+      "note": "free DeepSeek V4 Flash (opencode-zen key) + Groq key — use for evidence, mechanical verification, doc/test drafting, and low-risk bulk implementation"
+    },
+    "codex": {
+      "available": false,
+      "reason": "20x Pro subscription lapsed 2026-08-29 — usage limit until reset"
+    },
+    "manual": {
+      "available": true,
+      "harness": "a supervising tgw-coders session services a filesystem task card; always available, last resort"
+    },
+    "deepseek": {
+      "available": false,
+      "reason": "no standalone coding backend; DeepSeek models are reached through the opencode executor (opencode-zen)"
+    }
   },
+
   "roles": {
-    "implementation": { "prefer": ["claude", "codex", "manual"] },
-    "review":         { "prefer": ["claude", "codex", "manual"] }
+    "implementation": {
+      "prefer": ["opencode", "claude", "manual"],
+      "model": { "opencode": "opencode-zen/deepseek-v4-flash-free", "claude": "claude-sonnet-5" },
+      "consumed_by_selector": true,
+      "research": "role 4 (implementation actor): best Sol xhigh / least DeepSeek V4 Pro / other Sonnet 5, DeepSeek V4 Flash for low-risk edits",
+      "note": "opencode-first is intentional cost control; it falls through to claude while opencode is unavailable. Revisit once risk-tiering exists so complex work escalates to claude automatically."
+    },
+    "review": {
+      "prefer": ["claude", "opencode", "manual"],
+      "model": { "claude": "claude-sonnet-5", "opencode": "opencode-zen/deepseek-v4-flash-free" },
+      "consumed_by_selector": true,
+      "research": "role 6 (semantic reviewer): best Opus 5 / least Sonnet 5",
+      "note": "semantic judgement stays on claude; escalate to claude-opus-5 for lifecycle/authority/rollback changes once the selector takes a risk input"
+    },
+
+    "orchestrator": {
+      "prefer": ["claude", "manual"],
+      "model": { "claude": "claude-opus-5" },
+      "consumed_by_selector": false,
+      "research": "role 1 (plan authority / orchestrator): best Opus 5 / least Sonnet 5"
+    },
+    "contract_compiler": {
+      "prefer": ["claude", "opencode", "manual"],
+      "model": { "claude": "claude-sonnet-5", "opencode": "opencode-zen/deepseek-v4-flash-free" },
+      "consumed_by_selector": false,
+      "research": "role 2 (contract compiler): best Sol xhigh / least Sonnet 5"
+    },
+    "evidence_worker": {
+      "prefer": ["opencode", "claude", "manual"],
+      "model": { "opencode": "opencode-zen/deepseek-v4-flash-free", "claude": "claude-haiku-4-5" },
+      "consumed_by_selector": false,
+      "research": "role 3 (evidence / reconnaissance): best DeepSeek V4 Pro / least DeepSeek V4 Flash"
+    },
+    "mechanical_verifier": {
+      "prefer": ["opencode", "claude", "manual"],
+      "model": { "opencode": "opencode-zen/deepseek-v4-flash-free", "claude": "claude-haiku-4-5" },
+      "consumed_by_selector": false,
+      "research": "role 5 (mechanical verifier): best DeepSeek V4 Flash / least GPT Luna — cheap, no semantic judgement"
+    },
+    "high_risk_gate": {
+      "prefer": ["claude", "manual"],
+      "model": { "claude": ["claude-opus-5", "claude-sonnet-5"] },
+      "dual_review": true,
+      "consumed_by_selector": false,
+      "research": "role 7 (activation / rebinding / rollback gate): never below Opus 5 + a distinct second model"
+    },
+    "doctor_planner": {
+      "prefer": ["claude", "manual"],
+      "model": { "claude": "claude-sonnet-5" },
+      "consumed_by_selector": false,
+      "research": "role 8 (doctor / repair planner): best Opus 5 / least Sonnet 5 — escalate to opus-5 for lifecycle or production-boundary repairs"
+    },
+    "operator_assistant": {
+      "prefer": ["claude", "opencode", "manual"],
+      "model": { "claude": "claude-sonnet-5", "opencode": "opencode-zen/deepseek-v4-flash-free" },
+      "consumed_by_selector": false,
+      "research": "role 9 (operator assistant / receipt navigator): best Sonnet 5 / least DeepSeek V4 Flash"
+    },
+    "doc_test_drafting": {
+      "prefer": ["opencode", "claude", "manual"],
+      "model": { "opencode": "opencode-zen/deepseek-v4-flash-free", "claude": "claude-sonnet-5" },
+      "consumed_by_selector": false,
+      "research": "role 10 (documentation / test-plan drafting): best Sonnet 5 / least DeepSeek V4 Flash — normative runbooks/contracts stay on claude"
+    }
   }
 }

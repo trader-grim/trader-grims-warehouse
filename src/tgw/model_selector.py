@@ -20,15 +20,20 @@ Shape::
     {
       "updated": "2026-09-04",
       "executors": {
-        "codex":  {"available": false, "reason": "20x Pro lapsed 2026-08-29"},
-        "claude": {"available": true},
-        "manual": {"available": true}
+        "claude":   {"available": true,  "models": ["claude-sonnet-5", ...]},
+        "opencode": {"available": false, "reason": "executor backend not wired"},
+        "codex":    {"available": false, "reason": "20x Pro lapsed 2026-08-29"},
+        "manual":   {"available": true}
       },
       "roles": {
-        "implementation": {"prefer": ["codex", "claude", "manual"]},
-        "review":         {"prefer": ["claude", "codex", "manual"]}
+        "implementation": {"prefer": ["opencode", "claude", "manual"]},
+        "review":         {"prefer": ["claude", "opencode", "manual"]}
       }
     }
+
+``select_executor`` only reads ``executors`` and ``roles.<role>.prefer``. Any
+other keys (per-role ``model`` hints, a full research role chart, comments) are
+carried for humans and the future prober and ignored here.
 """
 
 from __future__ import annotations
@@ -47,7 +52,9 @@ _REPO_DEFAULT = Path(__file__).resolve().parent.parent.parent / "config" / "mode
 
 # Executors the coding lifecycle knows how to run. A policy or availability file
 # may not name an executor outside this set.
-KNOWN_EXECUTORS: frozenset[str] = frozenset({"codex", "claude", "manual", "deepseek"})
+KNOWN_EXECUTORS: frozenset[str] = frozenset(
+    {"codex", "claude", "opencode", "manual", "deepseek"}
+)
 
 # Used when no availability file exists at all: keep the lifecycle usable by a
 # supervising session rather than dead. Every real deployment ships the
