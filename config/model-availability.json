@@ -1,0 +1,13 @@
+{
+  "_comment": "Which coding executors are currently usable, and the per-role preference order. Operator-maintained until the live availability prober (Todo 1916) lands and writes this file on a schedule. Edit the copy at /opt/TGW/tgw-lib/config/model-availability.json to change it live (this repo copy is the committed default). 'manual' means a supervising tgw-coders session services a filesystem task card; it is always available.",
+  "updated": "2026-09-04",
+  "executors": {
+    "codex":  { "available": false, "reason": "20x Pro subscription lapsed 2026-08-29 — usage limit until reset" },
+    "claude": { "available": true },
+    "manual": { "available": true }
+  },
+  "roles": {
+    "implementation": { "prefer": ["claude", "codex", "manual"] },
+    "review":         { "prefer": ["claude", "codex", "manual"] }
+  }
+}

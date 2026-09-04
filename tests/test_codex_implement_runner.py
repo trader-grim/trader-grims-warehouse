@@ -770,7 +770,7 @@ def test_manual_executor_timeout_stashes_late_source(tmp_path, monkeypatch):
 def test_unknown_executor_fails_closed(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "bogus")
-    with pytest.raises(codex_implement.HardFailure, match="unsupported implementation executor"):
+    with pytest.raises(codex_implement.HardFailure, match="not a known executor"):
         codex_implement.run(_job(), repo)
 
 
