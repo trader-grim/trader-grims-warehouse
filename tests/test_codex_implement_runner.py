@@ -1003,7 +1003,7 @@ def test_executor_is_read_from_the_model_selector_not_a_hardcoded_default(
     assert result["outcome"] == "satisfied"
     kinds = [item["kind"] for item in result["artifacts"]]
     assert "claude_summary" in kinds
-    selection = result["model_selection"]
+    selection = result["artifacts"][0]["model_selection"]
     assert selection["schema"] == "tgw-model-selection/v1"
     assert selection["role"] == "implementation"
     assert selection["status"] == "SELECTED"
@@ -1032,7 +1032,7 @@ def test_committed_availability_file_routes_implementation_to_claude(tmp_path, m
 
     result = codex_implement.run(_job(), repo, invoke=_claude_invoke(report=report, edit=edit))
     assert result["outcome"] == "satisfied"
-    assert result["model_selection"]["executor"] == "claude"
+    assert result["artifacts"][0]["model_selection"]["executor"] == "claude"
 
 
 def test_no_available_executor_in_policy_aborts_without_silent_fallback(

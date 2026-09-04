@@ -930,14 +930,19 @@ def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> d
         lease = _exclusive_worktree_lease(cwd)
     with lease:
         result = _run_with_lease(job, cwd, invoke=invoke)
-    # Record which executor was selected and why, as run metadata (not an
-    # artifact — artifacts carry the treatment's own typed outcomes).
+    # Record which executor was selected and why. The launcher worker only
+    # forwards outcome/established_conditions/artifacts from this dict, so the
+    # receipt must live inside the first (primary) artifact to survive into
+    # the persisted coding-lifecycle receipt, the same way coding_review.py
+    # nests it in its single review artifact.
     try:
         selection = _selection().receipt()
     except HardFailure:
         selection = None
     if selection is not None and isinstance(result, dict):
-        result["model_selection"] = selection
+        artifacts = result.get("artifacts")
+        if isinstance(artifacts, list) and artifacts and isinstance(artifacts[0], dict):
+            artifacts[0]["model_selection"] = selection
     return result
 
 

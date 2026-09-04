@@ -481,6 +481,59 @@ def test_coding_worker_claims_and_runs_dispatched_treatment(tmp_path, treatment_
     assert receipt_path_for_treatment(tmp_path, treatment_id).is_file()
 
 
+def test_implementation_selection_receipt_survives_the_coding_worker_receipt(tmp_path):
+    """codex_implement.run() nests its model-selection receipt in artifacts[0]
+    rather than a top-level sibling key, because CodingWorker only forwards
+    outcome/established_conditions/artifacts from the launcher's return value
+    (_validated_launcher_result) and silently drops any other top-level key.
+    This proves the receipt actually reaches the persisted coding-lifecycle
+    receipt through that real worker seam, not just the launcher's raw dict.
+    """
+    _git_worktree(tmp_path)
+    before = build_coding_snapshot(tmp_path, GoalProfile("test", "1", ("reviewed",)))
+    job = {
+        "job_id": "job-codex-implement",
+        "payload_json": {
+            "treatment_id": "codex-implement",
+            "treatment_version": "1",
+            "graph_id": "graph-review-1",
+            "worktree": str(tmp_path),
+            "object_id": str(tmp_path.resolve()),
+            "object_generation": before.generation,
+        },
+    }
+    selection_receipt = {
+        "schema": "tgw-model-selection/v1",
+        "observed_at": "2026-09-04T00:00:00+00:00",
+        "role": "implementation",
+        "status": "SELECTED",
+        "executor": "claude",
+        "reason": "first available in implementation policy ['claude']",
+        "considered": ["claude"],
+        "availability_updated": "2026-09-04",
+    }
+    launcher = MagicMock(
+        return_value={
+            "outcome": "satisfied",
+            "established_conditions": ["implemented"],
+            "artifacts": [
+                {"kind": "claude_summary", "detail": "done", "model_selection": selection_receipt}
+            ],
+        }
+    )
+    worker = _worker("codex-implement", tmp_path.parent, launcher, tmp_path)
+
+    with patch("tgw.queue.worker_base.state_machine") as state_machine:
+        state_machine.claim_queue_jobs.return_value = [job]
+        claimed = worker._claim_one()
+        receipt = worker.handle(claimed)
+
+    assert receipt["outcome"] == "satisfied"
+    assert receipt["artifacts"][0]["model_selection"]["executor"] == "claude"
+    persisted = json.loads(receipt_path_for_treatment(tmp_path, "codex-implement").read_text())
+    assert persisted["artifacts"][0]["model_selection"]["reason"] == selection_receipt["reason"]
+
+
 def test_review_receipt_changes_snapshot_and_selects_next_treatment(tmp_path):
     """Completing review persists evidence that makes the next evaluation legal."""
     _git_worktree(tmp_path)
