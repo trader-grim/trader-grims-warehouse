@@ -262,6 +262,44 @@ def test_force_restage_allows_operator_authorized_raise(stage, tmp_path):
     assert not after.get('price_history')
 
 
+def test_force_restage_allows_operators_own_current_draft_price(stage, tmp_path):
+    # Todo #1981: operator Save Draft raises the price above the live offer,
+    # then clicks Update Item — that raise is the operator's own current
+    # intent (last price_history entry is operator-sourced and matches the
+    # draft price being staged) and must go through unclamped, with no
+    # allow_price_raise needed and no warning artifact.
+    item = _live_item(draft_price=24.99, offer_price=13.08)
+    item['price_history'] = [{
+        'ts': '2026-09-04T00:00:00+00:00', 'price': 24.99, 'previous_price': 13.08,
+        'stage': None, 'label': 'price edited', 'source': 'operator:web-session',
+    }]
+    path = _write(tmp_path, 'tgw10b', item)
+    _run_force(stage, 'tgw10b')
+    assert stage._staged == ['tgw10b']
+    after = json.loads(path.read_text(encoding='utf-8'))
+    assert after['draft_listing']['price'] == 24.99
+    # unchanged — no clamp entry appended
+    assert after['price_history'] == item['price_history']
+
+
+def test_force_restage_still_clamps_stale_price_despite_unrelated_operator_history(stage, tmp_path):
+    # A prior operator edit exists, but it doesn't match the price now being
+    # staged (a later machine write bumped draft.price without recording a
+    # history entry) — the original stale-price clamp must still apply.
+    item = _live_item(draft_price=40.99, offer_price=13.08)
+    item['price_history'] = [{
+        'ts': '2026-08-01T00:00:00+00:00', 'price': 19.99, 'previous_price': 13.08,
+        'stage': None, 'label': 'price edited', 'source': 'operator:api-key',
+    }]
+    path = _write(tmp_path, 'tgw10c', item)
+    receipt = _run_force(stage, 'tgw10c')
+    assert stage._staged == []
+    assert receipt['evidence']['reason_code'] == 'NEVER_RAISE_CLAMP_APPLIED'
+    after = json.loads(path.read_text(encoding='utf-8'))
+    assert after['draft_listing']['price'] == 13.08
+    assert after['price_history'][-1]['label'] == 'never_raise_clamp'
+
+
 def test_force_restage_lowering_passes_unclamped(stage, tmp_path):
     # A pending reduction (draft below live) is the reducer doing its job.
     path = _write(tmp_path, 'tgw12', _live_item(draft_price=6.50, offer_price=7.98))

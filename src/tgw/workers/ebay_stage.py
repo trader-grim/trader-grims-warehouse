@@ -664,11 +664,31 @@ class EbayStageWorker(QueueWorker):
         # markdowns when re-staged (5 confirmed live, 2026-07-02). Deliberate
         # operator raises pass `allow_price_raise` in the payload. The clamp is
         # also persisted, healing the stale draft as we touch it.
+        #
+        # Todo #1981: the clamp above fired even when the higher price was the
+        # operator's own current draft edit (Save Draft then Update Item) —
+        # every raise went through this exact path since nothing ever set
+        # allow_price_raise, silently reverting live operator price increases
+        # with no warning surfaced. A price is "the operator's own" here only
+        # if the most recent price_history entry is operator-sourced AND its
+        # recorded price still matches what we're about to stage — i.e. no
+        # machine write has touched draft.price since. Any other source
+        # (stale/machine-generated, or an operator entry superseded by a
+        # later non-operator write) keeps the original clamp behavior.
+        price_history = item.get('price_history') or []
+        last_price_event = price_history[-1] if price_history else None
+        operator_current_price = bool(
+            last_price_event
+            and str(last_price_event.get('source') or '').startswith('operator')
+            and last_price_event.get('price') is not None
+            and float(last_price_event['price']) == float(price)
+        )
         offer_price = item.get('ebay_offer', {}).get('price')
         offer_live = (item.get('ebay_offer', {}).get('status') == 'PUBLISHED'
                       or existing_listing.get('status') == 'Active')
         if (force and offer_live and offer_price is not None
                 and float(price) > float(offer_price)
+                and not operator_current_price
                 and not payload.get('allow_price_raise')):
             log.warning('ebay_stage: %s never-raise clamp: draft $%s > live $%s — '
                         'pushing live price (pass allow_price_raise to override)',
