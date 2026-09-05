@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Install TGW's canonical skills through native per-harness discovery paths.
+"""Install TGW's canonical skills into any harness's declared skills directory.
+
+Agent-agnostic by design: no per-harness map. The harness (or its onboarding
+record) declares where it discovers skills (--skills-dir, resolved inside the
+actor home). Adding a new harness requires NO code change — only a declaration.
 
 Harness onboarding never creates a PostgreSQL login role: a new harness joins
 the ordinary ``tgw-coders`` Unix group and the universal ``tgw_coding`` peer
-map (config/environment/postgresql/pg_ident.conf), then this installer links
-the two canonical skills into its native discovery path.
+map, then this installer links the two canonical skills into the declared
+native discovery path.
 """
 
 from __future__ import annotations
@@ -20,12 +24,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from tgw.logging import announce_script_run  # noqa: E402
 
 SKILLS = ("tgw-plan", "tgw-review")
-DESTINATIONS = {
-    "claude": Path(".claude/skills"),
-    "codex": Path(".codex/skills"),
-    "deepseek": Path(".dsh/skills"),
-    "hermes": Path(".hermes/skills/tgw"),
-}
 
 
 class SkillInstallError(ValueError):
@@ -42,13 +40,21 @@ def _validate_source(source_root: Path) -> Path:
 
 
 def install(
-    *, home: Path, harness: str, source_root: Path, replace_stale_link: bool = False
+    *, home: Path, skills_dir: Path, source_root: Path, replace_stale_link: bool = False
 ) -> dict[str, object]:
-    if harness not in DESTINATIONS:
-        raise SkillInstallError(f"unsupported harness: {harness}")
     home = home.resolve(strict=True)
     source_root = _validate_source(source_root)
-    destination = home / DESTINATIONS[harness]
+    skills_dir = skills_dir.expanduser()
+    if not skills_dir.is_absolute():
+        skills_dir = home / skills_dir
+    skills_dir = skills_dir.resolve(strict=False)
+    try:
+        skills_dir.relative_to(home)
+    except ValueError as exc:
+        raise SkillInstallError(
+            f"declared skills directory is outside the actor home: {skills_dir}"
+        ) from exc
+    destination = skills_dir
     destination.mkdir(parents=True, exist_ok=True)
     installed: list[dict[str, str]] = []
     for skill in SKILLS:
@@ -70,8 +76,8 @@ def install(
         installed.append({"skill": skill, "path": str(target), "status": "installed"})
     return {
         "schema": "tgw-shared-harness-skills-installation/v1",
-        "harness": harness,
         "home": str(home),
+        "skills_dir": str(destination),
         "source_root": str(source_root),
         "skills": installed,
     }
@@ -79,8 +85,9 @@ def install(
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="install-shared-harness-skills")
-    parser.add_argument("--harness", choices=sorted(DESTINATIONS), required=True)
     parser.add_argument("--home", type=Path, default=Path.home())
+    parser.add_argument("--skills-dir", type=Path, required=True,
+                        help="harness-declared skills discovery dir (absolute or home-relative)")
     parser.add_argument(
         "--source-root",
         type=Path,
@@ -90,16 +97,16 @@ def main() -> int:
     args = parser.parse_args()
     announce_script_run(
         "install_shared_harness_skills.py",
-        "link canonical TGW Plan and review skills into one harness account",
-        harness=args.harness,
+        "link canonical TGW Plan and review skills into one harness's declared skills dir",
         home=str(args.home),
+        skills_dir=str(args.skills_dir),
         source_root=str(args.source_root),
         replace_stale_link=args.replace_stale_link,
     )
     try:
         result = install(
             home=args.home,
-            harness=args.harness,
+            skills_dir=args.skills_dir,
             source_root=args.source_root,
             replace_stale_link=args.replace_stale_link,
         )
