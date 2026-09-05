@@ -112,7 +112,13 @@
       "Bash(lsblk)",
       "Bash(git -C /media/db/TGW/src/trader-grims-warehouse diff --stat HEAD)",
       "Bash(bin/tgw-aider --yes *)",
-      "Bash(/opt/TGW/src/trader-grims-warehouse/bin/tgw-aider --yes *)"
+      "Bash(/opt/TGW/src/trader-grims-warehouse/bin/tgw-aider --yes *)",
+      "Bash(sudo -u db git:*)",
+      "Bash(sudo -n -u db git:*)",
+      "Bash(sudo /usr/local/sbin/tgw-coding-bootstrap:*)",
+      "Bash(sudo -n /usr/local/sbin/tgw-coding-bootstrap:*)",
+      "Bash(sudo -u db tgw:*)",
+      "Bash(sudo -n -u db tgw:*)"
     ]
   },
   "remote": {
