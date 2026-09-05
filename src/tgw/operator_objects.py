@@ -1686,6 +1686,30 @@ def build_item_operator_object(
     )
     if condition_remap and not condition_remap["value"]:
         condition_remap = None
+    if not condition_policy_resolved:
+        condition_hint = (
+            "Condition policy is unresolved for this category; retry category "
+            "context before selecting a listing condition."
+        )
+    elif invalid_current_condition:
+        if condition_remap:
+            condition_hint = (
+                f"Current value is not valid for this category. Choose "
+                f"'{condition_remap['label']}' for the nearest same-or-worse "
+                "condition, or select another legal value."
+            )
+        elif condition_required is False:
+            condition_hint = (
+                "This category does not require a condition. Choose the "
+                "blank option to remove the prior listing condition."
+            )
+        else:
+            condition_hint = (
+                "Current value is not valid for this category; select a "
+                "legal value."
+            )
+    else:
+        condition_hint = None
     inventory_condition_options = []
     for option in context.get("inventory_conditions", ()):
         if not isinstance(option, Mapping):
@@ -2408,6 +2432,9 @@ def build_item_operator_object(
             "item_condition_required": condition_required,
             "control": "select",
             "options": condition_options,
+            "invalid_current": invalid_current_condition,
+            "suggested_replacement": condition_remap,
+            "hint": condition_hint,
         },
         "aspects": aspects,
         "pricing": {

@@ -633,6 +633,8 @@
         },
         "condition": {
           "control": "select",
+          "hint": null,
+          "invalid_current": null,
           "item_condition_required": true,
           "label": "Used - Good",
           "options": [
@@ -643,6 +645,7 @@
           ],
           "policy_resolved": true,
           "required": true,
+          "suggested_replacement": null,
           "title": "eBay condition",
           "valid": true,
           "value": "USED_GOOD"
@@ -2198,6 +2201,8 @@
         },
         "condition": {
           "control": "select",
+          "hint": null,
+          "invalid_current": null,
           "item_condition_required": true,
           "label": "Used - Good",
           "options": [
@@ -2208,6 +2213,7 @@
           ],
           "policy_resolved": true,
           "required": true,
+          "suggested_replacement": null,
           "title": "eBay condition",
           "valid": true,
           "value": "USED_GOOD"
@@ -3797,6 +3803,8 @@
         },
         "condition": {
           "control": "select",
+          "hint": null,
+          "invalid_current": null,
           "item_condition_required": true,
           "label": "Used - Good",
           "options": [
@@ -3807,6 +3815,7 @@
           ],
           "policy_resolved": true,
           "required": true,
+          "suggested_replacement": null,
           "title": "eBay condition",
           "valid": true,
           "value": "USED_GOOD"
@@ -5466,6 +5475,8 @@
             "summary": "This eBay category requires a condition, but none is selected."
           },
           "control": "select",
+          "hint": null,
+          "invalid_current": null,
           "item_condition_required": true,
           "label": null,
           "options": [
@@ -5476,6 +5487,7 @@
           ],
           "policy_resolved": true,
           "required": true,
+          "suggested_replacement": null,
           "title": "eBay condition",
           "valid": false,
           "value": ""
@@ -7096,6 +7108,8 @@
         },
         "condition": {
           "control": "select",
+          "hint": null,
+          "invalid_current": null,
           "item_condition_required": true,
           "label": "Used - Good",
           "options": [
@@ -7106,6 +7120,7 @@
           ],
           "policy_resolved": true,
           "required": true,
+          "suggested_replacement": null,
           "title": "eBay condition",
           "valid": true,
           "value": "USED_GOOD"
@@ -8618,6 +8633,8 @@
         },
         "condition": {
           "control": "select",
+          "hint": null,
+          "invalid_current": null,
           "item_condition_required": true,
           "label": "Used - Good",
           "options": [
@@ -8628,6 +8645,7 @@
           ],
           "policy_resolved": true,
           "required": true,
+          "suggested_replacement": null,
           "title": "eBay condition",
           "valid": true,
           "value": "USED_GOOD"
