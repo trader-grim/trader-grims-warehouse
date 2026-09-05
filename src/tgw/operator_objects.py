@@ -16,7 +16,6 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 
 from tgw import inventory_record
 from tgw.ebay.draft_specifics import get_ebay_aspects
-from tgw.item_mutation import item_generation
 
 OPERATOR_OBJECT_SCHEMA = "tgw-operator-object/v1"
 ADAPTER_VIEW_SCHEMA = "tgw-operator-adapter-view/v1"
@@ -1686,6 +1685,30 @@ def build_item_operator_object(
     )
     if condition_remap and not condition_remap["value"]:
         condition_remap = None
+    if not condition_policy_resolved:
+        condition_hint = (
+            "Condition policy is unresolved for this category; retry category "
+            "context before selecting a listing condition."
+        )
+    elif invalid_current_condition:
+        if condition_remap:
+            condition_hint = (
+                f"Current value is not valid for this category. Choose "
+                f"'{condition_remap['label']}' for the nearest same-or-worse "
+                "condition, or select another legal value."
+            )
+        elif condition_required is False:
+            condition_hint = (
+                "This category does not require a condition. Choose the "
+                "blank option to remove the prior listing condition."
+            )
+        else:
+            condition_hint = (
+                "Current value is not valid for this category; select a "
+                "legal value."
+            )
+    else:
+        condition_hint = None
     inventory_condition_options = []
     for option in context.get("inventory_conditions", ()):
         if not isinstance(option, Mapping):
@@ -2192,14 +2215,6 @@ def build_item_operator_object(
     conditions_by_identity: dict[str, list[str]] = {}
     for value in configured_record_conditions:
         conditions_by_identity.setdefault(value.casefold(), []).append(value)
-    condition_collisions = [
-        {
-            "identity": identity,
-            "values": sorted(values, key=lambda value: (value.casefold(), value)),
-        }
-        for identity, values in sorted(conditions_by_identity.items())
-        if len(values) > 1
-    ]
     record_conditions = []
     for configured in configured_record_conditions:
         if len(conditions_by_identity[configured.casefold()]) != 1:
@@ -2220,14 +2235,6 @@ def build_item_operator_object(
         {"value": value, "label": value}
         for value in record_conditions
     ]
-    published_record_condition = next(
-        (
-            value
-            for value in record_conditions
-            if value.casefold() == stored_record_condition.casefold()
-        ),
-        stored_record_condition,
-    )
     if stored_record_condition and not any(
         option["value"].casefold() == stored_record_condition.casefold()
         for option in record_condition_options
@@ -2239,14 +2246,6 @@ def build_item_operator_object(
             ),
             "display_only": True,
         })
-    group_options = list(context.get("category_groups") or ())
-    record_condition_projection = (
-        "record_condition_vocabulary" in context or bool(group_options)
-    )
-    record_condition_drift = {
-        "empty": not configured_record_conditions,
-        "casefold_collisions": condition_collisions,
-    }
     field_schema = {
         "item_fields": {
             "title": {"type": "string", "label": "Inventory title", "value": item.get("title") or ""},
@@ -2408,6 +2407,9 @@ def build_item_operator_object(
             "item_condition_required": condition_required,
             "control": "select",
             "options": condition_options,
+            "invalid_current": invalid_current_condition,
+            "suggested_replacement": condition_remap,
+            "hint": condition_hint,
         },
         "aspects": aspects,
         "pricing": {

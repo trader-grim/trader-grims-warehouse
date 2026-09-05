@@ -74,12 +74,17 @@ _ALLOWLIST = {
     # envelope accessor bypass exists — the entries are the same reviewed code
     # at new positions plus the operator-object display read of the revision
     # proposal delta.
-    (_SRC / "tgw" / "http_server.py", 2657),  # (c) todo #1464 envelope-shape gate — is_envelope() check only (Set A)
-    (_SRC / "tgw" / "http_server.py", 2664),  # (c) todo #1464 envelope-shape gate — is_envelope() check only (Set B)
-    (_SRC / "tgw" / "http_server.py", 4193),  # (b) accept_proposals revision_draft.delta — different dict, fed to set_ebay_aspects()
-    (_SRC / "tgw" / "http_server.py", 4194),  # (a) accept_proposals — set_ebay_aspects() accessor call on the proposal dict
-    (_SRC / "tgw" / "http_server.py", 9385),  # (b) revision_draft.delta proposal read for item-detail display
-    (_SRC / "tgw" / "operator_objects.py", 1492),  # (b) revision_draft.delta proposal read (operator-object proposed-aspect view; read-only builder)
+    # Refreshed 2026-09-05 for the todo-1974 recovery cherry-pick onto the
+    # post-mordac main: the 1974 category-context condition-validation fix
+    # inserts 22 lines into execute_item_operator_command (draft-save PATCH
+    # gate) and shifts every http_server.py site below by +22. Re-verified
+    # against the recovered tree — same reviewed code, new positions.
+    (_SRC / "tgw" / "http_server.py", 2679),  # (c) todo #1464 envelope-shape gate — is_envelope() check only (Set A)
+    (_SRC / "tgw" / "http_server.py", 2686),  # (c) todo #1464 envelope-shape gate — is_envelope() check only (Set B)
+    (_SRC / "tgw" / "http_server.py", 4215),  # (b) accept_proposals revision_draft.delta — different dict, fed to set_ebay_aspects()
+    (_SRC / "tgw" / "http_server.py", 4216),  # (a) accept_proposals — set_ebay_aspects() accessor call on the proposal dict
+    (_SRC / "tgw" / "http_server.py", 9407),  # (b) revision_draft.delta proposal read for item-detail display
+    (_SRC / "tgw" / "operator_objects.py", 1491),  # (b) revision_draft.delta proposal read (operator-object proposed-aspect view; read-only builder)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)

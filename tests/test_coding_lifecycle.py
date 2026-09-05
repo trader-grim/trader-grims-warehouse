@@ -2264,7 +2264,7 @@ def test_installed_config_and_services_are_exact_and_forbid_broad_effects():
         assert "type=simple" in body
         if name == "tgw-claude-review-worker.service":
             assert "user=claude" in body
-            assert "tgw_review_executor=claude" in body
+            assert "tgw_review_executor=claude" not in body
             assert "tgw_review_require_actor=claude" in body
             assert "tgw_claude_review_bin=/home/claude/.local/bin/claude" in body
             assert "privatenetwork=true" not in body

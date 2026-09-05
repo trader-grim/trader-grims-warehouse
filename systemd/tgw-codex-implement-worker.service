@@ -16,7 +16,6 @@ Environment=HOME=/home/claude
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=GIT_OPTIONAL_LOCKS=0
 Environment=PYTHONPATH=src
-Environment=TGW_IMPLEMENT_EXECUTOR=claude
 Environment=TGW_CLAUDE_BIN=/home/claude/.local/bin/claude
 Environment=ANTHROPIC_MODEL=claude-sonnet-5
 ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.development.local_workflow --config /opt/TGW/tgw-lib/config/tgw-coding-local.json worker --queue codex-implement

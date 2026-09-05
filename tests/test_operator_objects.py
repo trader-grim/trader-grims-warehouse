@@ -402,6 +402,9 @@ def test_server_builder_publishes_complete_thin_client_contract():
         "item_condition_required": True,
         "control": "select",
         "options": [{"value": "USED_GOOD", "label": "Used - Good"}],
+        "invalid_current": None,
+        "suggested_replacement": None,
+        "hint": None,
     }
     assert {command["id"]: command["enabled"] for command in view["commands"]} == {
         "save-inventory": True,

@@ -2048,10 +2048,32 @@ def execute_item_operator_command(
                         status_code=503,
                         detail="condition policy is unresolved for the selected category",
                     )
-                if required is False or requested_condition not in allowed_conditions:
+                if required is False:
                     raise HTTPException(
                         status_code=422,
-                        detail="condition is not valid for the selected category",
+                        detail=(
+                            f"condition {requested_condition!r} is not valid "
+                            f"for eBay category {requested_category}; this "
+                            "category does not require condition, so choose "
+                            "the blank option"
+                        ),
+                    )
+                if requested_condition not in allowed_conditions:
+                    remap = refreshed_context.get("condition_remap")
+                    suggestion = (
+                        f"; suggested same-or-worse choice is "
+                        f"{remap['label']!r} ({remap['enum']})"
+                        if isinstance(remap, Mapping) and remap.get("enum")
+                        else ""
+                    )
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"condition {requested_condition!r} is not valid "
+                            f"for eBay category {requested_category}"
+                            f"{suggestion}; select the displayed choice "
+                            "explicitly"
+                        ),
                     )
             patch_fields = {"draft_listing": draft_fields}
         else:

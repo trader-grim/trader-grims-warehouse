@@ -66,14 +66,32 @@ _CONTEXT_TOOLS = (
 _MANUAL_REL = PurePosixPath(".tgw-coding-history/implementation/manual")
 _MANUAL_TASK_NAME = "task.json"
 _MANUAL_DONE_NAME = "done.json"
+# Executors this runner has a branch for (see _run_with_lease). The model
+# selector may name others as "known" but only these can actually run here.
 _MANUAL_EXECUTORS = frozenset({"codex", "manual", "claude"})
+
+_SELECTION_CACHE: dict[str, Any] = {}
+
+
+def _selection() -> Any:
+    """The implementation-executor decision for this job (cached per process)."""
+    if "value" not in _SELECTION_CACHE:
+        from tgw.model_selector import ModelSelectorError, select_executor
+
+        try:
+            _SELECTION_CACHE["value"] = select_executor("implementation")
+        except ModelSelectorError as exc:
+            raise HardFailure(f"implementation executor selection failed: {exc}") from exc
+    return _SELECTION_CACHE["value"]
 
 
 def _executor() -> str:
-    value = os.environ.get("TGW_IMPLEMENT_EXECUTOR", "codex")
-    if value not in _MANUAL_EXECUTORS:
-        raise HardFailure(f"unsupported implementation executor: {value!r}")
-    return value
+    sel = _selection()
+    if sel.status != "SELECTED" or sel.executor is None:
+        raise HardFailure(f"no implementation executor available: {sel.reason}")
+    if sel.executor not in _MANUAL_EXECUTORS:
+        raise HardFailure(f"selected implementation executor {sel.executor!r} has no runner here")
+    return sel.executor
 
 
 def _summary_kind() -> str:
@@ -911,7 +929,21 @@ def run(job: dict[str, Any], cwd: Path, *, invoke: Invoke = subprocess.run) -> d
     else:
         lease = _exclusive_worktree_lease(cwd)
     with lease:
-        return _run_with_lease(job, cwd, invoke=invoke)
+        result = _run_with_lease(job, cwd, invoke=invoke)
+    # Record which executor was selected and why. The launcher worker only
+    # forwards outcome/established_conditions/artifacts from this dict, so the
+    # receipt must live inside the first (primary) artifact to survive into
+    # the persisted coding-lifecycle receipt, the same way coding_review.py
+    # nests it in its single review artifact.
+    try:
+        selection = _selection().receipt()
+    except HardFailure:
+        selection = None
+    if selection is not None and isinstance(result, dict):
+        artifacts = result.get("artifacts")
+        if isinstance(artifacts, list) and artifacts and isinstance(artifacts[0], dict):
+            artifacts[0]["model_selection"] = selection
+    return result
 
 
 def main() -> int:

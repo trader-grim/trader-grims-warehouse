@@ -770,7 +770,7 @@ def test_manual_executor_timeout_stashes_late_source(tmp_path, monkeypatch):
 def test_unknown_executor_fails_closed(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "bogus")
-    with pytest.raises(codex_implement.HardFailure, match="unsupported implementation executor"):
+    with pytest.raises(codex_implement.HardFailure, match="not a known executor"):
         codex_implement.run(_job(), repo)
 
 
@@ -960,3 +960,102 @@ def test_claude_executor_invalid_report_contract_fails(tmp_path, monkeypatch):
     assert result["outcome"] == "failed"
     kinds = [item["kind"] for item in result["artifacts"]]
     assert "claude_failure" in kinds
+
+
+def _write_availability(directory, data):
+    path = directory / "model-availability.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def test_executor_is_read_from_the_model_selector_not_a_hardcoded_default(
+    tmp_path, tmp_path_factory, monkeypatch
+):
+    """No env pin: the config's 'implementation' policy, not a hardcoded
+    default, must decide which executor actually runs.
+    """
+    repo = _repo(tmp_path)
+    monkeypatch.delenv("TGW_IMPLEMENT_EXECUTOR", raising=False)
+    availability = _write_availability(
+        tmp_path_factory.mktemp("availability"),
+        {
+            "updated": "2026-09-04",
+            "executors": {
+                "codex": {"available": False, "reason": "20x Pro lapsed"},
+                "claude": {"available": True},
+                "manual": {"available": True},
+            },
+            "roles": {
+                "implementation": {"prefer": ["codex", "claude", "manual"]},
+                "review": {"prefer": ["claude", "codex", "manual"]},
+            },
+        },
+    )
+    monkeypatch.setenv("TGW_MODEL_AVAILABILITY", str(availability))
+    codex_implement._SELECTION_CACHE.clear()
+    monkeypatch.setattr(codex_implement, "_claude_binary", lambda: "/bin/true")
+    report = {"status": "implemented", "summary": "selector routed to claude", "tests": ["focused"]}
+
+    def edit(cwd: Path) -> None:
+        (cwd / "feature.py").write_text("VALUE = 3\n", encoding="utf-8")
+
+    result = codex_implement.run(_job(), repo, invoke=_claude_invoke(report=report, edit=edit))
+    assert result["outcome"] == "satisfied"
+    kinds = [item["kind"] for item in result["artifacts"]]
+    assert "claude_summary" in kinds
+    selection = result["artifacts"][0]["model_selection"]
+    assert selection["schema"] == "tgw-model-selection/v1"
+    assert selection["role"] == "implementation"
+    assert selection["status"] == "SELECTED"
+    assert selection["executor"] == "claude"
+    assert "policy" in selection["reason"]
+    assert "pinned" not in selection["reason"]
+
+
+def test_committed_availability_file_routes_implementation_to_claude(tmp_path, monkeypatch):
+    """The committed config/model-availability.json (codex + opencode both
+    unavailable) must fall through to claude for the implementation role,
+    exactly as it does live.
+    """
+    repo = _repo(tmp_path)
+    monkeypatch.delenv("TGW_IMPLEMENT_EXECUTOR", raising=False)
+    monkeypatch.delenv("TGW_MODEL_AVAILABILITY", raising=False)
+    from tgw import model_selector
+
+    monkeypatch.setattr(model_selector, "_CONFIG_PATH", model_selector._REPO_DEFAULT)
+    codex_implement._SELECTION_CACHE.clear()
+    monkeypatch.setattr(codex_implement, "_claude_binary", lambda: "/bin/true")
+    report = {"status": "implemented", "summary": "committed config routed to claude", "tests": ["focused"]}
+
+    def edit(cwd: Path) -> None:
+        (cwd / "feature.py").write_text("VALUE = 4\n", encoding="utf-8")
+
+    result = codex_implement.run(_job(), repo, invoke=_claude_invoke(report=report, edit=edit))
+    assert result["outcome"] == "satisfied"
+    assert result["artifacts"][0]["model_selection"]["executor"] == "claude"
+
+
+def test_no_available_executor_in_policy_aborts_without_silent_fallback(
+    tmp_path, tmp_path_factory, monkeypatch
+):
+    repo = _repo(tmp_path)
+    monkeypatch.delenv("TGW_IMPLEMENT_EXECUTOR", raising=False)
+    availability = _write_availability(
+        tmp_path_factory.mktemp("availability"),
+        {
+            "updated": "2026-09-04",
+            "executors": {
+                "codex": {"available": False, "reason": "20x Pro lapsed"},
+                "claude": {"available": False, "reason": "not authenticated"},
+                "manual": {"available": False, "reason": "no supervising session"},
+            },
+            "roles": {
+                "implementation": {"prefer": ["codex", "claude", "manual"]},
+                "review": {"prefer": ["claude", "codex", "manual"]},
+            },
+        },
+    )
+    monkeypatch.setenv("TGW_MODEL_AVAILABILITY", str(availability))
+    codex_implement._SELECTION_CACHE.clear()
+    with pytest.raises(codex_implement.HardFailure, match="no implementation executor available"):
+        codex_implement.run(_job(), repo)

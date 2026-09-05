@@ -9,6 +9,27 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _pin_coding_executors(monkeypatch):
+    """Default the coding executor selection to codex for the whole suite.
+
+    The committed config/model-availability.json marks codex unavailable (its
+    real state), which would route every review/implement test through the
+    claude/manual backend. Tests that mean to exercise a specific executor set
+    TGW_IMPLEMENT_EXECUTOR / TGW_REVIEW_EXECUTOR (or TGW_MODEL_AVAILABILITY)
+    themselves; the model selector itself is covered by test_model_selector.py.
+    """
+    monkeypatch.delenv("TGW_MODEL_AVAILABILITY", raising=False)
+    monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "codex")
+    monkeypatch.setenv("TGW_REVIEW_EXECUTOR", "codex")
+    try:
+        from tgw.workers import codex_implement
+
+        codex_implement._SELECTION_CACHE.clear()
+    except Exception:  # pragma: no cover - import-order safety only
+        pass
+
+
 @pytest.fixture
 def durable_path():
     """A small disposable root for code that correctly rejects ``/tmp``.

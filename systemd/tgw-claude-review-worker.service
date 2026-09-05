@@ -15,7 +15,6 @@ WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current
 Environment=HOME=/home/claude
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=GIT_OPTIONAL_LOCKS=0
-Environment=TGW_REVIEW_EXECUTOR=claude
 Environment=TGW_REVIEW_REQUIRE_ACTOR=claude
 Environment=TGW_CLAUDE_REVIEW_BIN=/home/claude/.local/bin/claude
 Environment=PYTHONPATH=src

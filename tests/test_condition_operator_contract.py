@@ -84,7 +84,10 @@ def test_save_rejects_nonempty_condition_for_resolved_optional_category(
         )
 
     assert exc_info.value.status_code == 422
-    assert exc_info.value.detail == "condition is not valid for the selected category"
+    assert exc_info.value.detail == (
+        "condition 'USED_GOOD' is not valid for eBay category 108857; this "
+        "category does not require condition, so choose the blank option"
+    )
 
 
 def test_save_holds_cached_choices_without_requirement_flag(tmp_path, monkeypatch):
