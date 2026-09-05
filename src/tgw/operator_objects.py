@@ -16,7 +16,6 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 
 from tgw import inventory_record
 from tgw.ebay.draft_specifics import get_ebay_aspects
-from tgw.item_mutation import item_generation
 
 OPERATOR_OBJECT_SCHEMA = "tgw-operator-object/v1"
 ADAPTER_VIEW_SCHEMA = "tgw-operator-adapter-view/v1"
@@ -2216,14 +2215,6 @@ def build_item_operator_object(
     conditions_by_identity: dict[str, list[str]] = {}
     for value in configured_record_conditions:
         conditions_by_identity.setdefault(value.casefold(), []).append(value)
-    condition_collisions = [
-        {
-            "identity": identity,
-            "values": sorted(values, key=lambda value: (value.casefold(), value)),
-        }
-        for identity, values in sorted(conditions_by_identity.items())
-        if len(values) > 1
-    ]
     record_conditions = []
     for configured in configured_record_conditions:
         if len(conditions_by_identity[configured.casefold()]) != 1:
@@ -2244,14 +2235,6 @@ def build_item_operator_object(
         {"value": value, "label": value}
         for value in record_conditions
     ]
-    published_record_condition = next(
-        (
-            value
-            for value in record_conditions
-            if value.casefold() == stored_record_condition.casefold()
-        ),
-        stored_record_condition,
-    )
     if stored_record_condition and not any(
         option["value"].casefold() == stored_record_condition.casefold()
         for option in record_condition_options
@@ -2263,14 +2246,6 @@ def build_item_operator_object(
             ),
             "display_only": True,
         })
-    group_options = list(context.get("category_groups") or ())
-    record_condition_projection = (
-        "record_condition_vocabulary" in context or bool(group_options)
-    )
-    record_condition_drift = {
-        "empty": not configured_record_conditions,
-        "casefold_collisions": condition_collisions,
-    }
     field_schema = {
         "item_fields": {
             "title": {"type": "string", "label": "Inventory title", "value": item.get("title") or ""},

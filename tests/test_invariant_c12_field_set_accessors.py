@@ -79,7 +79,7 @@ _ALLOWLIST = {
     (_SRC / "tgw" / "http_server.py", 4193),  # (b) accept_proposals revision_draft.delta — different dict, fed to set_ebay_aspects()
     (_SRC / "tgw" / "http_server.py", 4194),  # (a) accept_proposals — set_ebay_aspects() accessor call on the proposal dict
     (_SRC / "tgw" / "http_server.py", 9385),  # (b) revision_draft.delta proposal read for item-detail display
-    (_SRC / "tgw" / "operator_objects.py", 1492),  # (b) revision_draft.delta proposal read (operator-object proposed-aspect view; read-only builder)
+    (_SRC / "tgw" / "operator_objects.py", 1491),  # (b) revision_draft.delta proposal read (operator-object proposed-aspect view; read-only builder)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 114),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 121),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
     (_SRC / "tgw" / "ebay" / "category_aspect_migration.py", 124),  # (a) accessor patch output moving onward (todo #1471 apply_category_aspect_migration)
