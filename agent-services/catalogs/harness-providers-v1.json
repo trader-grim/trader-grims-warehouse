@@ -47,9 +47,10 @@
       "vendor_family": "claude",
       "receiver_profile": {"id": "claude-code", "version": 1},
       "qualified_roles": ["independent-review"],
-      "capabilities": ["repository-shell", "git-inspection", "governed-interactive-review"],
+      "capabilities": ["repository-shell", "git-inspection", "governed-interactive-review", "canonical-source-publish", "coding-runtime-bootstrap", "coding-workflow-diagnostic", "production-readonly-diagnostic", "plan-vault-read"],
       "runner": {"kind": "configured-argv", "key": "governed-review"},
       "adapter_requirements": ["tgw-plan", "promptcraft", "promptcraft-card-handoff"],
+      "permission_translation": "agent-services/harnesses/claude/permission-translation-v1.md",
       "preference": 140
     }
   ]
