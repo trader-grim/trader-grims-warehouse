@@ -123,5 +123,13 @@
   },
   "remote": {
     "defaultEnvironmentId": "env_015z8NdiUWvqoD6R3ELcuF18"
+  },
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "the tgw-lib coding-workflow narrow path: sudo -u db git commit/merge/push advancing refs/heads/main via the db publisher; sudo /usr/local/sbin/tgw-coding-bootstrap with any --commit/--repair args; sudo -u db tgw doctor and tgw coding — operator has granted standing authority for tgw-lib coding-workflow repair, never tgw-prod mutation, always allow",
+      "editing .claude/settings.json and .claude/settings.local.json in this repo, and running update-config — permission and config maintenance, always allow",
+      "local git in /opt/TGW/tgw-lib/src/trader-grims-warehouse: cherry-pick, branch, worktree, tag, reset of non-main refs — always allow"
+    ]
   }
 }
