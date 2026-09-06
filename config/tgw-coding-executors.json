@@ -1,0 +1,79 @@
+{
+  "_comment": "One declarative source of truth for coding executors — LEAF-11-9 W1. tgw.coding_executor_catalog parses this; harness_session (executor chain + credential + binary discovery), harness_cli (binary path for the confined coder), and tgw.model_selector (known-executor set) all read it and hold NO hard-coded executor list. Adding an executor is an entry here plus one re-run of `tgw-coding-bootstrap --repair harness` — no code change. The built-in `stub` executor (offline canary, W0) has no entry: it needs no binary/credential/install. `enabled` is 'wired and installable on this host now'; a missing credential is a WARN (executor marked unavailable), never a failure. Edit /opt/TGW/tgw-lib/config/tgw-coding-executors.json to change it live; this repo copy is the committed default.",
+  "schema": "tgw-coding-executors/v1",
+  "updated": "2026-09-06",
+  "executors": {
+    "claude": {
+      "binary_name": "claude",
+      "install_source": "npm:@anthropic-ai/claude-code",
+      "install_target_path": "/usr/local/bin/claude",
+      "runtime_deps": ["node"],
+      "verify_cmd": ["claude", "--version"],
+      "credential_env": ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+      "auth_file": null,
+      "enabled": true,
+      "discovery_paths": ["/home/claude/.local/bin/claude"],
+      "note": "Operator Claude subscription (flat-rate OAuth token) is the primary credential; the harness runs each session under a fresh HOME so it never touches an operator login dir."
+    },
+    "codex": {
+      "binary_name": "codex",
+      "install_source": "npm:@openai/codex",
+      "install_target_path": "/usr/local/bin/codex",
+      "runtime_deps": ["node"],
+      "verify_cmd": ["codex", "--version"],
+      "credential_env": ["CODEX_API_KEY", "OPENAI_API_KEY"],
+      "auth_file": "~/.codex/auth.json",
+      "enabled": true,
+      "discovery_paths": [],
+      "note": "Also usable from a ChatGPT login copied to the per-session CODEX_HOME/auth.json (no env key needed)."
+    },
+    "deepseek": {
+      "binary_name": "dsh",
+      "install_source": null,
+      "install_target_path": "/usr/local/bin/dsh",
+      "runtime_deps": [],
+      "verify_cmd": ["dsh", "--version"],
+      "credential_env": ["DEEPSEEK_API_KEY"],
+      "auth_file": null,
+      "enabled": false,
+      "discovery_paths": ["/home/deepseek/.local/bin/dsh"],
+      "note": "`dsh` (deepseek-harness) is operator-provisioned, not auto-installable yet — install_source null. Set enabled true once the binary is on this host."
+    },
+    "gemini": {
+      "binary_name": "gemini",
+      "install_source": "npm:@google/gemini-cli",
+      "install_target_path": "/usr/local/bin/gemini",
+      "runtime_deps": ["node"],
+      "verify_cmd": ["gemini", "--version"],
+      "credential_env": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+      "auth_file": "~/.gemini/oauth_creds.json",
+      "enabled": false,
+      "discovery_paths": [],
+      "note": "Not installed on this host yet."
+    },
+    "opencode": {
+      "binary_name": "opencode",
+      "install_source": "npm:opencode-ai",
+      "install_target_path": "/usr/local/bin/opencode",
+      "runtime_deps": ["node"],
+      "verify_cmd": ["opencode", "--version"],
+      "credential_env": ["OPENCODE_API_KEY", "OPENROUTER_API_KEY"],
+      "auth_file": "~/.local/share/opencode/auth.json",
+      "enabled": false,
+      "discovery_paths": ["/home/opencode/.local/bin/opencode"],
+      "note": "opencode-zen key is a single gateway to ~every provider (see model-availability.json cost_policy). Binary present under /home/opencode but no harness_session runner wired yet — a chain preference of 'opencode' is a WARN skip until then."
+    },
+    "agy": {
+      "binary_name": "agy",
+      "install_source": null,
+      "install_target_path": "/usr/local/bin/agy",
+      "runtime_deps": [],
+      "verify_cmd": ["agy", "--version"],
+      "credential_env": ["AGY_API_KEY"],
+      "auth_file": null,
+      "enabled": false,
+      "discovery_paths": [],
+      "note": "Operator-provisioned agent CLI, not installed on this host yet."
+    }
+  }
+}

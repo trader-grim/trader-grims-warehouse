@@ -79,6 +79,30 @@ def test_main_wires_orchestrator(monkeypatch, tmp_path):
     assert seen["has_publisher"] is True  # default: sudo -u db publisher
 
 
+def test_resolve_executor_bins_is_catalogue_driven(tmp_path, monkeypatch):
+    import json
+
+    from tgw import coding_executor_catalog
+
+    acme = tmp_path / "acme"
+    acme.write_text("#!/bin/sh\n")
+    acme.chmod(0o755)
+    cat = tmp_path / "executors.json"
+    cat.write_text(json.dumps({"executors": {
+        "acme": {"binary_name": "acme", "install_source": None,
+                 "install_target_path": str(acme), "runtime_deps": [], "verify_cmd": None,
+                 "credential_env": ["ACME_API_KEY"], "auth_file": None, "enabled": True},
+        "beta": {"binary_name": "beta-missing", "install_source": None,
+                 "install_target_path": None, "runtime_deps": [], "verify_cmd": None,
+                 "credential_env": [], "auth_file": None, "enabled": True},
+    }}))
+    monkeypatch.setenv("TGW_CODING_EXECUTORS", str(cat))
+    monkeypatch.delenv(coding_executor_catalog.binary_env_var("acme"), raising=False)
+    monkeypatch.setattr(coding_executor_catalog.shutil, "which", lambda _n: None)
+    resolved = harness_cli._resolve_executor_bins({})
+    assert resolved == {"acme": str(acme.resolve())}  # 'beta' binary not found -> omitted
+
+
 def test_main_self_publish_drops_the_db_publisher(monkeypatch, tmp_path):
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(harness_cli.harness_runners, "build_runners", lambda *a, **k: "R")

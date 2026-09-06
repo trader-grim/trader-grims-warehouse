@@ -28,6 +28,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+from tgw import coding_executor_catalog
+
 Invoke = Callable[..., "subprocess.CompletedProcess[str]"]
 
 _CONTEXT_MCP = Path("/opt/TGW/tgw-lib/bin/tgw-context-mcp")
@@ -89,11 +91,40 @@ class SessionUnavailable(RuntimeError):
 # executor selection — an ordered chain, not one choice
 # --------------------------------------------------------------------------- #
 
-_EXECUTORS = ("claude", "codex", "stub")
-_DEFAULT_CHAIN = ("claude", "codex")
-# 'stub' is the offline bootstrap executor (LEAF-11-9 W0). It is never in the
-# default chain or a model_selector result — it runs only when a caller asks for
-# it by name (executor_preference / TGW_HARNESS_EXECUTOR).
+# 'stub' is the offline bootstrap executor (LEAF-11-9 W0). It has no catalogue
+# entry (no binary, no credential, no install) and is never in the default
+# chain or a model_selector result — it runs only when a caller names it
+# (executor_preference / TGW_HARNESS_EXECUTOR).
+_STUB = "stub"
+
+# Executors this module knows how to *spawn*. The catalogue (W1) is the source
+# of truth for which executors exist and where their binaries/credentials live;
+# this set names the ones with a session-invocation implementation here. A
+# catalogue executor not in this set is a dispatch-time WARN skip ("no runner
+# wired yet"), never a failure — wiring a runner is the only code change a new
+# executor needs.
+_WIRED_RUNNERS = frozenset({"claude", "codex"})
+
+
+def _valid_executors() -> frozenset[str]:
+    """Every name the chain will accept: catalogue executors plus the built-in
+    stub. A preference naming anything else is rejected."""
+    try:
+        names = coding_executor_catalog.executor_names()
+    except coding_executor_catalog.CatalogError:
+        names = ()
+    return frozenset(names) | {_STUB}
+
+
+def _default_chain() -> list[str]:
+    """Enabled catalogue executors that also have a session runner wired, in
+    catalogue declaration order. Dispatch skips any that turn out unavailable
+    (no credential / no binary), so an over-inclusive chain is harmless."""
+    try:
+        enabled = coding_executor_catalog.executor_names(enabled_only=True)
+    except coding_executor_catalog.CatalogError:
+        enabled = ()
+    return [name for name in enabled if name in _WIRED_RUNNERS]
 
 
 def _executor_chain(job: dict[str, Any] | None = None) -> list[str]:
@@ -105,73 +136,66 @@ def _executor_chain(job: dict[str, Any] | None = None) -> list[str]:
       job["executor_preference"] (list) / job["executor"] (single)
       TGW_HARNESS_EXECUTOR
       tgw.model_selector ranking (put its pick first, rest of the default after)
-      _DEFAULT_CHAIN
+      the catalogue's enabled executors (default chain)
     """
+    valid = _valid_executors()
     if job:
         pref = job.get("executor_preference")
         if isinstance(pref, str):
             pref = [pref]
         if not pref and job.get("executor"):
             pref = [job["executor"]]
-        chain = [e for e in (pref or []) if e in _EXECUTORS]
-        if chain:
-            return chain
+        pref = list(pref or [])
+        if pref:
+            unknown = [e for e in pref if e not in valid]
+            if unknown:
+                raise SessionError(
+                    f"unknown executor(s) {unknown} — not in the coding-executor "
+                    f"catalogue (known: {sorted(valid)})"
+                )
+            return pref
     forced = os.environ.get("TGW_HARNESS_EXECUTOR")
-    if forced in _EXECUTORS:
+    if forced and forced in valid:
         return [forced]
+    default = _default_chain()
     try:
         from tgw.model_selector import select_executor
 
         selection = select_executor("implementation")
-        if selection.status == "SELECTED" and selection.executor in _EXECUTORS:
+        if selection.status == "SELECTED" and selection.executor in valid \
+                and selection.executor != _STUB:
             first = selection.executor
-            return [first, *[e for e in _DEFAULT_CHAIN if e != first]]
+            return [first, *[e for e in default if e != first]]
     except Exception:
         pass  # advisory; fall through to the default chain
-    return list(_DEFAULT_CHAIN)
+    return default
 
 
 def _session_credential(executor: str) -> tuple[str, str] | None:
     """(env_var, value) for *executor*'s model credential, from the secrets
-    facility. None means no env credential — the executor may still be usable
-    from a file login in the coder's home (codex ~/.codex/auth.json), which the
-    per-executor runner checks."""
-    try:
-        from tgw.config import DEFAULT_CONFIG, load_config
-
-        load_config(DEFAULT_CONFIG)  # sources secrets_root/tgw.env; harmless if absent
-    except Exception:
-        pass
-    names = {
-        "claude": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
-        "codex": ("CODEX_API_KEY", "OPENAI_API_KEY"),
-    }.get(executor, (f"{executor.upper()}_API_KEY",))
-    for name in names:
-        value = os.environ.get(name, "")
-        if value:
-            return name, value
-    return None
+    facility (slot names from the W1 catalogue). None means no env credential —
+    the executor may still be usable from an ``auth_file`` login in the coder's
+    home (codex ~/.codex/auth.json), which the per-executor runner checks."""
+    return coding_executor_catalog.session_credential(executor)
 
 
-def _codex_binary(*, optional: bool = False) -> str | None:
-    configured = os.environ.get("TGW_CODEX_BIN")
-    candidate = Path(configured) if configured else Path.home() / ".local/bin/codex"
-    if candidate.is_file() and os.access(candidate, os.X_OK):
-        return str(candidate.resolve())
-    found = shutil.which("codex")
-    if found:
+def _executor_binary(name: str, *, optional: bool = False) -> str | None:
+    """Absolute path to *name*'s executable via the W1 catalogue's discovery
+    order ($TGW_<NAME>_BIN, $PATH, install target, discovery paths)."""
+    found = coding_executor_catalog.discover_binary(name)
+    if found and os.access(found, os.X_OK):
         return found
     if optional:
         return None
-    raise SessionError("codex executable is unavailable")
+    raise SessionError(f"{name} executable is unavailable")
+
+
+def _codex_binary(*, optional: bool = False) -> str | None:
+    return _executor_binary("codex", optional=optional)
 
 
 def _claude_binary() -> str:
-    configured = os.environ.get("TGW_CLAUDE_BIN")
-    candidate = configured or shutil.which("claude")
-    if not candidate or not os.access(candidate, os.X_OK):
-        raise SessionError("claude executable is unavailable")
-    return candidate
+    return _executor_binary("claude")  # type: ignore[return-value]
 
 
 # --------------------------------------------------------------------------- #
@@ -326,8 +350,10 @@ def _run_claude(prompt: str, worktree: Path, *, invoke: Invoke) -> dict[str, Any
     # per-project state (~/.claude/projects/* — transcript, session cache). A
     # fresh HOME per session guarantees it; the credential comes from the
     # secrets facility, never the caller's live login dir.
-    if not shutil.which(os.environ.get("TGW_CLAUDE_BIN") or "claude"):
-        raise SessionUnavailable("claude executable not on PATH")
+    try:
+        claude_bin = _claude_binary()
+    except SessionError as exc:
+        raise SessionUnavailable(str(exc)) from exc
     cred = _session_credential("claude")
     with tempfile.TemporaryDirectory(prefix=".tgw-harness-claude-", dir=worktree) as tmp:
         home = Path(tmp) / "home"
@@ -338,7 +364,7 @@ def _run_claude(prompt: str, worktree: Path, *, invoke: Invoke) -> dict[str, Any
         if cred:
             env[cred[0]] = cred[1]
         completed = invoke(
-            [_claude_binary(), "-p", "--output-format", "json",
+            [claude_bin, "-p", "--output-format", "json",
              "--permission-mode", "bypassPermissions"],
             cwd=worktree, input=prompt, text=True, capture_output=True, check=False,
             env=env, timeout=_timeout_s(),
@@ -352,19 +378,22 @@ def _run_claude(prompt: str, worktree: Path, *, invoke: Invoke) -> dict[str, Any
 
 
 def _run_codex(prompt: str, worktree: Path, schema: dict[str, Any], *, invoke: Invoke) -> dict[str, Any] | None:
-    if not _codex_binary(optional=True):
+    codex_bin = _codex_binary(optional=True)
+    if not codex_bin:
         raise SessionUnavailable("codex executable not on PATH")
     cred = _session_credential("codex")
-    file_auth = (Path.home() / ".codex" / "auth.json").is_file()
+    _codex_spec = coding_executor_catalog.executor_spec("codex")
+    auth_src = _codex_spec.auth_file_path() if _codex_spec else Path.home() / ".codex" / "auth.json"
+    file_auth = bool(auth_src and auth_src.is_file())
     if not cred and not file_auth:
-        raise SessionUnavailable("codex: no CODEX/OPENAI key and no ~/.codex/auth.json")
+        raise SessionUnavailable(f"codex: no CODEX/OPENAI key and no {auth_src}")
     with tempfile.TemporaryDirectory(prefix=".tgw-harness-session-", dir=worktree) as tmp:
         temp = Path(tmp)
         schema_path, output_path = temp / "schema.json", temp / "result.json"
         codex_home = temp / "codex-home"
         codex_home.mkdir(mode=0o700)
         if file_auth:
-            shutil.copyfile(Path.home() / ".codex" / "auth.json", codex_home / "auth.json")
+            shutil.copyfile(auth_src, codex_home / "auth.json")
             (codex_home / "auth.json").chmod(0o600)
         _write_isolated_codex_config(codex_home)
         schema_path.write_text(json.dumps(schema, sort_keys=True), encoding="utf-8")
@@ -375,7 +404,7 @@ def _run_codex(prompt: str, worktree: Path, schema: dict[str, Any], *, invoke: I
         if cred:
             env[cred[0]] = cred[1]
         completed = invoke(
-            [_codex_binary(), "--ask-for-approval", "never", "--sandbox",
+            [codex_bin, "--ask-for-approval", "never", "--sandbox",
              "danger-full-access", "exec", "--ephemeral", "-C", str(worktree),
              "--output-schema", str(schema_path), "-o", str(output_path), "-"],
             cwd=worktree, input=prompt, text=True, capture_output=True, check=False,
@@ -427,14 +456,15 @@ def _apply_executor_bins(job: dict[str, Any]) -> None:
 
     The confined coder identity runs under ``sudo`` with a minimal
     ``secure_path`` and cannot discover ``claude`` when it lives under an
-    operator home; the orchestrator resolves the path and passes it here."""
+    operator home; the orchestrator resolves the path and passes it here. The
+    key is the catalogue executor name; the env var is the catalogue's
+    per-executor convention (``TGW_<NAME>_BIN``)."""
     bins = job.get("executor_bin")
     if not isinstance(bins, dict):
         return
-    if bins.get("claude"):
-        os.environ["TGW_CLAUDE_BIN"] = str(bins["claude"])
-    if bins.get("codex"):
-        os.environ["TGW_CODEX_BIN"] = str(bins["codex"])
+    for name, path in bins.items():
+        if isinstance(name, str) and path:
+            os.environ[coding_executor_catalog.binary_env_var(name)] = str(path)
 
 
 def _dispatch_chain(
@@ -448,12 +478,16 @@ def _dispatch_chain(
     skipped: list[str] = []
     for executor in _executor_chain(job):
         try:
-            if executor == "stub":
+            if executor == _STUB:
                 report = _run_stub(worktree, schema)
             elif executor == "claude":
                 report = _run_claude(prompt, worktree, invoke=invoke)
-            else:
+            elif executor == "codex":
                 report = _run_codex(prompt, worktree, schema, invoke=invoke)
+            else:
+                # a catalogue executor with no session-invocation implementation
+                # yet — skip it and keep the chain moving (never a task failure).
+                raise SessionUnavailable("no harness_session runner wired for this executor yet")
         except SessionUnavailable as exc:
             skipped.append(f"{executor}: {exc}")
             continue

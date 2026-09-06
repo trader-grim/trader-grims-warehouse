@@ -45,16 +45,32 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tgw import coding_executor_catalog
+
 SCHEMA = "tgw-model-selection/v1"
 
 _CONFIG_PATH = Path("/opt/TGW/tgw-lib/config/model-availability.json")
 _REPO_DEFAULT = Path(__file__).resolve().parent.parent.parent / "config" / "model-availability.json"
 
-# Executors the coding lifecycle knows how to run. A policy or availability file
-# may not name an executor outside this set.
-KNOWN_EXECUTORS: frozenset[str] = frozenset(
-    {"codex", "claude", "opencode", "manual", "deepseek"}
-)
+# Names a policy/availability file may reference beyond the coding-executor
+# catalogue: ``manual`` is the always-available supervised-session fallback (it
+# has no binary or install, so it is not a catalogue entry).
+_SELECTOR_BUILTINS: frozenset[str] = frozenset({"manual"})
+
+
+def known_executors() -> frozenset[str]:
+    """Every executor name the selector accepts — the W1 coding-executor
+    catalogue (the single source of truth) plus the selector built-ins. There
+    is no hard-coded executor list here."""
+    try:
+        catalog = frozenset(coding_executor_catalog.executor_names())
+    except coding_executor_catalog.CatalogError:
+        catalog = frozenset()
+    return catalog | _SELECTOR_BUILTINS
+
+
+# Back-compat module attribute (a snapshot at import); prefer known_executors().
+KNOWN_EXECUTORS: frozenset[str] = known_executors()
 
 # Used when no availability file exists at all: keep the lifecycle usable by a
 # supervising session rather than dead. Every real deployment ships the
@@ -116,9 +132,10 @@ def load_availability(path: Path | None = None) -> dict[str, Any]:
         raise ModelSelectorError(f"model-availability file is unreadable: {resolved}: {exc}") from exc
     if not isinstance(data, dict) or not isinstance(data.get("executors"), dict) or not isinstance(data.get("roles"), dict):
         raise ModelSelectorError(f"model-availability file is malformed (need 'executors' and 'roles' objects): {resolved}")
+    known = known_executors()
     for name in data["executors"]:
-        if name not in KNOWN_EXECUTORS:
-            raise ModelSelectorError(f"model-availability names an unknown executor {name!r} (known: {sorted(KNOWN_EXECUTORS)})")
+        if name not in known:
+            raise ModelSelectorError(f"model-availability names an unknown executor {name!r} (known: {sorted(known)})")
     return data
 
 
@@ -143,9 +160,10 @@ def select_executor(role: str, *, availability: dict[str, Any] | None = None) ->
             return "not listed in the availability file"
         return str(entry.get("reason") or "marked unavailable")
 
+    known = known_executors()
     pin = os.environ.get({"implementation": "TGW_IMPLEMENT_EXECUTOR", "review": "TGW_REVIEW_EXECUTOR"}.get(role, ""))
     if pin:
-        if pin not in KNOWN_EXECUTORS:
+        if pin not in known:
             raise ModelSelectorError(f"pinned executor {pin!r} is not a known executor")
         reason = "pinned via env" if _is_available(pin) else f"pinned via env (availability file: {_held_reason(pin)})"
         return Selection(role, "SELECTED", pin, reason, (pin,), updated)
@@ -155,7 +173,7 @@ def select_executor(role: str, *, availability: dict[str, Any] | None = None) ->
         raise ModelSelectorError(f"model-availability has no 'prefer' list for role {role!r}")
     prefer = tuple(str(x) for x in role_policy["prefer"])
     for candidate in prefer:
-        if candidate not in KNOWN_EXECUTORS:
+        if candidate not in known:
             raise ModelSelectorError(f"role {role!r} policy names an unknown executor {candidate!r}")
         if _is_available(candidate):
             reason = f"first available in {role} policy {list(prefer)}"

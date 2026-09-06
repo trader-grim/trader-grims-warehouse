@@ -108,4 +108,25 @@ def test_committed_default_file_is_valid_and_selects_something():
     for role in ("implementation", "review"):
         sel = ms.select_executor(role, availability=data)
         assert sel.status == "SELECTED"
-        assert sel.executor in ms.KNOWN_EXECUTORS
+        assert sel.executor in ms.known_executors()
+
+
+def test_known_executors_come_from_the_coding_executor_catalogue(tmp_path, monkeypatch):
+    # no hard-coded set: point the catalogue at a file with one made-up
+    # executor and the selector's known set follows (plus the 'manual' builtin).
+    import json
+
+    cat = tmp_path / "executors.json"
+    cat.write_text(json.dumps({"executors": {
+        "acme": {"binary_name": "acme", "install_source": None, "install_target_path": None,
+                 "runtime_deps": [], "verify_cmd": None, "credential_env": ["ACME_API_KEY"],
+                 "auth_file": None, "enabled": True},
+    }}))
+    monkeypatch.setenv("TGW_CODING_EXECUTORS", str(cat))
+    assert ms.known_executors() == frozenset({"acme", "manual"})
+    # an availability file naming a catalogue executor now parses
+    path = _write(tmp_path, {**_BASE, "executors": {"acme": {"available": True}},
+                             "roles": {"implementation": {"prefer": ["acme"]},
+                                       "review": {"prefer": ["acme"]}}})
+    monkeypatch.setenv("TGW_MODEL_AVAILABILITY", str(path))
+    assert ms.select_executor("implementation").executor == "acme"

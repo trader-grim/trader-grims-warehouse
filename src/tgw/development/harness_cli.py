@@ -17,33 +17,36 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+from tgw import coding_executor_catalog
 from tgw.development import harness_git, harness_ledger, harness_orchestrator, harness_runners
 
 _REPOSITORY = "/opt/TGW/tgw-lib/src/trader-grims-warehouse"
 _WORKTREE_ROOT = "/opt/TGW/var/worktrees"
 _CODING_CONFIG = Path("/opt/TGW/tgw-lib/config/tgw-coding-local.json")
 
-# The coder session runs under sudo with a minimal secure_path; the orchestrator
-# resolves each executor binary here and passes the absolute path on the job.
-_EXECUTOR_BIN_CANDIDATES = {
-    "claude": ("/usr/local/bin/claude", "/home/claude/.local/bin/claude"),
-    "codex": ("/usr/local/bin/codex",),
-}
 
-
-def _discover_executor_bin(name: str, override: str | None) -> str | None:
-    if override:
-        return override
-    found = shutil.which(name)
-    if found:
-        return found
-    return next((c for c in _EXECUTOR_BIN_CANDIDATES.get(name, ()) if Path(c).exists()), None)
+def _resolve_executor_bins(overrides: dict[str, str | None]) -> dict[str, str]:
+    """Absolute binary paths to hand the confined coder session, one per
+    enabled catalogue executor. The coder runs under sudo with a minimal
+    ``secure_path`` and cannot discover a binary that lives under an operator
+    home, so the orchestrator resolves it here (via the W1 catalogue's
+    discovery order) and passes it on the job. An executor whose binary is not
+    found is simply omitted — the chain skips it at dispatch."""
+    resolved: dict[str, str] = {}
+    try:
+        names = coding_executor_catalog.executor_names(enabled_only=True)
+    except coding_executor_catalog.CatalogError:
+        names = ()
+    for name in names:
+        path = coding_executor_catalog.discover_binary(name, overrides.get(name))
+        if path:
+            resolved[name] = path
+    return resolved
 
 
 def _state_dsn(override: str | None) -> str:
@@ -138,14 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     task_id, body = _task_body(args.target, args.body, dsn)
 
     pref = tuple(e.strip() for e in args.executor_preference.split(",") if e.strip())
-    executor_bin = {
-        name: path
-        for name, path in (
-            ("claude", _discover_executor_bin("claude", args.claude_bin)),
-            ("codex", _discover_executor_bin("codex", args.codex_bin)),
-        )
-        if path
-    }
+    executor_bin = _resolve_executor_bins({"claude": args.claude_bin, "codex": args.codex_bin})
     runners = harness_runners.build_runners(
         repository, args.worktree_root, task_body=body, python=args.python,
         coder_user=(args.coder_user or None),

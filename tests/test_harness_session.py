@@ -245,6 +245,62 @@ def test_stub_executor_is_offline_only_by_explicit_request(monkeypatch):
     assert harness_session._executor_chain() == ["stub"]
 
 
+def test_executor_chain_default_is_built_from_the_catalogue(tmp_path, monkeypatch):
+    # a catalogue with a different enabled set drives the default chain — no
+    # hard-coded ("claude", "codex") list in harness_session.
+    import json
+
+    from tgw import coding_executor_catalog
+
+    cat = tmp_path / "executors.json"
+    cat.write_text(json.dumps({"executors": {
+        "codex": {"binary_name": "codex", "install_source": None, "install_target_path": None,
+                  "runtime_deps": [], "verify_cmd": None, "credential_env": ["CODEX_API_KEY"],
+                  "auth_file": None, "enabled": True},
+        "claude": {"binary_name": "claude", "install_source": None, "install_target_path": None,
+                   "runtime_deps": [], "verify_cmd": None, "credential_env": ["ANTHROPIC_API_KEY"],
+                   "auth_file": None, "enabled": False},
+    }}))
+    monkeypatch.setenv("TGW_CODING_EXECUTORS", str(cat))
+    monkeypatch.delenv("TGW_HARNESS_EXECUTOR", raising=False)
+    monkeypatch.setattr("tgw.model_selector.select_executor",
+                        lambda role: (_ for _ in ()).throw(Exception()))
+    # claude disabled in this catalogue -> only codex in the default chain
+    assert harness_session._executor_chain() == ["codex"]
+    assert coding_executor_catalog  # import used
+
+
+def test_executor_chain_rejects_an_unknown_preference(monkeypatch):
+    monkeypatch.delenv("TGW_CODING_EXECUTORS", raising=False)
+    with pytest.raises(harness_session.SessionError, match="unknown executor"):
+        harness_session._executor_chain({"executor_preference": ["not-an-executor"]})
+
+
+def test_catalogue_executor_without_a_runner_is_a_warn_skip_not_a_failure(tmp_path, monkeypatch):
+    # 'gemini' is in the committed catalogue but has no harness_session runner
+    # yet: the chain must skip it and end 'failed', never raise.
+    monkeypatch.delenv("TGW_CODING_EXECUTORS", raising=False)
+    monkeypatch.setattr(harness_session, "_session_credential", lambda e: None)
+    job = {"task_id": "t", "body": "b", "worktree": str(tmp_path),
+           "executor_preference": ["gemini"]}
+    out = harness_session.run_implement_session(job)
+    assert out["outcome"] == "failed"
+    assert "no harness_session runner" in out["artifacts"][0]["detail"]
+
+
+def test_missing_credential_is_a_warn_the_chain_moves_on(tmp_path, monkeypatch):
+    # claude has no credential -> SessionUnavailable -> chain exhausts to
+    # 'failed' (a WARN), it is never a hard SessionError.
+    monkeypatch.delenv("TGW_CODING_EXECUTORS", raising=False)
+    monkeypatch.setattr(harness_session, "_claude_binary", lambda: "/usr/bin/true")
+    monkeypatch.setattr(harness_session, "_session_credential", lambda e: None)
+    job = {"task_id": "t", "body": "b", "worktree": str(tmp_path),
+           "executor_preference": ["claude"]}
+    out = harness_session.run_implement_session(job, invoke=_fake_invoke("", returncode=1))
+    assert out["outcome"] == "failed"
+    assert out["artifacts"][0]["kind"] == "executor_chain_exhausted"
+
+
 def test_stub_executor_lands_offline(tmp_path, monkeypatch):
     # no binary, no network, no credential — a real dispatch through the chain
     monkeypatch.setattr(harness_session, "_session_credential", lambda e: None)
