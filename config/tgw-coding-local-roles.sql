@@ -34,6 +34,39 @@ $$;
 
 ALTER ROLE tgw_coding LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 
+-- Continual-harness durable ledger (Todo 1916 leaf 11.1). Created here because
+-- this file runs as a privileged admin (Doctor pipes it through sudo -u
+-- postgres); tgw_coding itself has no CREATE on public by design. The module
+-- src/tgw/development/harness_ledger.py carries the same DDL as a dev fallback
+-- and checks (never creates) at runtime.
+CREATE TABLE IF NOT EXISTS public.harness_ledger_task (
+    task_id           TEXT PRIMARY KEY,
+    cursor            JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status            TEXT  NOT NULL DEFAULT 'open'
+                      CHECK (status IN ('open', 'blocked', 'done', 'abandoned')),
+    context           JSONB NOT NULL DEFAULT '{}'::jsonb,
+    owner             TEXT,
+    lease_id          UUID,
+    lease_expires_at  TIMESTAMPTZ,
+    generation        BIGINT NOT NULL DEFAULT 0,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.harness_ledger_entry (
+    entry_id    BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    task_id     TEXT NOT NULL REFERENCES public.harness_ledger_task(task_id) ON DELETE CASCADE,
+    seq         BIGINT NOT NULL,
+    kind        TEXT NOT NULL,
+    body        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    actor       TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (task_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_harness_ledger_entry_task
+    ON public.harness_ledger_entry (task_id, seq);
+
 GRANT CONNECT ON DATABASE tgw_lib_dev_state_machine TO tgw_coding;
 GRANT USAGE ON SCHEMA public TO tgw_coding;
 
@@ -43,8 +76,14 @@ GRANT SELECT, INSERT, UPDATE, DELETE
 GRANT SELECT, INSERT
     ON TABLE public.queue_job_history
     TO tgw_coding;
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON TABLE public.harness_ledger_task, public.harness_ledger_entry
+    TO tgw_coding;
 GRANT USAGE, SELECT, UPDATE
     ON SEQUENCE public.todo_items_id_seq, public.queue_job_history_history_id_seq
+    TO tgw_coding;
+GRANT USAGE, SELECT
+    ON SEQUENCE public.harness_ledger_entry_entry_id_seq
     TO tgw_coding;
 
 GRANT EXECUTE ON FUNCTION public.claim_queue_jobs(text, text, integer, integer)

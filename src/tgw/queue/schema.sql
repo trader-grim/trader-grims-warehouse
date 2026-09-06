@@ -413,3 +413,14 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     summary         TEXT,
     transcript_path TEXT
 );
+
+-- Continual-harness durable ledger (Todo 1916 leaf 11.1).
+-- DDL and the tgw_coding DML GRANTs live in config/tgw-coding-local-roles.sql
+-- (applied privileged via `tgw-coding-bootstrap --repair database`), with a
+-- runtime check-only fallback in src/tgw/development/harness_ledger.py. Named
+-- here for discoverability; not repeated, to avoid the ai_usage/agent_runs
+-- drift noted above.
+--   harness_ledger_task  — one row per task: cursor, status, context, and a
+--                          single-owner cursor lease.
+--   harness_ledger_entry — append-only per-task history (attempt, remediation,
+--                          rejected_candidate, review_finding, ...).
