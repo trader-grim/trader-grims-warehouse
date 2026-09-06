@@ -149,4 +149,21 @@ def test_implement_main_writes_receipt(tmp_path, monkeypatch):
 def test_job_from_env_rejects_incomplete(monkeypatch):
     monkeypatch.setenv("TGW_CODING_JOB", json.dumps({"task_id": "t1"}))
     with pytest.raises(harness_session.SessionError):
-        harness_session._job_from_env()
+        harness_session._load_job()
+
+
+def test_load_job_falls_back_to_the_worktree_file(monkeypatch, tmp_path):
+    monkeypatch.delenv("TGW_CODING_JOB", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".tgw-harness").mkdir()
+    (tmp_path / ".tgw-harness" / "job.json").write_text(
+        json.dumps({"task_id": "t9", "body": "b", "worktree": str(tmp_path), "executor": "codex"})
+    )
+    job = harness_session._load_job()
+    assert job["task_id"] == "t9"
+    assert harness_session._executor(job) == "codex"
+
+
+def test_executor_prefers_the_job_field(monkeypatch):
+    monkeypatch.setenv("TGW_HARNESS_EXECUTOR", "claude")
+    assert harness_session._executor({"executor": "codex"}) == "codex"

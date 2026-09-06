@@ -165,6 +165,36 @@ def test_implement_outcome_mapping():
     }
 
 
+def test_session_argv_wraps_in_sudo_for_the_coder_user():
+    argv = harness_runners._session_argv("/py", "implement", coder_user="tgw-coder")
+    assert argv[:4] == ("sudo", "-n", "-u", "tgw-coder")
+    assert argv[-2:] == ("tgw.development.harness_session", "implement")
+    assert harness_runners._session_argv("/py", "review", coder_user=None) == (
+        "/py", "-m", "tgw.development.harness_session", "review",
+    )
+
+
+def test_build_runners_uses_the_coder_user_and_writes_a_job_file(repo, tmp_path, monkeypatch):
+    import subprocess as _sp
+
+    from tgw.development.harness_runners import build_runners
+
+    wt = git_worktree_prepare(repo, tmp_path / "wts")("todo-x", _git(repo, "rev-parse", "main"))
+    (wt / "implementation-receipt.json").write_text('{"outcome": "satisfied", "artifacts": []}')
+
+    seen = {}
+    monkeypatch.setattr(_sp, "run", lambda argv, **kw: seen.update(argv=list(argv))
+                        or _sp.CompletedProcess(argv, 0, "", ""))
+
+    r = build_runners(repo, tmp_path / "wts", task_body="do it",
+                      coder_user="tgw-coder", executor="claude")
+    r.implement("todo-x", wt, round=1, prior_findings=[])
+
+    assert seen["argv"][:4] == ["sudo", "-n", "-u", "tgw-coder"]
+    job = json.loads((wt / ".tgw-harness" / "job.json").read_text())
+    assert job["executor"] == "claude" and job["body"] == "do it"
+
+
 def test_review_findings_mapping():
     got = review_findings({
         "verdict": "FAIL",

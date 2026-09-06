@@ -190,9 +190,12 @@ def external_session(
       review(task_id, worktree) -> dict
     Extra keyword args are collected into the payload-builder ``context``.
 
-    It writes nothing itself: ``payload_builder`` produces the ``TGW_CODING_JOB``
-    object, the runner writes ``<worktree>/<receipt_name>``, and ``map_receipt``
-    translates that receipt into the orchestrator's expected shape.
+    ``payload_builder`` produces the job object. It is passed BOTH as
+    ``TGW_CODING_JOB`` in the env AND written to ``<worktree>/.tgw-harness/job.json``
+    — the file is the reliable path when the runner is invoked through
+    ``sudo -n -u tgw-coder`` (sudo strips the environment; the worktree is
+    group-readable). The runner writes ``<worktree>/<receipt_name>`` and
+    ``map_receipt`` translates that receipt.
     """
     if not runner_argv:
         raise ValueError("runner_argv must be non-empty")
@@ -200,9 +203,13 @@ def external_session(
     def session(task_id: str, worktree: Path, **context: Any) -> dict[str, Any]:
         worktree = Path(worktree)
         payload = payload_builder(task_id, worktree, dict(context))
+        job_json = json.dumps(payload, sort_keys=True)
+        job_dir = worktree / ".tgw-harness"
+        job_dir.mkdir(exist_ok=True)
+        (job_dir / "job.json").write_text(job_json, encoding="utf-8")
         env = {
             **os.environ,
-            "TGW_CODING_JOB": json.dumps(payload, sort_keys=True),
+            "TGW_CODING_JOB": job_json,
             "TGW_CODING_WORKTREE_SRC": str(worktree / "src"),
             **(extra_env or {}),
         }
@@ -247,8 +254,21 @@ def implement_outcome(receipt: dict[str, Any]) -> dict[str, Any]:
     return {"outcome": outcome, "summary": summary or raw or "no receipt detail"}
 
 
-_IMPLEMENT_ARGV = (sys.executable, "-m", "tgw.development.harness_session", "implement")
-_REVIEW_ARGV = (sys.executable, "-m", "tgw.development.harness_session", "review")
+_SESSION_MODULE = "tgw.development.harness_session"
+
+
+def _session_argv(python: str, mode: str, *, coder_user: str | None) -> tuple[str, ...]:
+    """The argv for one coder session.
+
+    When ``coder_user`` is set, the session runs as that confined identity via
+    ``sudo -n -u`` — the orchestrator identity is the publisher and must not be
+    the one editing source in a ``bypassPermissions`` session (leaf 11.1
+    identity split: `tgw-harness` orchestrates, `tgw-coder` executes).
+    """
+    base = (python, "-m", _SESSION_MODULE, mode)
+    if coder_user:
+        return ("sudo", "-n", "-u", coder_user, *base)
+    return base
 
 
 def build_runners(
@@ -258,33 +278,46 @@ def build_runners(
     task_body: str,
     python: str = sys.executable,
     actor: str = "harness",
-    implement_argv: tuple[str, ...] = _IMPLEMENT_ARGV,
-    review_argv: tuple[str, ...] = _REVIEW_ARGV,
+    coder_user: str | None = "tgw-coder",
+    executor: str | None = None,
     session_timeout_s: int = 1800,
+    implement_argv: tuple[str, ...] | None = None,
+    review_argv: tuple[str, ...] | None = None,
 ) -> Any:
     """Assemble a complete ``harness_orchestrator.Runners`` for one task.
 
     The bundle closes over ``task_body`` — the orchestrator runs exactly one
     task per ``run_task`` call, so one bundle per task is the natural shape.
+
+    ``coder_user`` (default ``tgw-coder``) runs each implement/review session as
+    that confined identity. Pass ``None`` to run them as the current user (dev /
+    test only). ``executor`` pins ``TGW_HARNESS_EXECUTOR`` for the sessions
+    ("claude" / "codex") without touching the orchestrator's own environment.
     """
     from tgw.development.harness_orchestrator import Runners
 
     def implement_payload(task_id: str, worktree: Path, context: dict[str, Any]) -> dict[str, Any]:
-        return {
+        payload = {
             "task_id": task_id,
             "body": task_body,
             "worktree": str(worktree),
             "round": context.get("round", 1),
             "prior_findings": context.get("prior_findings", []),
         }
+        if executor:
+            payload["executor"] = executor
+        return payload
 
     def review_payload(task_id: str, worktree: Path, _context: dict[str, Any]) -> dict[str, Any]:
-        return {"task_id": task_id, "body": task_body, "worktree": str(worktree)}
+        payload = {"task_id": task_id, "body": task_body, "worktree": str(worktree)}
+        if executor:
+            payload["executor"] = executor
+        return payload
 
     return Runners(
         prepare_worktree=git_worktree_prepare(repository, worktree_root, actor=actor),
         implement=external_session(
-            runner_argv=implement_argv,
+            runner_argv=implement_argv or _session_argv(python, "implement", coder_user=coder_user),
             receipt_name="implementation-receipt.json",
             payload_builder=implement_payload,
             map_receipt=implement_outcome,
@@ -292,7 +325,7 @@ def build_runners(
         ),
         run_tests=pytest_gate(python=python),
         review=external_session(
-            runner_argv=review_argv,
+            runner_argv=review_argv or _session_argv(python, "review", coder_user=coder_user),
             receipt_name="review-receipt.json",
             payload_builder=review_payload,
             map_receipt=review_findings,

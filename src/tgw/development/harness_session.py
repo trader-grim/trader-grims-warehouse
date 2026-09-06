@@ -84,7 +84,9 @@ class SessionError(RuntimeError):
 # executor selection
 # --------------------------------------------------------------------------- #
 
-def _executor() -> str:
+def _executor(job: dict[str, Any] | None = None) -> str:
+    if job and job.get("executor") in {"codex", "claude"}:
+        return job["executor"]
     forced = os.environ.get("TGW_HARNESS_EXECUTOR")
     if forced in {"codex", "claude"}:
         return forced
@@ -242,13 +244,47 @@ def _write_isolated_codex_config(codex_home: Path) -> None:
     (codex_home / "config.toml").chmod(0o600)
 
 
+def _session_credential() -> tuple[str, str] | None:
+    """Return (env_var, value) for the coder session's model credential, from
+    the secrets facility. The facility (privileged) holds and refreshes it;
+    the session only ever receives the value for its one selected provider."""
+    try:
+        from tgw.apis.secrets import get_secret
+    except Exception:
+        return None
+    for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
+        try:
+            value = get_secret(name)
+        except Exception:
+            continue
+        if value:
+            return name, value
+    return None
+
+
 def _run_claude(prompt: str, worktree: Path, *, invoke: Invoke) -> dict[str, Any] | None:
-    completed = invoke(
-        [_claude_binary(), "-p", "--output-format", "json",
-         "--permission-mode", "bypassPermissions"],
-        cwd=worktree, input=prompt, text=True, capture_output=True, check=False,
-        env={**os.environ}, timeout=_timeout_s(),
-    )
+    # Independence (W07): implement / review must not share Claude Code's
+    # per-project state (~/.claude/projects/* — transcript, session cache). A
+    # fresh HOME per session guarantees it; the credential comes from the
+    # secrets facility, never the caller's live login dir.
+    with tempfile.TemporaryDirectory(prefix=".tgw-harness-claude-", dir=worktree) as tmp:
+        home = Path(tmp) / "home"
+        (home / ".claude").mkdir(parents=True, mode=0o700)
+        env = {
+            k: v for k, v in os.environ.items()
+            if not k.startswith("CLAUDE_") and k != "ANTHROPIC_API_KEY"
+        }
+        env["HOME"] = str(home)
+        env["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
+        cred = _session_credential()
+        if cred:
+            env[cred[0]] = cred[1]
+        completed = invoke(
+            [_claude_binary(), "-p", "--output-format", "json",
+             "--permission-mode", "bypassPermissions"],
+            cwd=worktree, input=prompt, text=True, capture_output=True, check=False,
+            env=env, timeout=_timeout_s(),
+        )
     if completed.returncode:
         raise SessionError(
             f"claude session exit {completed.returncode}: "
@@ -296,7 +332,7 @@ def _timeout_s() -> int:
 def run_implement_session(job: dict[str, Any], *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
     worktree = Path(job["worktree"])
     prompt = implement_prompt(job)
-    executor = _executor()
+    executor = _executor(job)
     report = (
         _run_claude(prompt, worktree, invoke=invoke)
         if executor == "claude"
@@ -318,7 +354,7 @@ def run_implement_session(job: dict[str, Any], *, invoke: Invoke = subprocess.ru
 def run_review_session(job: dict[str, Any], *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
     worktree = Path(job["worktree"])
     prompt = review_prompt(job)
-    executor = _executor()
+    executor = _executor(job)
     report = (
         _run_claude(prompt, worktree, invoke=invoke)
         if executor == "claude"
@@ -343,15 +379,27 @@ def run_review_session(job: dict[str, Any], *, invoke: Invoke = subprocess.run) 
 # console entrypoints — write the receipt the orchestrator's runner reads
 # --------------------------------------------------------------------------- #
 
-def _job_from_env() -> dict[str, Any]:
+def _load_job() -> dict[str, Any]:
+    """The job comes from ``TGW_CODING_JOB`` when the env survives, else from
+    ``<cwd>/.tgw-harness/job.json`` — the reliable path when the session is
+    invoked via ``sudo -n -u tgw-coder`` (sudo strips the environment)."""
+    raw = os.environ.get("TGW_CODING_JOB", "")
+    if not raw:
+        job_file = Path.cwd() / ".tgw-harness" / "job.json"
+        if job_file.is_file():
+            raw = job_file.read_text(encoding="utf-8")
     try:
-        job = json.loads(os.environ["TGW_CODING_JOB"])
-    except (KeyError, ValueError) as exc:
-        raise SessionError("TGW_CODING_JOB is missing or not JSON") from exc
+        job = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise SessionError("no job: TGW_CODING_JOB unset and .tgw-harness/job.json absent or invalid") from exc
     for field in ("task_id", "body", "worktree"):
         if not isinstance(job.get(field), str) or not job[field]:
-            raise SessionError(f"TGW_CODING_JOB lacks {field}")
+            raise SessionError(f"job lacks {field}")
     return job
+
+
+# back-compat alias for tests
+_job_from_env = _load_job
 
 
 def _emit(worktree: Path, name: str, receipt: dict[str, Any]) -> None:
@@ -360,14 +408,14 @@ def _emit(worktree: Path, name: str, receipt: dict[str, Any]) -> None:
 
 
 def implement_main() -> int:
-    job = _job_from_env()
+    job = _load_job()
     receipt = run_implement_session(job)
     _emit(Path(job["worktree"]), "implementation-receipt.json", receipt)
     return 0
 
 
 def review_main() -> int:
-    job = _job_from_env()
+    job = _load_job()
     receipt = run_review_session(job)
     _emit(Path(job["worktree"]), "review-receipt.json", receipt)
     return 0

@@ -27,16 +27,20 @@ _REPOSITORY = "/opt/TGW/tgw-lib/src/trader-grims-warehouse"
 _WORKTREE_ROOT = "/opt/TGW/var/worktrees"
 
 
-def _db_ref_publisher(repository: Path) -> harness_git.RefPublisher:
+def _sudo_ref_publisher(repository: Path, publisher_user: str) -> harness_git.RefPublisher:
+    """Advance the base ref as ``publisher_user`` via sudo — for a phase-0
+    supervised session that is not itself the sanctioned publisher. When the
+    orchestrator runs AS the publisher, pass --self-publish and skip this."""
     def publish(ref: str, old_oid: str, new_oid: str) -> None:
         result = subprocess.run(
-            ["sudo", "-n", "-u", "db", "git", "-C", str(repository),
+            ["sudo", "-n", "-u", publisher_user, "/usr/bin/git", "-C", str(repository),
              "update-ref", ref, new_oid, old_oid],
             check=False, text=True, capture_output=True, timeout=60,
         )
         if result.returncode:
             raise harness_git.HarnessGitError(
-                f"db ref publish of {ref} failed: {(result.stderr or result.stdout).strip()[-400:]}"
+                f"ref publish of {ref} as {publisher_user} failed: "
+                f"{(result.stderr or result.stdout).strip()[-400:]}"
             )
 
     return publish
@@ -67,6 +71,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-rounds", type=int, default=harness_orchestrator.DEFAULT_MAX_ROUNDS)
     parser.add_argument("--self-publish", action="store_true",
                         help="the harness runs as the sanctioned publisher; advance the ref directly")
+    parser.add_argument("--publisher-user", default="tgw-harness",
+                        help="sudo target for the ref advance when not --self-publish")
+    parser.add_argument("--coder-user", default="tgw-coder",
+                        help="run implement/review sessions as this confined user ('' = current user)")
+    parser.add_argument("--executor", choices=("claude", "codex"), default=None,
+                        help="pin the coder-session executor")
     parser.add_argument("--python", default="/opt/TGW/.venvs/controller/bin/python3")
     parser.add_argument("--json", action="store_true", help="emit the result as JSON")
     args = parser.parse_args(argv)
@@ -76,8 +86,13 @@ def main(argv: list[str] | None = None) -> int:
 
     runners = harness_runners.build_runners(
         repository, args.worktree_root, task_body=body, python=args.python,
+        coder_user=(args.coder_user or None),
+        executor=args.executor,
     )
-    ref_publisher = None if args.self_publish else _db_ref_publisher(repository)
+    ref_publisher = (
+        None if args.self_publish
+        else _sudo_ref_publisher(repository, args.publisher_user)
+    )
 
     result: dict[str, Any] = harness_orchestrator.run_task(
         task_id,

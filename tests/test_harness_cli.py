@@ -34,7 +34,7 @@ def test_task_body_empty_todo_exits(monkeypatch):
         harness_cli._task_body("42", None)
 
 
-def test_db_ref_publisher_raises_on_failure(monkeypatch, tmp_path):
+def test_sudo_ref_publisher_raises_on_failure(monkeypatch, tmp_path):
     import subprocess
 
     class _Fail:
@@ -42,10 +42,12 @@ def test_db_ref_publisher_raises_on_failure(monkeypatch, tmp_path):
         stderr = "not the sanctioned publisher"
         stdout = ""
 
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Fail())
-    publish = harness_cli._db_ref_publisher(tmp_path)
+    seen = {}
+    monkeypatch.setattr(subprocess, "run", lambda a, **k: seen.update(argv=a) or _Fail())
+    publish = harness_cli._sudo_ref_publisher(tmp_path, "tgw-harness")
     with pytest.raises(harness_cli.harness_git.HarnessGitError):
         publish("refs/heads/main", "a" * 40, "b" * 40)
+    assert seen["argv"][:5] == ["sudo", "-n", "-u", "tgw-harness", "/usr/bin/git"]
 
 
 def test_main_wires_orchestrator(monkeypatch, tmp_path):
