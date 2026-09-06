@@ -1774,14 +1774,31 @@ def lifecycle_status(identity: int | str, *, config_path: Path | str = DEFAULT_C
         return evidence.get("receipt") if isinstance(evidence, Mapping) else None
 
     candidate_evidence = receipt("candidate") or {}
+    # On a terminal FAILED/REMEDIATION_REQUIRED root the live effects have been
+    # reset by remediation/auto-rebind, so reconstruct the one-place supervisor
+    # hand-off (candidate commit, the finding that blocked it, the exact next
+    # action) from the archived generations (LEAF-PHASE0-SUPERVISED-LANDING W3).
+    supervisor_handoff: dict[str, Any] = {}
+    if record.get("state") in {"FAILED", "REMEDIATION_REQUIRED"}:
+        failure = record.get("failure")
+        if isinstance(failure, Mapping) and isinstance(failure.get("supervisor_handoff"), Mapping):
+            supervisor_handoff = dict(failure["supervisor_handoff"])
+        else:
+            supervisor_handoff = coding_lifecycle._supervisor_handoff(record)
+        if isinstance(failure, Mapping):
+            supervisor_handoff.setdefault("blocking_stage", failure.get("stage"))
+            supervisor_handoff.setdefault("blocking_finding", failure.get("reason"))
     return {
         **record,
         "schema": "tgw-local-coding-lifecycle-status/v1",
         "todo_or_pp": target,
         "jobs": jobs,
         "worktree": candidate_evidence.get("worktree") or record["binding"]["worktree"],
-        "candidate_commit": candidate_evidence.get("commit"),
-        "candidate_tree": candidate_evidence.get("tree"),
+        "candidate_commit": candidate_evidence.get("commit")
+        or supervisor_handoff.get("candidate_commit"),
+        "candidate_tree": candidate_evidence.get("tree")
+        or supervisor_handoff.get("candidate_tree"),
+        **({"supervisor_handoff": supervisor_handoff} if supervisor_handoff else {}),
         "implementation": receipt("implementation"),
         "tests": (receipt("implementation") or {}).get("result"),
         "controller_receipt": receipt("controller"),

@@ -985,6 +985,100 @@ def _archive_worktree_receipts(record: Mapping[str, Any], *, generation: int) ->
             continue
 
 
+def _supervisor_handoff(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Reconstruct what a supervised session needs from the archived generations.
+
+    Remediation/auto-rebind reset the live ``effects``, so on a terminal
+    FAILED/REMEDIATION_REQUIRED root the candidate commit and the finding that
+    actually blocked it are only in ``remediation_history``.  Walk it newest
+    first and surface: the last candidate commit an implement stage produced,
+    the last non-implementation stage disposition/reason that rejected it, and
+    the exact next operator action.  Used both to pick an honest terminal state
+    and to render `tgw coding status` for the supervisor.
+    """
+
+    history = record.get("remediation_history")
+    candidate: dict[str, str] = {}
+    blocking_stage = ""
+    blocking_reason = ""
+    if isinstance(history, list):
+        for archived in reversed(history):
+            if not isinstance(archived, Mapping):
+                continue
+            failure_result = archived.get("failure_result")
+            fr_stage = archived.get("stage")
+            if not candidate:
+                # The candidate commit that a later stage rejected is carried on
+                # that stage's own receipt (controller/review remediation
+                # receipt.candidate) and, once closed, in effects["candidate"].
+                sources: list[Any] = []
+                if isinstance(failure_result, Mapping):
+                    fr_receipt = failure_result.get("receipt")
+                    if isinstance(fr_receipt, Mapping):
+                        sources.append(fr_receipt.get("candidate"))
+                effects = archived.get("effects")
+                if isinstance(effects, Mapping):
+                    for key in ("candidate", "controller", "review"):
+                        node = effects.get(key)
+                        if isinstance(node, Mapping) and isinstance(node.get("receipt"), Mapping):
+                            sources.append(node["receipt"].get("candidate"))
+                        sources.append(node)
+                for node in sources:
+                    if not isinstance(node, Mapping):
+                        continue
+                    head = node.get("head") or node.get("commit")
+                    tree = node.get("tree")
+                    if isinstance(head, str) and _COMMIT.fullmatch(head):
+                        candidate = {
+                            "head": head,
+                            **({"tree": tree} if isinstance(tree, str) else {}),
+                        }
+                        break
+            if (
+                isinstance(failure_result, Mapping)
+                and fr_stage in {"controller", "review"}
+                and not blocking_reason
+            ):
+                blocking_stage = str(fr_stage)
+                fr_receipt = failure_result.get("receipt")
+                findings = (
+                    fr_receipt.get("findings")
+                    if isinstance(fr_receipt, Mapping)
+                    else None
+                )
+                if isinstance(findings, list) and findings:
+                    parts = [
+                        str(f.get("message", "")).strip()
+                        for f in findings
+                        if isinstance(f, Mapping) and f.get("message")
+                    ]
+                    blocking_reason = "; ".join(p for p in parts if p)[:600]
+                if not blocking_reason:
+                    blocking_reason = str(failure_result.get("reason", "")).strip()[:600]
+    handoff: dict[str, Any] = {}
+    if candidate:
+        handoff["candidate_commit"] = candidate["head"]
+        if candidate.get("tree"):
+            handoff["candidate_tree"] = candidate["tree"]
+    if blocking_stage:
+        handoff["blocking_stage"] = blocking_stage
+    if blocking_reason:
+        handoff["blocking_finding"] = blocking_reason
+    if candidate and blocking_reason:
+        handoff["next_operator_action"] = (
+            f"supervised session: check out candidate {candidate['head'][:12]} in the "
+            "worktree; either apply the change the "
+            f"{blocking_stage or 'reviewer'} asked for and land via the narrow path, "
+            "or accept the candidate as-is and land it."
+        )
+    elif candidate:
+        handoff["next_operator_action"] = (
+            f"supervised session: candidate {candidate['head'][:12]} is in the "
+            "worktree; review it and land via the narrow path if acceptable."
+        )
+    return handoff
+
+
 def _begin_bounded_remediation(
     record: dict[str, Any], *, stage: str, result: Mapping[str, Any]
 ) -> bool:
@@ -1233,15 +1327,42 @@ def advance(
                         record["updated_at"] = _now()
                         record = store.put(record)
                         continue
-                record["state"] = (
-                    "FAILED" if outcome == "failed" else "REMEDIATION_REQUIRED"
-                )
-                record["stages"][stage] = result
                 budget_exhausted = (
                     stage == "implementation"
                     and outcome == "failed"
                     and record.get("auto_rebind_count", 0) >= _AUTO_REBIND_MAX
                 )
+                handoff = _supervisor_handoff(record)
+                # Option A (LEAF-PHASE0-SUPERVISED-LANDING): never dead-end into a
+                # bare FAILED when the loop actually produced a candidate that a
+                # later stage merely asked to remediate.  If an earlier
+                # generation closed a candidate (implement<->review/controller
+                # disagreement that ran out of auto-rebind/remediation budget),
+                # terminate REMEDIATION_REQUIRED so the supervised session can
+                # pick it up (`tgw coding rebind` / `tgw coding status` treat it
+                # as a hand-off, not a crash), and name the finding that blocked
+                # it rather than "codex-implement ... has no exact negative
+                # receipt".
+                if handoff.get("candidate_commit") and (
+                    budget_exhausted or stage in {"controller", "review"}
+                ):
+                    record["state"] = "REMEDIATION_REQUIRED"
+                    record["stages"][stage] = result
+                    record["failure"] = {
+                        "stage": stage,
+                        "reason": (
+                            result.get("reason")
+                            or handoff.get("blocking_finding")
+                            or "a later stage kept rejecting the candidate after "
+                            f"{len(record.get('remediation_history', []))} rounds"
+                        ),
+                        "supervisor_handoff": handoff,
+                    }
+                    break
+                record["state"] = (
+                    "FAILED" if outcome == "failed" else "REMEDIATION_REQUIRED"
+                )
+                record["stages"][stage] = result
                 record["failure"] = {
                     "stage": stage,
                     "reason": (
@@ -1251,6 +1372,7 @@ def advance(
                         if budget_exhausted
                         else result.get("reason", outcome)
                     ),
+                    **({"supervisor_handoff": handoff} if handoff else {}),
                 }
                 break
             _save_effect(record, stage, result)

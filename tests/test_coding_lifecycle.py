@@ -1353,6 +1353,45 @@ def test_review_remediation_stops_after_maximum_rounds(tmp_path: Path) -> None:
     assert observed["failure"]["reason"] == "diagnostic findings remain"
 
 
+def test_supervisor_handoff_surfaces_candidate_and_finding(tmp_path: Path) -> None:
+    """LEAF-PHASE0 W2/W3: a candidate the loop couldn't converge terminates
+    REMEDIATION_REQUIRED (never a bare FAILED) with a one-place hand-off the
+    supervised session can act on: candidate commit, the blocking finding, and
+    the exact next operator action.
+    """
+    store = store_at(tmp_path / "journal")
+    record = new(store)
+
+    def satisfied(stage):
+        return lambda current: stage_result(
+            current, stage, "satisfied", receipt={"stage": stage}
+        )
+
+    def review(current):
+        return stage_result(
+            current,
+            "review",
+            "remediation",
+            receipt={
+                "candidate": {"head": "a" * 40, "tree": "b" * 40},
+                "findings": [{"message": "out-of-scope test file added"}],
+            },
+            reason="diagnostic findings remain",
+        )
+
+    handlers = {stage: satisfied(stage) for stage in STAGES}
+    handlers["review"] = review
+    observed = advance(store, record["root_id"], handlers)
+
+    assert observed["state"] == "REMEDIATION_REQUIRED"
+    handoff = observed["failure"]["supervisor_handoff"]
+    assert handoff["candidate_commit"] == "a" * 40
+    assert "out-of-scope test file added" in handoff["blocking_finding"]
+    assert handoff["blocking_stage"] == "review"
+    assert "a" * 12 in handoff["next_operator_action"]
+    assert "narrow path" in handoff["next_operator_action"]
+
+
 def test_resume_recovers_worker_completed_crash_boundary_with_new_fenced_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

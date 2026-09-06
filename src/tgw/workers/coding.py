@@ -18,7 +18,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -548,6 +548,36 @@ def _replace_prior_lifecycle_negative_receipt(
     raise HardFailure(
         "prior coding receipt does not bind the archived lifecycle generation"
     )
+
+
+def _receipt_failure_reason(receipt: Mapping[str, Any]) -> str:
+    """Short human reason from the first failed artifact in a negative receipt.
+
+    Controller-verify and claude-review record the concrete cause
+    (``verification_scope`` detail, a review finding message, a check's stderr
+    tail) in ``artifacts``; the queue otherwise surfaces only
+    "coding treatment reported failed".
+    """
+
+    artifacts = receipt.get("artifacts")
+    if not isinstance(artifacts, list):
+        return ""
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            continue
+        if artifact.get("status") not in {"failed", "FAIL"} and artifact.get("verdict") != "FAIL":
+            continue
+        for key in ("detail", "message", "summary", "reason"):
+            value = artifact.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().splitlines()[0][:400]
+    # A review receipt keeps its finding list one level up.
+    findings = receipt.get("findings")
+    if isinstance(findings, list):
+        for finding in findings:
+            if isinstance(finding, Mapping) and isinstance(finding.get("message"), str):
+                return finding["message"].strip().splitlines()[0][:400]
+    return ""
 
 
 def _write_receipt(
@@ -1401,9 +1431,15 @@ class CodingWorker(QueueWorker):
             )
         if outcome != OUTCOME_SATISFIED:
             # A negative launcher result is a terminal job outcome, not a
-            # successful queue delivery with a disappointing payload.
+            # successful queue delivery with a disappointing payload.  Carry the
+            # first failed artifact's reason into the message so the dead-letter
+            # / `tgw coding status` shows *why* instead of only
+            # "coding treatment reported failed" (LEAF-PHASE0 W1).
+            reason = _receipt_failure_reason(receipt)
             raise TreatmentFailure(
-                f"coding treatment reported {outcome}", receipt
+                f"coding treatment reported {outcome}"
+                + (f": {reason}" if reason else ""),
+                receipt,
             )
         return receipt
 
