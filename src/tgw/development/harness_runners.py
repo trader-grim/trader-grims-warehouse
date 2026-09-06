@@ -279,7 +279,7 @@ def build_runners(
     python: str = sys.executable,
     actor: str = "harness",
     coder_user: str | None = "tgw-coder",
-    executor: str | None = None,
+    executor_preference: tuple[str, ...] | None = None,
     session_timeout_s: int = 1800,
     implement_argv: tuple[str, ...] | None = None,
     review_argv: tuple[str, ...] | None = None,
@@ -291,10 +291,13 @@ def build_runners(
 
     ``coder_user`` (default ``tgw-coder``) runs each implement/review session as
     that confined identity. Pass ``None`` to run them as the current user (dev /
-    test only). ``executor`` pins ``TGW_HARNESS_EXECUTOR`` for the sessions
-    ("claude" / "codex") without touching the orchestrator's own environment.
+    test only). ``executor_preference`` is an ordered list of executors the
+    session tries in turn ("claude", "codex", …); empty = let the session's own
+    chain (model selector, then default) decide.
     """
     from tgw.development.harness_orchestrator import Runners
+
+    pref = list(executor_preference) if executor_preference else None
 
     def implement_payload(task_id: str, worktree: Path, context: dict[str, Any]) -> dict[str, Any]:
         payload = {
@@ -304,14 +307,14 @@ def build_runners(
             "round": context.get("round", 1),
             "prior_findings": context.get("prior_findings", []),
         }
-        if executor:
-            payload["executor"] = executor
+        if pref:
+            payload["executor_preference"] = pref
         return payload
 
     def review_payload(task_id: str, worktree: Path, _context: dict[str, Any]) -> dict[str, Any]:
         payload = {"task_id": task_id, "body": task_body, "worktree": str(worktree)}
-        if executor:
-            payload["executor"] = executor
+        if pref:
+            payload["executor_preference"] = pref
         return payload
 
     return Runners(

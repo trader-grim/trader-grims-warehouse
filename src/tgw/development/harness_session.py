@@ -77,32 +77,77 @@ _BOUNDARIES = (
 
 
 class SessionError(RuntimeError):
-    """The coding session could not be run."""
+    """The coding session could not be run by any executor in the chain."""
+
+
+class SessionUnavailable(RuntimeError):
+    """One executor could not be used (binary absent, no credential, auth/quota
+    wall). The chain moves to the next executor; it is not a task failure."""
 
 
 # --------------------------------------------------------------------------- #
-# executor selection
+# executor selection — an ordered chain, not one choice
 # --------------------------------------------------------------------------- #
 
-def _executor(job: dict[str, Any] | None = None) -> str:
-    if job and job.get("executor") in {"codex", "claude"}:
-        return job["executor"]
+_EXECUTORS = ("claude", "codex")
+_DEFAULT_CHAIN = ("claude", "codex")
+
+
+def _executor_chain(job: dict[str, Any] | None = None) -> list[str]:
+    """The ordered list of executors to try. The first that has a credential and
+    produces a parseable report wins; each that is unavailable or fails is
+    skipped (leaf 11.8: 'a lapsed provider is a dispatch-time reroute, never a
+    dead-letter'). Preference sources, highest first:
+
+      job["executor_preference"] (list) / job["executor"] (single)
+      TGW_HARNESS_EXECUTOR
+      tgw.model_selector ranking (put its pick first, rest of the default after)
+      _DEFAULT_CHAIN
+    """
+    if job:
+        pref = job.get("executor_preference")
+        if isinstance(pref, str):
+            pref = [pref]
+        if not pref and job.get("executor"):
+            pref = [job["executor"]]
+        chain = [e for e in (pref or []) if e in _EXECUTORS]
+        if chain:
+            return chain
     forced = os.environ.get("TGW_HARNESS_EXECUTOR")
-    if forced in {"codex", "claude"}:
-        return forced
+    if forced in _EXECUTORS:
+        return [forced]
     try:
         from tgw.model_selector import select_executor
 
         selection = select_executor("implementation")
-        if selection.status == "SELECTED" and selection.executor in {"codex", "claude"}:
-            return selection.executor
+        if selection.status == "SELECTED" and selection.executor in _EXECUTORS:
+            first = selection.executor
+            return [first, *[e for e in _DEFAULT_CHAIN if e != first]]
     except Exception:
-        pass  # the model selector is advisory here; fall through to PATH probe
-    if shutil.which("claude"):
-        return "claude"
-    if _codex_binary(optional=True):
-        return "codex"
-    raise SessionError("no coding executor available (need `claude` or `codex` on PATH)")
+        pass  # advisory; fall through to the default chain
+    return list(_DEFAULT_CHAIN)
+
+
+def _session_credential(executor: str) -> tuple[str, str] | None:
+    """(env_var, value) for *executor*'s model credential, from the secrets
+    facility. None means no env credential — the executor may still be usable
+    from a file login in the coder's home (codex ~/.codex/auth.json), which the
+    per-executor runner checks."""
+    try:
+        from tgw.config import DEFAULT_CONFIG, load_config
+
+        load_config(DEFAULT_CONFIG)  # sources secrets_root/tgw.env; harmless if absent
+    except Exception:
+        pass
+    names = {
+        "claude": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
+        "codex": ("CODEX_API_KEY", "OPENAI_API_KEY"),
+    }.get(executor, (f"{executor.upper()}_API_KEY",))
+    for name in names:
+        value = os.environ.get(name, "")
+        if value:
+            return name, value
+    return None
 
 
 def _codex_binary(*, optional: bool = False) -> str | None:
@@ -244,26 +289,16 @@ def _write_isolated_codex_config(codex_home: Path) -> None:
     (codex_home / "config.toml").chmod(0o600)
 
 
-def _session_credential() -> tuple[str, str] | None:
-    """Return (env_var, value) for the coder session's model credential, from
-    the secrets facility (``secrets_root/tgw.env`` via ``tgw.apis.secrets``).
-    The facility holds and refreshes it; the session only ever receives the
-    value for its one selected provider. Returns None if none is available —
-    the session then fails to authenticate, which is a legible gap, not a
-    silent fallback."""
-    try:
-        # load_config() sources secrets_root/tgw.env into os.environ; harmless
-        # if it was already loaded or the file is absent.
-        from tgw.config import DEFAULT_CONFIG, load_config
+_UNAVAILABLE_PATTERNS = (
+    "usage limit", "quota", "rate limit", "429", "not authenticated",
+    "unauthorized", "401", "invalid api key", "login", "credit balance",
+    "subscription", "try again at",
+)
 
-        load_config(DEFAULT_CONFIG)
-    except Exception:
-        pass
-    for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
-        value = os.environ.get(name, "")
-        if value:
-            return name, value
-    return None
+
+def _looks_unavailable(text: str) -> bool:
+    low = text.lower()
+    return any(p in low for p in _UNAVAILABLE_PATTERNS)
 
 
 def _run_claude(prompt: str, worktree: Path, *, invoke: Invoke) -> dict[str, Any] | None:
@@ -271,6 +306,9 @@ def _run_claude(prompt: str, worktree: Path, *, invoke: Invoke) -> dict[str, Any
     # per-project state (~/.claude/projects/* — transcript, session cache). A
     # fresh HOME per session guarantees it; the credential comes from the
     # secrets facility, never the caller's live login dir.
+    if not shutil.which(os.environ.get("TGW_CLAUDE_BIN") or "claude"):
+        raise SessionUnavailable("claude executable not on PATH")
+    cred = _session_credential("claude")
     with tempfile.TemporaryDirectory(prefix=".tgw-harness-claude-", dir=worktree) as tmp:
         home = Path(tmp) / "home"
         (home / ".claude").mkdir(parents=True, mode=0o700)
@@ -280,7 +318,6 @@ def _run_claude(prompt: str, worktree: Path, *, invoke: Invoke) -> dict[str, Any
         }
         env["HOME"] = str(home)
         env["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
-        cred = _session_credential()
         if cred:
             env[cred[0]] = cred[1]
         completed = invoke(
@@ -290,36 +327,45 @@ def _run_claude(prompt: str, worktree: Path, *, invoke: Invoke) -> dict[str, Any
             env=env, timeout=_timeout_s(),
         )
     if completed.returncode:
-        raise SessionError(
-            f"claude session exit {completed.returncode}: "
-            f"{(completed.stderr or completed.stdout).strip()[-600:]}"
-        )
+        detail = (completed.stderr or completed.stdout).strip()[-600:]
+        if not cred or _looks_unavailable(detail):
+            raise SessionUnavailable(f"claude unavailable: {detail or 'no credential'}")
+        raise SessionError(f"claude session exit {completed.returncode}: {detail}")
     return _claude_report(completed.stdout)
 
 
 def _run_codex(prompt: str, worktree: Path, schema: dict[str, Any], *, invoke: Invoke) -> dict[str, Any] | None:
+    if not _codex_binary(optional=True):
+        raise SessionUnavailable("codex executable not on PATH")
+    cred = _session_credential("codex")
+    file_auth = (Path.home() / ".codex" / "auth.json").is_file()
+    if not cred and not file_auth:
+        raise SessionUnavailable("codex: no CODEX/OPENAI key and no ~/.codex/auth.json")
     with tempfile.TemporaryDirectory(prefix=".tgw-harness-session-", dir=worktree) as tmp:
         temp = Path(tmp)
         schema_path, output_path = temp / "schema.json", temp / "result.json"
         codex_home = temp / "codex-home"
         codex_home.mkdir(mode=0o700)
-        source_auth = Path.home() / ".codex" / "auth.json"
-        if source_auth.is_file():
-            shutil.copyfile(source_auth, codex_home / "auth.json")
+        if file_auth:
+            shutil.copyfile(Path.home() / ".codex" / "auth.json", codex_home / "auth.json")
             (codex_home / "auth.json").chmod(0o600)
         _write_isolated_codex_config(codex_home)
         schema_path.write_text(json.dumps(schema, sort_keys=True), encoding="utf-8")
+        env = {**os.environ, "CODEX_HOME": str(codex_home)}
+        if cred:
+            env[cred[0]] = cred[1]
         completed = invoke(
             [_codex_binary(), "--ask-for-approval", "never", "--sandbox",
              "danger-full-access", "exec", "--ephemeral", "-C", str(worktree),
              "--output-schema", str(schema_path), "-o", str(output_path), "-"],
             cwd=worktree, input=prompt, text=True, capture_output=True, check=False,
-            env={**os.environ, "CODEX_HOME": str(codex_home)}, timeout=_timeout_s(),
+            env=env, timeout=_timeout_s(),
         )
         if completed.returncode:
-            raise SessionError(
-                f"codex session exit {completed.returncode}: {completed.stderr.strip()[-600:]}"
-            )
+            detail = completed.stderr.strip()[-600:]
+            if _looks_unavailable(detail):
+                raise SessionUnavailable(f"codex unavailable: {detail}")
+            raise SessionError(f"codex session exit {completed.returncode}: {detail}")
         try:
             return json.loads(output_path.read_text(encoding="utf-8"))
         except (ValueError, OSError):
@@ -333,20 +379,39 @@ def _timeout_s() -> int:
         return 1800
 
 
-def run_implement_session(job: dict[str, Any], *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
+def _dispatch_chain(
+    job: dict[str, Any], prompt: str, schema: dict[str, Any], *, invoke: Invoke,
+) -> tuple[str, dict[str, Any] | None, list[str]]:
+    """Try each executor in the chain. Return (executor, report, skipped) for
+    the first that runs and produces something; on total exhaustion return
+    ("", None, skipped) with the per-executor reasons."""
     worktree = Path(job["worktree"])
-    prompt = implement_prompt(job)
-    executor = _executor(job)
-    report = (
-        _run_claude(prompt, worktree, invoke=invoke)
-        if executor == "claude"
-        else _run_codex(prompt, worktree, _IMPLEMENT_SCHEMA, invoke=invoke)
+    skipped: list[str] = []
+    for executor in _executor_chain(job):
+        try:
+            report = (
+                _run_claude(prompt, worktree, invoke=invoke)
+                if executor == "claude"
+                else _run_codex(prompt, worktree, schema, invoke=invoke)
+            )
+        except SessionUnavailable as exc:
+            skipped.append(f"{executor}: {exc}")
+            continue
+        return executor, report, skipped
+    return "", None, skipped
+
+
+def run_implement_session(job: dict[str, Any], *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
+    executor, report, skipped = _dispatch_chain(
+        job, implement_prompt(job), _IMPLEMENT_SCHEMA, invoke=invoke,
     )
+    if not executor:
+        return {"outcome": "failed", "artifacts": [{"kind": "executor_chain_exhausted",
+                "detail": "; ".join(skipped) or "no executor available"}]}
     if not isinstance(report, dict) or report.get("status") not in {"implemented", "blocked"}:
-        return {
-            "outcome": "failed",
-            "artifacts": [{"kind": f"{executor}_failure", "detail": "session returned no parseable report"}],
-        }
+        return {"outcome": "failed", "artifacts": [{"kind": f"{executor}_failure",
+                "detail": "session returned no parseable report"},
+                *([{"kind": "executor_chain_skipped", "detail": "; ".join(skipped)}] if skipped else [])]}
     status = report["status"]
     return {
         "outcome": "satisfied" if status == "implemented" else "blocked",
@@ -356,17 +421,12 @@ def run_implement_session(job: dict[str, Any], *, invoke: Invoke = subprocess.ru
 
 
 def run_review_session(job: dict[str, Any], *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
-    worktree = Path(job["worktree"])
-    prompt = review_prompt(job)
-    executor = _executor(job)
-    report = (
-        _run_claude(prompt, worktree, invoke=invoke)
-        if executor == "claude"
-        else _run_codex(prompt, worktree, _REVIEW_SCHEMA, invoke=invoke)
+    executor, report, _skipped = _dispatch_chain(
+        job, review_prompt(job), _REVIEW_SCHEMA, invoke=invoke,
     )
-    if not isinstance(report, dict) or "findings" not in report:
-        # a reviewer that produced nothing usable is not a blocker — the gate
-        # is the test suite. Record it as one non-blocking finding.
+    if not executor or not isinstance(report, dict) or "findings" not in report:
+        # review is non-gating (the test suite is the gate); a reviewer that
+        # produced nothing is one non-blocking finding, not a task failure.
         return {"verdict": "FINDINGS", "findings": [
             {"message": "review session returned no parseable report", "blocking": False}
         ]}

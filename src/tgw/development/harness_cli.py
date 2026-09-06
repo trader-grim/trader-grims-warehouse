@@ -75,8 +75,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="sudo target for the ref advance when not --self-publish")
     parser.add_argument("--coder-user", default="tgw-coder",
                         help="run implement/review sessions as this confined user ('' = current user)")
-    parser.add_argument("--executor", choices=("claude", "codex"), default=None,
-                        help="pin the coder-session executor")
+    parser.add_argument("--executor-preference", default="",
+                        help="ordered executor list to try, comma-separated (e.g. claude,codex); "
+                             "empty = model selector / default chain")
     parser.add_argument("--python", default="/opt/TGW/.venvs/controller/bin/python3")
     parser.add_argument("--json", action="store_true", help="emit the result as JSON")
     args = parser.parse_args(argv)
@@ -84,10 +85,11 @@ def main(argv: list[str] | None = None) -> int:
     repository = Path(args.repository).resolve(strict=True)
     task_id, body = _task_body(args.target, args.body)
 
+    pref = tuple(e.strip() for e in args.executor_preference.split(",") if e.strip())
     runners = harness_runners.build_runners(
         repository, args.worktree_root, task_body=body, python=args.python,
         coder_user=(args.coder_user or None),
-        executor=args.executor,
+        executor_preference=(pref or None),
     )
     ref_publisher = (
         None if args.self_publish

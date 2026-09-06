@@ -83,10 +83,26 @@ def test_implement_session_unparseable_report_is_failed(tmp_path):
     assert out["outcome"] == "failed"
 
 
-def test_implement_session_raises_on_nonzero_exit(tmp_path):
+def test_implement_session_exhausted_chain_is_failed_not_raised(tmp_path, monkeypatch):
+    # a nonzero exit with no credential looks like "executor unavailable" -> the
+    # chain moves on; with the whole chain exhausted the task result is "failed",
+    # never an unhandled raise.
+    monkeypatch.setattr(harness_session, "_session_credential", lambda e: None)
+    job = {"task_id": "t1", "body": "do X", "worktree": str(tmp_path)}
+    out = harness_session.run_implement_session(job, invoke=_fake_invoke("", returncode=1))
+    assert out["outcome"] == "failed"
+    assert out["artifacts"][0]["kind"] == "executor_chain_exhausted"
+
+
+def test_implement_session_raises_on_a_real_session_failure(tmp_path, monkeypatch):
+    # a nonzero exit that is NOT an availability wall, with a credential present,
+    # is a genuine SessionError for that executor.
+    monkeypatch.setattr(harness_session, "_session_credential", lambda e: ("ANTHROPIC_API_KEY", "x"))
+    monkeypatch.setattr(harness_session, "_executor_chain", lambda job=None: ["claude"])
     job = {"task_id": "t1", "body": "do X", "worktree": str(tmp_path)}
     with pytest.raises(harness_session.SessionError):
-        harness_session.run_implement_session(job, invoke=_fake_invoke("", returncode=1))
+        harness_session.run_implement_session(
+            job, invoke=_fake_invoke("boom: internal error", returncode=1))
 
 
 # --------------------------------------------------------------------------- #
@@ -161,9 +177,16 @@ def test_load_job_falls_back_to_the_worktree_file(monkeypatch, tmp_path):
     )
     job = harness_session._load_job()
     assert job["task_id"] == "t9"
-    assert harness_session._executor(job) == "codex"
+    assert harness_session._executor_chain(job) == ["codex"]
 
 
-def test_executor_prefers_the_job_field(monkeypatch):
+def test_executor_chain_prefers_the_job_preference(monkeypatch):
     monkeypatch.setenv("TGW_HARNESS_EXECUTOR", "claude")
-    assert harness_session._executor({"executor": "codex"}) == "codex"
+    assert harness_session._executor_chain({"executor": "codex"}) == ["codex"]
+    assert harness_session._executor_chain({"executor_preference": ["codex", "claude"]}) == ["codex", "claude"]
+
+
+def test_executor_chain_default_is_the_full_list(monkeypatch):
+    monkeypatch.delenv("TGW_HARNESS_EXECUTOR", raising=False)
+    monkeypatch.setattr("tgw.model_selector.select_executor", lambda role: (_ for _ in ()).throw(Exception()))
+    assert harness_session._executor_chain() == ["claude", "codex"]

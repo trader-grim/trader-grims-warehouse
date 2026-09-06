@@ -187,12 +187,12 @@ def test_build_runners_uses_the_coder_user_and_writes_a_job_file(repo, tmp_path,
                         or _sp.CompletedProcess(argv, 0, "", ""))
 
     r = build_runners(repo, tmp_path / "wts", task_body="do it",
-                      coder_user="tgw-coder", executor="claude")
+                      coder_user="tgw-coder", executor_preference=("claude", "codex"))
     r.implement("todo-x", wt, round=1, prior_findings=[])
 
     assert seen["argv"][:4] == ["sudo", "-n", "-u", "tgw-coder"]
     job = json.loads((wt / ".tgw-harness" / "job.json").read_text())
-    assert job["executor"] == "claude" and job["body"] == "do it"
+    assert job["executor_preference"] == ["claude", "codex"] and job["body"] == "do it"
 
 
 def test_review_findings_mapping():
