@@ -246,17 +246,21 @@ def _write_isolated_codex_config(codex_home: Path) -> None:
 
 def _session_credential() -> tuple[str, str] | None:
     """Return (env_var, value) for the coder session's model credential, from
-    the secrets facility. The facility (privileged) holds and refreshes it;
-    the session only ever receives the value for its one selected provider."""
+    the secrets facility (``secrets_root/tgw.env`` via ``tgw.apis.secrets``).
+    The facility holds and refreshes it; the session only ever receives the
+    value for its one selected provider. Returns None if none is available —
+    the session then fails to authenticate, which is a legible gap, not a
+    silent fallback."""
     try:
-        from tgw.apis.secrets import get_secret
+        # load_config() sources secrets_root/tgw.env into os.environ; harmless
+        # if it was already loaded or the file is absent.
+        from tgw.config import DEFAULT_CONFIG, load_config
+
+        load_config(DEFAULT_CONFIG)
     except Exception:
-        return None
+        pass
     for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
-        try:
-            value = get_secret(name)
-        except Exception:
-            continue
+        value = os.environ.get(name, "")
         if value:
             return name, value
     return None
