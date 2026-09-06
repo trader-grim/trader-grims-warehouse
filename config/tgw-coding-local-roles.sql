@@ -79,6 +79,15 @@ GRANT SELECT, INSERT
 GRANT SELECT, INSERT, UPDATE, DELETE
     ON TABLE public.harness_ledger_task, public.harness_ledger_entry
     TO tgw_coding;
+-- Read-only diagnostic access: a coding session investigating an
+-- item-workflow or provider-effect failure must be able to read the effect,
+-- observation, and authority evidence — never write it.
+GRANT SELECT
+    ON TABLE public.provider_effects, public.provider_observations,
+             public.operator_authorities,
+             public.plan_authority_requests, public.plan_authority_decisions,
+             public.plan_authority_events, public.plan_authority_effect_receipts
+    TO tgw_coding;
 GRANT USAGE, SELECT, UPDATE
     ON SEQUENCE public.todo_items_id_seq, public.queue_job_history_history_id_seq
     TO tgw_coding;
