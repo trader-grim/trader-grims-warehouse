@@ -16,15 +16,38 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-from tgw.development import harness_git, harness_orchestrator, harness_runners
+from tgw.development import harness_git, harness_ledger, harness_orchestrator, harness_runners
 
 _REPOSITORY = "/opt/TGW/tgw-lib/src/trader-grims-warehouse"
 _WORKTREE_ROOT = "/opt/TGW/var/worktrees"
+_CODING_CONFIG = Path("/opt/TGW/tgw-lib/config/tgw-coding-local.json")
+
+
+def _state_dsn(override: str | None) -> str:
+    """DSN for the Todo store and the harness ledger. Both default to the
+    tgw-prod ``dbname=state_machine user=tgw`` shape, which is wrong on tgw-lib
+    (peer auth: no ``tgw`` role) — resolve the local coding-state DSN instead."""
+    if override:
+        return override
+    env = os.environ.get("TGW_TODO_DSN")
+    if env:
+        return env
+    try:
+        dsn = json.loads(_CODING_CONFIG.read_text(encoding="utf-8")).get("postgres_dsn")
+    except (OSError, ValueError):
+        dsn = None
+    if not dsn:
+        raise SystemExit(
+            f"no state DB DSN: pass --postgres-dsn, set TGW_TODO_DSN, or ensure "
+            f"{_CODING_CONFIG} carries postgres_dsn"
+        )
+    return dsn
 
 
 def _sudo_ref_publisher(repository: Path, publisher_user: str) -> harness_git.RefPublisher:
@@ -46,7 +69,7 @@ def _sudo_ref_publisher(repository: Path, publisher_user: str) -> harness_git.Re
     return publish
 
 
-def _task_body(target: str, override: str | None) -> tuple[str, str]:
+def _task_body(target: str, override: str | None, dsn: str) -> tuple[str, str]:
     """Return (task_id, body). A numeric target is a Todo id; its body is read
     from the store unless --body overrides it."""
     if override:
@@ -54,6 +77,7 @@ def _task_body(target: str, override: str | None) -> tuple[str, str]:
     if target.isdigit():
         from tgw import todo
 
+        todo.init(dsn)
         item = todo.todo_get(int(target))
         if item is None or not str(item.get("body") or "").strip():
             raise SystemExit(f"Todo {target} has no body; pass --body")
@@ -79,11 +103,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="ordered executor list to try, comma-separated (e.g. claude,codex); "
                              "empty = model selector / default chain")
     parser.add_argument("--python", default="/opt/TGW/.venvs/controller/bin/python3")
+    parser.add_argument("--postgres-dsn", default=None,
+                        help="state DB DSN for the Todo store and the harness ledger "
+                             "(default: TGW_TODO_DSN or tgw-coding-local.json postgres_dsn)")
     parser.add_argument("--json", action="store_true", help="emit the result as JSON")
     args = parser.parse_args(argv)
 
+    dsn = _state_dsn(args.postgres_dsn)
+    harness_ledger.init(dsn)
+
     repository = Path(args.repository).resolve(strict=True)
-    task_id, body = _task_body(args.target, args.body)
+    task_id, body = _task_body(args.target, args.body, dsn)
 
     pref = tuple(e.strip() for e in args.executor_preference.split(",") if e.strip())
     runners = harness_runners.build_runners(

@@ -11,27 +11,29 @@ def test_task_body_reads_todo(monkeypatch):
     import tgw.todo as todo
 
     monkeypatch.setattr(todo, "todo_get", lambda i: {"body": "  implement the widget  "})
-    task_id, body = harness_cli._task_body("1931", None)
+    monkeypatch.setattr(todo, "init", lambda dsn: None)
+    task_id, body = harness_cli._task_body("1931", None, "dbname=x")
     assert task_id == "todo-1931"
     assert body == "  implement the widget  "
 
 
 def test_task_body_override_wins(monkeypatch):
-    task_id, body = harness_cli._task_body("my-task", "do the thing")
+    task_id, body = harness_cli._task_body("my-task", "do the thing", "dbname=x")
     assert (task_id, body) == ("my-task", "do the thing")
 
 
 def test_task_body_non_numeric_without_override_exits():
     with pytest.raises(SystemExit):
-        harness_cli._task_body("free-text", None)
+        harness_cli._task_body("free-text", None, "dbname=x")
 
 
 def test_task_body_empty_todo_exits(monkeypatch):
     import tgw.todo as todo
 
     monkeypatch.setattr(todo, "todo_get", lambda i: {"body": "   "})
+    monkeypatch.setattr(todo, "init", lambda dsn: None)
     with pytest.raises(SystemExit):
-        harness_cli._task_body("42", None)
+        harness_cli._task_body("42", None, "dbname=x")
 
 
 def test_sudo_ref_publisher_raises_on_failure(monkeypatch, tmp_path):
@@ -63,10 +65,11 @@ def test_main_wires_orchestrator(monkeypatch, tmp_path):
         return {"outcome": "landed", "commit": "c" * 40, "rounds": 1, "base_ref": "refs/heads/main"}
 
     monkeypatch.setattr(harness_cli.harness_orchestrator, "run_task", fake_run_task)
+    monkeypatch.setattr(harness_cli.harness_ledger, "init", lambda dsn: None)
 
     rc = harness_cli.main([
         "my-task", "--body", "do X", "--message", "my-task: do X",
-        "--repository", str(tmp_path),
+        "--repository", str(tmp_path), "--postgres-dsn", "dbname=x",
     ])
     assert rc == 0
     assert seen["task_id"] == "my-task"
@@ -79,10 +82,12 @@ def test_main_wires_orchestrator(monkeypatch, tmp_path):
 def test_main_self_publish_drops_the_db_publisher(monkeypatch, tmp_path):
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(harness_cli.harness_runners, "build_runners", lambda *a, **k: "R")
+    monkeypatch.setattr(harness_cli.harness_ledger, "init", lambda dsn: None)
     captured = {}
     monkeypatch.setattr(
         harness_cli.harness_orchestrator, "run_task",
         lambda tid, **kw: captured.update(publisher=kw["ref_publisher"]) or {"outcome": "landed", "commit": "c", "rounds": 1},
     )
-    harness_cli.main(["t", "--body", "b", "--message", "m", "--repository", str(tmp_path), "--self-publish"])
+    harness_cli.main(["t", "--body", "b", "--message", "m", "--repository", str(tmp_path),
+                      "--self-publish", "--postgres-dsn", "dbname=x"])
     assert captured["publisher"] is None
