@@ -17,13 +17,14 @@ reachable.
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import uuid
 
 import psycopg2
 import pytest
 
-from tgw.development import harness_ledger
+from tgw.development import harness_git, harness_ledger
 
 _CANDIDATE_DSNS = (
     os.environ.get("TGW_TEST_STATE_MACHINE_DSN"),
@@ -255,3 +256,71 @@ def test_rejects_bad_kind_and_status(task_ids):
         harness_ledger.append(task_id, "not-a-kind", {})
     with pytest.raises(ValueError):
         harness_ledger.write_cursor(task_id, "s", row["lease_id"], status="weird")
+
+
+# --------------------------------------------------------------------------- #
+# L11.1.LEDGER-AND-GIT-DISCIPLINE — the ledger holds the process, git holds
+# only the one accepted result; the full story is reconstructable from the
+# ledger with no git archaeology.
+# --------------------------------------------------------------------------- #
+
+def _sh(cwd, *args):
+    return subprocess.run(
+        ["git", "-c", "user.name=T", "-c", "user.email=t@e", *args],
+        cwd=cwd, check=True, text=True, capture_output=True,
+        env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+             "PATH": "/usr/bin:/bin", "HOME": str(cwd)},
+    ).stdout.strip()
+
+
+def test_three_rounds_in_the_ledger_land_as_one_commit(task_ids, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _sh(repo, "init", "-q", "-b", "main")
+    (repo / "seed").write_text("0\n")
+    _sh(repo, "add", "-A")
+    _sh(repo, "commit", "-q", "-m", "initial")
+    base = _sh(repo, "rev-parse", "main")
+
+    task_id = _new_task(task_ids)
+    got = harness_ledger.acquire_cursor(task_id, "harness", lease_seconds=120)
+    lease = got["lease_id"]
+    wt = tmp_path / "wt"
+    _sh(repo, "worktree", "add", "-q", "-b", f"coding/{task_id}", str(wt))
+
+    # the harness runs three rounds. Each round's outcome goes to the LEDGER;
+    # only the working state accumulates in the ephemeral worktree.
+    for rnd in range(1, 4):
+        (wt / "impl.py").write_text(f"attempt = {rnd}\n")
+        _sh(wt, "add", "-A")
+        _sh(wt, "commit", "-q", "-m", f"round {rnd} wip")
+        harness_ledger.append(task_id, "attempt", {"round": rnd}, actor="codex")
+        harness_ledger.append(
+            task_id, "review_finding", {"round": rnd, "message": f"issue {rnd}"}, actor="claude"
+        )
+        harness_ledger.write_cursor(task_id, "harness", lease, cursor={"round": rnd})
+
+    harness_ledger.append(task_id, "operator_correction", {"note": "final shape agreed"}, actor="dave")
+
+    landed = harness_git.land_accepted_task(
+        task_id, repository=repo, worktree=wt, message=f"{task_id}: implement",
+    )
+    harness_ledger.append(task_id, "next_action", {"landed_commit": landed["commit"]})
+    harness_ledger.write_cursor(task_id, "harness", lease, status="done")
+    harness_ledger.release_cursor(task_id, "harness", lease)
+
+    # git: exactly one commit for the task, a real ancestor, branch gone
+    assert _sh(repo, "rev-parse", "main^") == base
+    assert _sh(repo, "log", "--oneline", "--format=%s").splitlines() == [
+        f"{task_id}: implement", "initial",
+    ]
+    assert _sh(repo, "branch", "--list", "coding/*") == ""
+
+    # ledger: the whole story survives, in order, no git needed
+    story = harness_ledger.history(task_id)
+    assert [e["kind"] for e in story] == [
+        "attempt", "review_finding", "attempt", "review_finding",
+        "attempt", "review_finding", "operator_correction", "next_action",
+    ]
+    assert story[-1]["body"]["landed_commit"] == landed["commit"]
+    assert harness_ledger.read_task(task_id)["status"] == "done"
