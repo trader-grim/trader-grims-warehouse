@@ -301,6 +301,23 @@ def _looks_unavailable(text: str) -> bool:
     return any(p in low for p in _UNAVAILABLE_PATTERNS)
 
 
+def _secret_scrubbed_env() -> dict[str, str]:
+    """The parent environment with every provider secret removed.
+
+    ``_session_credential`` sources the whole ``tgw.env`` into this process, so
+    without this a bypassPermissions session would inherit every coding
+    provider's key. The session gets back exactly one credential — the
+    selected executor's — and nothing else (the cross-contamination boundary
+    Dave flagged; the leaf 11.8 broker enforces it properly later)."""
+    def is_secret(name: str) -> bool:
+        u = name.upper()
+        return (
+            u.endswith("_API_KEY") or u.endswith("_TOKEN") or "OAUTH" in u
+            or u.startswith(("ANTHROPIC", "CLAUDE_", "OPENAI", "CODEX", "GOOGLE_API"))
+        )
+    return {k: v for k, v in os.environ.items() if not is_secret(k)}
+
+
 def _run_claude(prompt: str, worktree: Path, *, invoke: Invoke) -> dict[str, Any] | None:
     # Independence (W07): implement / review must not share Claude Code's
     # per-project state (~/.claude/projects/* — transcript, session cache). A
@@ -312,10 +329,7 @@ def _run_claude(prompt: str, worktree: Path, *, invoke: Invoke) -> dict[str, Any
     with tempfile.TemporaryDirectory(prefix=".tgw-harness-claude-", dir=worktree) as tmp:
         home = Path(tmp) / "home"
         (home / ".claude").mkdir(parents=True, mode=0o700)
-        env = {
-            k: v for k, v in os.environ.items()
-            if not k.startswith("CLAUDE_") and k != "ANTHROPIC_API_KEY"
-        }
+        env = _secret_scrubbed_env()
         env["HOME"] = str(home)
         env["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
         if cred:
@@ -351,7 +365,10 @@ def _run_codex(prompt: str, worktree: Path, schema: dict[str, Any], *, invoke: I
             (codex_home / "auth.json").chmod(0o600)
         _write_isolated_codex_config(codex_home)
         schema_path.write_text(json.dumps(schema, sort_keys=True), encoding="utf-8")
-        env = {**os.environ, "CODEX_HOME": str(codex_home)}
+        env = _secret_scrubbed_env()
+        env["CODEX_HOME"] = str(codex_home)
+        env["HOME"] = str(temp / "home")
+        Path(env["HOME"]).mkdir(exist_ok=True)
         if cred:
             env[cred[0]] = cred[1]
         completed = invoke(

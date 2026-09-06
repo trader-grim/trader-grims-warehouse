@@ -186,6 +186,28 @@ def test_executor_chain_prefers_the_job_preference(monkeypatch):
     assert harness_session._executor_chain({"executor_preference": ["codex", "claude"]}) == ["codex", "claude"]
 
 
+def test_claude_session_gets_only_its_own_credential(tmp_path, monkeypatch):
+    # tgw.env sources every provider key into the process; the claude session
+    # must see ONLY CLAUDE_CODE_OAUTH_TOKEN, none of the others.
+    for k in ("DEEPSEEK_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.setenv(k, "leak-" + k)
+    monkeypatch.setattr(harness_session, "_session_credential",
+                        lambda e: ("CLAUDE_CODE_OAUTH_TOKEN", "the-token"))
+    seen = {}
+
+    def fake_invoke(cmd, **kw):
+        seen["env"] = dict(kw["env"])
+        return subprocess.CompletedProcess(cmd, 0, _claude_out({"status": "implemented", "summary": "ok"}), "")
+
+    harness_session.run_implement_session(
+        {"task_id": "t", "body": "b", "worktree": str(tmp_path)}, invoke=fake_invoke)
+    env = seen["env"]
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "the-token"
+    for k in ("DEEPSEEK_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+        assert k not in env
+    assert "PATH" in env  # non-secret env survives
+
+
 def test_executor_chain_default_is_the_full_list(monkeypatch):
     monkeypatch.delenv("TGW_HARNESS_EXECUTOR", raising=False)
     monkeypatch.setattr("tgw.model_selector.select_executor", lambda role: (_ for _ in ()).throw(Exception()))
