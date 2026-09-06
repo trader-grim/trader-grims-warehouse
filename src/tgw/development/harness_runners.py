@@ -247,6 +247,60 @@ def implement_outcome(receipt: dict[str, Any]) -> dict[str, Any]:
     return {"outcome": outcome, "summary": summary or raw or "no receipt detail"}
 
 
+_IMPLEMENT_ARGV = ("/opt/TGW/.venvs/controller/bin/tgw-harness-implement-session",)
+_REVIEW_ARGV = ("/opt/TGW/.venvs/controller/bin/tgw-harness-review-session",)
+
+
+def build_runners(
+    repository: Path | str,
+    worktree_root: Path | str,
+    *,
+    task_body: str,
+    python: str = sys.executable,
+    actor: str = "harness",
+    implement_argv: tuple[str, ...] = _IMPLEMENT_ARGV,
+    review_argv: tuple[str, ...] = _REVIEW_ARGV,
+    session_timeout_s: int = 1800,
+) -> Any:
+    """Assemble a complete ``harness_orchestrator.Runners`` for one task.
+
+    The bundle closes over ``task_body`` — the orchestrator runs exactly one
+    task per ``run_task`` call, so one bundle per task is the natural shape.
+    """
+    from tgw.development.harness_orchestrator import Runners
+
+    def implement_payload(task_id: str, worktree: Path, context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "task_id": task_id,
+            "body": task_body,
+            "worktree": str(worktree),
+            "round": context.get("round", 1),
+            "prior_findings": context.get("prior_findings", []),
+        }
+
+    def review_payload(task_id: str, worktree: Path, _context: dict[str, Any]) -> dict[str, Any]:
+        return {"task_id": task_id, "body": task_body, "worktree": str(worktree)}
+
+    return Runners(
+        prepare_worktree=git_worktree_prepare(repository, worktree_root, actor=actor),
+        implement=external_session(
+            runner_argv=implement_argv,
+            receipt_name="implementation-receipt.json",
+            payload_builder=implement_payload,
+            map_receipt=implement_outcome,
+            timeout_s=session_timeout_s,
+        ),
+        run_tests=pytest_gate(python=python),
+        review=external_session(
+            runner_argv=review_argv,
+            receipt_name="review-receipt.json",
+            payload_builder=review_payload,
+            map_receipt=review_findings,
+            timeout_s=session_timeout_s,
+        ),
+    )
+
+
 def review_findings(receipt: dict[str, Any]) -> dict[str, Any]:
     """Map a review receipt onto {findings: [{message, blocking}]}."""
     verdict = str(receipt.get("verdict", "")).upper()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import uuid
 
 import psycopg2
@@ -201,3 +202,52 @@ def test_rerun_after_done_is_idempotent(env):
     again = _run(env)
     assert again["outcome"] == "already_done"
     assert again["commit"] == first["commit"]
+
+
+def test_build_runners_stack_lands_end_to_end(env, tmp_path):
+    """The full production stack minus the LLM: build_runners wires
+    git_worktree_prepare + pytest_gate + external_session, driven by fake
+    implement/review scripts, through run_task to a landed commit."""
+    from tgw.development import harness_runners
+    from tgw.development.harness_runners import build_runners
+
+    impl = tmp_path / "fake-impl.py"
+    impl.write_text(
+        "import json, os, pathlib\n"
+        "job = json.loads(os.environ['TGW_CODING_JOB'])\n"
+        "wt = pathlib.Path(job['worktree'])\n"
+        "(wt / 'src').mkdir(exist_ok=True)\n"
+        "(wt / 'src' / 'feature.py').write_text('VALUE = 1\\n')\n"
+        "(wt / 'tests').mkdir(exist_ok=True)\n"
+        "(wt / 'tests' / 'test_feature.py').write_text('from feature import VALUE\\n\\ndef test_v():\\n    assert VALUE == 1\\n')\n"
+        "(wt / 'implementation-receipt.json').write_text(json.dumps({'outcome': 'satisfied', 'artifacts': [{'kind': 'summary', 'detail': 'added feature'}]}))\n"
+    )
+    review = tmp_path / "fake-review.py"
+    review.write_text(
+        "import json, os, pathlib\n"
+        "job = json.loads(os.environ['TGW_CODING_JOB'])\n"
+        "pathlib.Path(job['worktree'], 'review-receipt.json').write_text(json.dumps({'verdict': 'pass', 'findings': []}))\n"
+    )
+
+    runners = build_runners(
+        env["repo"], tmp_path / "wts", task_body="add the feature",
+        python=sys.executable,
+        implement_argv=(sys.executable, str(impl)),
+        review_argv=(sys.executable, str(review)),
+    )
+    # pytest_gate runs ruff too; the fake source is clean but skip ruff for speed
+    runners = runners.__class__(
+        prepare_worktree=runners.prepare_worktree,
+        implement=runners.implement,
+        run_tests=harness_runners.pytest_gate(python=sys.executable, run_ruff=False),
+        review=runners.review,
+    )
+
+    result = harness_orchestrator.run_task(
+        env["task_id"], repository=env["repo"], runners=runners,
+        commit_message=f"{env['task_id']}: add the feature", lease_seconds=120,
+    )
+    assert result["outcome"] == "landed"
+    assert _git(env["repo"], "show", "main:src/feature.py").strip() == "VALUE = 1"
+    assert _git(env["repo"], "branch", "--list", "coding/*") == ""
+    assert [e["kind"] for e in harness_ledger.history(env["task_id"])][-1] == "next_action"
