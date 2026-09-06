@@ -450,7 +450,8 @@ class EbayUploadWorker(QueueWorker):
                         error_detail=f'{type(exc).__name__}: {exc}',
                     )
                     raise TreatmentFailure(
-                        f'{sku}: photo upload outcome ambiguous',
+                        f'{sku}: photo upload outcome ambiguous '
+                        f'({type(exc).__name__}: {exc})',
                         self._provider_receipt(
                             payload, sku, outcome='ambiguous',
                             effect_id=finished.effect_id,
@@ -509,7 +510,8 @@ class EbayUploadWorker(QueueWorker):
                     )
                     self._persist_partial(sku, uploaded, photos)
                     raise TreatmentFailure(
-                        f'{sku}: photo upload outcome ambiguous',
+                        f'{sku}: photo upload outcome ambiguous '
+                        f'({type(exc).__name__}: {exc})',
                         self._provider_receipt(
                             payload, sku, outcome='ambiguous',
                             effect_id=finished.effect_id,

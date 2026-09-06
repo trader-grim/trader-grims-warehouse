@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import tgw.logging as tgw_logging
-from tgw.errors import HardFailure
+from tgw.errors import HardFailure, TreatmentFailure
 from tgw.queue import state_machine
 
 log = logging.getLogger(__name__)
@@ -420,6 +420,50 @@ class QueueWorker:
                 )
             log.info("job %s cancellation acknowledged: %s", job_id, exc)
             tgw_logging.log_event("job_cancelled", job_id=job_id)
+        except TreatmentFailure as exc:
+            # A TreatmentFailure still carries a contract-bound treatment
+            # result, but the wrapped exception (e.g. a network ReadTimeout)
+            # may be transient. Classify it the same way the generic
+            # Exception path below does before dead-lettering, so a fixable
+            # provider hiccup gets requeued with backoff instead of being
+            # dead-lettered on the very first attempt.
+            error_text = repr(exc)
+            action, delay = classify_dead_letter(error_text)
+            if action == 'requeue':
+                attempt = int(job.get('attempt_count') or 0)
+                max_att = int(job.get('max_attempts') or 5)
+                log.warning(
+                    'transient error on %s (attempt %d/%d); rescheduling in %ds: %s',
+                    self.queue_name, attempt, max_att, delay, error_text[:200],
+                )
+                from tgw.notify import notify
+                notify(
+                    f'Transient requeue: {self.queue_name}',
+                    f'Rescheduling in {delay}s — {error_text[:120]}',
+                    level='warning',
+                )
+                state_machine.requeue_with_backoff(
+                    job_id, self.owner, lease_token, delay, error_text
+                )
+                tgw_logging.log_event(
+                    'job_transient_requeue', job_id=job_id,
+                    queue=self.queue_name, delay=delay,
+                )
+                return
+            log.error('job %s hard failure (dead_letter): %s', job_id, exc)
+            state_machine.mark_dead_letter(
+                job_id, self.owner, lease_token, error_text,
+                result=getattr(exc, "result", None),
+            )
+            tgw_logging.log_event('job_dead_letter', job_id=job_id,
+                                  error=error_text)
+            from tgw.notify import notify
+            notify(
+                f'Dead letter: {self.queue_name}',
+                f'{error_text[:140]}',
+                level='error',
+            )
+            self._on_terminal_failure(job, error_text)
         except HardFailure as exc:
             log.error('job %s hard failure (dead_letter): %s', job_id, exc)
             state_machine.mark_dead_letter(
