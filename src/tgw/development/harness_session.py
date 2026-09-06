@@ -371,3 +371,15 @@ def review_main() -> int:
     receipt = run_review_session(job)
     _emit(Path(job["worktree"]), "review-receipt.json", receipt)
     return 0
+
+
+if __name__ == "__main__":  # `python -m tgw.development.harness_session {implement|review}`
+    import sys
+
+    _mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    if _mode == "implement":
+        raise SystemExit(implement_main())
+    if _mode == "review":
+        raise SystemExit(review_main())
+    print("usage: python -m tgw.development.harness_session {implement|review}", file=sys.stderr)
+    raise SystemExit(2)

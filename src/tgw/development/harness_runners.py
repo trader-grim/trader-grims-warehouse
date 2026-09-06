@@ -247,8 +247,8 @@ def implement_outcome(receipt: dict[str, Any]) -> dict[str, Any]:
     return {"outcome": outcome, "summary": summary or raw or "no receipt detail"}
 
 
-_IMPLEMENT_ARGV = ("/opt/TGW/.venvs/controller/bin/tgw-harness-implement-session",)
-_REVIEW_ARGV = ("/opt/TGW/.venvs/controller/bin/tgw-harness-review-session",)
+_IMPLEMENT_ARGV = (sys.executable, "-m", "tgw.development.harness_session", "implement")
+_REVIEW_ARGV = (sys.executable, "-m", "tgw.development.harness_session", "review")
 
 
 def build_runners(
