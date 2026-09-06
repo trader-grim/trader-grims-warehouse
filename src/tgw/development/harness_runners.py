@@ -262,14 +262,8 @@ def external_session(
             "TGW_CODING_WORKTREE_SRC": str(worktree / "src"),
             **(extra_env or {}),
         }
-        # Run the runner from the checkout's ``src`` so a ``python -m tgw.…``
-        # runner resolves against this worktree's source even when invoked
-        # through ``sudo -n -u tgw-coder`` (sudo strips PYTHONPATH; the
-        # controller venv's installed ``tgw`` is a frozen release, not the
-        # current tree). Mirrors the coding units' WorkingDirectory + PYTHONPATH=src.
-        run_cwd = worktree / "src" if (worktree / "src").is_dir() else worktree
         result = subprocess.run(
-            list(runner_argv), cwd=run_cwd, env=env, check=False, text=True,
+            list(runner_argv), cwd=worktree, env=env, check=False, text=True,
             capture_output=True, timeout=timeout_s,
         )
         receipt_path = worktree / receipt_name
