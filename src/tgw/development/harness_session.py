@@ -462,13 +462,17 @@ def run_review_session(job: dict[str, Any], *, invoke: Invoke = subprocess.run) 
 
 def _load_job() -> dict[str, Any]:
     """The job comes from ``TGW_CODING_JOB`` when the env survives, else from
-    ``<cwd>/.tgw-harness/job.json`` — the reliable path when the session is
-    invoked via ``sudo -n -u tgw-coder`` (sudo strips the environment)."""
+    the nearest ``.tgw-harness/job.json`` at or above the cwd — the reliable
+    path when the session is invoked via ``sudo -n -u tgw-coder`` (sudo strips
+    the environment) with cwd set to ``<worktree>/src``."""
     raw = os.environ.get("TGW_CODING_JOB", "")
     if not raw:
-        job_file = Path.cwd() / ".tgw-harness" / "job.json"
-        if job_file.is_file():
-            raw = job_file.read_text(encoding="utf-8")
+        here = Path.cwd()
+        for base in (here, *here.parents):
+            job_file = base / ".tgw-harness" / "job.json"
+            if job_file.is_file():
+                raw = job_file.read_text(encoding="utf-8")
+                break
     try:
         job = json.loads(raw)
     except (TypeError, ValueError) as exc:

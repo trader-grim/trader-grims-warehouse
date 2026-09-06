@@ -104,8 +104,11 @@ def _fake_runner(tmp_path: Path, receipt_name: str, receipt_body: dict) -> Path:
     script.write_text(
         "import json, os, pathlib, sys\n"
         "job = json.loads(os.environ['TGW_CODING_JOB'])\n"
-        f"pathlib.Path({receipt_name!r}).write_text(json.dumps({json.dumps(receipt_body)}))\n"
-        "pathlib.Path('.job-seen.json').write_text(json.dumps(job))\n"
+        # the runner is launched with cwd = <worktree>/src; the receipt goes to
+        # the worktree root, exactly like harness_session._emit does.
+        "wt = pathlib.Path(os.environ['TGW_CODING_WORKTREE_SRC']).parent\n"
+        f"(wt / {receipt_name!r}).write_text(json.dumps({json.dumps(receipt_body)}))\n"
+        "(wt / '.job-seen.json').write_text(json.dumps(job))\n"
         "sys.exit(0)\n"
     )
     return script
