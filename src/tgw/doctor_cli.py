@@ -2184,6 +2184,31 @@ def _reconcile_current_task_projections(
             "current task next actions/bindings require explicit reconciliation"
         )
 
+    # next_bindings mirrors two identities this function has already converged on
+    # task.source and task.plan: the coding-runtime source head and the Plan
+    # evidence head.  _stage_context_transition_projections only rewrites
+    # next_bindings on a *source* transition, so a plan-evidence-only advance (a
+    # plan-vault commit with no source change) would otherwise leave
+    # next_bindings.plan_evidence_* stale, and _validate_current_task_projections
+    # would then reject the mismatch this function's own task.plan /
+    # cursor.resolved advance just created.  Converge the locally-provable
+    # next_bindings mirrors here too; item_workflow_* stays untouched because it
+    # is live deployment evidence, not a locally derivable mirror.
+    if isinstance(next_bindings, dict):
+        for _nb_key, _nb_value in (
+            ("plan_evidence_commit", evidence_commit),
+            ("plan_evidence_tree", evidence_tree),
+            ("coding_runtime_commit", source_commit),
+            ("coding_runtime_tree", source_tree),
+        ):
+            if _nb_key in next_bindings:
+                set_value(
+                    next_bindings,
+                    _nb_key,
+                    _nb_value,
+                    f"next_bindings.{_nb_key}",
+                )
+
     if changed:
         now = datetime.now().astimezone().isoformat()
         record = {

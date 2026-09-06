@@ -2874,8 +2874,72 @@ def test_current_task_reconciliation_updates_only_deterministic_current_mirrors(
     assert task["next"] == protected_next
     assert task["plan"]["evidence_commit"] == "8" * 40
     assert cursor["resolved"]["plan_evidence_tree"] == "9" * 40
+    # next_bindings mirrors the same locally-provable identities; a
+    # plan-evidence-only advance must not leave them stale.
+    assert task["next_bindings"]["plan_evidence_commit"] == "8" * 40
+    assert task["next_bindings"]["plan_evidence_tree"] == "9" * 40
+    assert task["next_bindings"]["coding_runtime_commit"] == commit
+    assert task["next_bindings"]["coding_runtime_tree"] == tree
+    # item_workflow_* is live deployment evidence, not a locally derivable
+    # mirror, and stays untouched.
+    assert (
+        task["next_bindings"]["item_workflow_commit"]
+        == protected_tracks["item_workflow"]["commit"]
+    )
     assert task["reviewed_history"] == reviewed
     assert task["current_projection_reconciliation_history"][-1]["authority"] is False
+
+
+def test_plan_evidence_only_advance_reconciles_and_revalidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plan-vault commit with no source change must reconcile clean.
+
+    Regression: _reconcile_current_task_projections advanced task.plan and
+    cursor.resolved but not next_bindings.plan_evidence_*, so
+    _validate_current_task_projections then rejected the mismatch it created,
+    forcing a manual sudo -u db edit of current-task.json + plan-cycle-cursor.json.
+    """
+    commit, tree = "1" * 40, "2" * 40
+    task, cursor = _full_current_task_projection(commit, tree)
+    workflow = {
+        "commit": commit,
+        "tree": tree,
+        "bootstrap_receipt": "/receipts/bootstrap.json",
+        "materialization_receipt_hash": "sha256:" + "1" * 64,
+    }
+    # source head is unchanged; only the Plan evidence head moved.
+    monkeypatch.setattr(
+        doctor_cli,
+        "_plan_repository_evidence_identity",
+        lambda _paths, _plan: ("8" * 40, "9" * 40),
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_plan_evidence_identity",
+        lambda _paths, _task: ("8" * 40, "9" * 40),
+    )
+    _stub_current_projection_evidence(monkeypatch)
+
+    doctor_cli._reconcile_current_task_projections(
+        doctor_cli.DoctorPaths(),
+        task,
+        cursor,
+        workflow=workflow,
+        source_commit=commit,
+        source_tree=tree,
+    )
+
+    # The validator must now accept the reconciled projection with no further edits.
+    doctor_cli._validate_current_task_projections(
+        doctor_cli.DoctorPaths(),
+        task,
+        cursor,
+        source_commit=commit,
+        source_tree=tree,
+    )
+    assert task["next_bindings"]["plan_evidence_commit"] == "8" * 40
+    assert cursor["resolved"]["plan_evidence_commit"] == "8" * 40
 
 
 @pytest.mark.parametrize(
