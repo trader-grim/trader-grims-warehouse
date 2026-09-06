@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "model-currency"
+version = "0.1.0"
+description = "Standalone ranked catalogue of live, coding-appropriate LLM models (OpenRouter / Groq / models.dev)"
+readme = "README.md"
+requires-python = ">=3.11"
+# No runtime dependencies, on purpose. This tool must be liftable into any
+# project and run with nothing but the Python standard library on the path.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+model-currency = "model_currency.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["model_currency*"]
+
+[tool.setuptools.package-data]
+model_currency = ["fallback_models.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

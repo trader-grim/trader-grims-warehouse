@@ -1,0 +1,183 @@
+{
+ "object": "list",
+ "data": [
+  {
+   "id": "whisper-large-v3",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 8192,
+   "max_completion_tokens": 8192,
+   "public_apps": null
+  },
+  {
+   "id": "whisper-large-v3-turbo",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 8192,
+   "max_completion_tokens": 8192,
+   "public_apps": null
+  },
+  {
+   "id": "llama-3.1-8b-instant",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 131072,
+   "max_completion_tokens": 131072,
+   "public_apps": null
+  },
+  {
+   "id": "allam-2-7b",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 4096,
+   "max_completion_tokens": 4096,
+   "public_apps": null
+  },
+  {
+   "id": "llama-3.3-70b-versatile",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 131072,
+   "max_completion_tokens": 32768,
+   "public_apps": null
+  },
+  {
+   "id": "qwen/qwen3.8-27b",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 131042,
+   "max_completion_tokens": 16384,
+   "public_apps": null
+  },
+  {
+   "id": "qwen/qwen3.6-27b",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 131072,
+   "max_completion_tokens": 16384,
+   "public_apps": null
+  },
+  {
+   "id": "groq/compound",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 131072,
+   "max_completion_tokens": 8192,
+   "public_apps": null
+  },
+  {
+   "id": "groq/compound-mini",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 131072,
+   "max_completion_tokens": 8192,
+   "public_apps": null
+  },
+  {
+   "id": "meta-llama/llama-prompt-guard-2-86m",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 512,
+   "max_completion_tokens": 512,
+   "public_apps": null
+  },
+  {
+   "id": "meta-llama/llama-prompt-guard-2-22m",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 512,
+   "max_completion_tokens": 512,
+   "public_apps": null
+  },
+  {
+   "id": "openai/gpt-oss-20b",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 131072,
+   "max_completion_tokens": 65536,
+   "public_apps": null
+  },
+  {
+   "id": "openai/gpt-oss-safeguard-20b",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 131072,
+   "max_completion_tokens": 65536,
+   "public_apps": null
+  },
+  {
+   "id": "openai/gpt-oss-120b",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 131072,
+   "max_completion_tokens": 65536,
+   "public_apps": null
+  },
+  {
+   "id": "canopylabs/orpheus-v1-english",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 4000,
+   "max_completion_tokens": 50000,
+   "public_apps": null
+  },
+  {
+   "id": "canopylabs/orpheus-arabic-saudi",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Groq",
+   "active": true,
+   "context_window": 4000,
+   "max_completion_tokens": 50000,
+   "public_apps": null
+  },
+  {
+   "id": "llama-3.1-405b-reasoning",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "Meta",
+   "active": false,
+   "context_window": 131072,
+   "max_completion_tokens": 8192
+  },
+  {
+   "id": "whisper-large-v3",
+   "object": "model",
+   "created": 1788000000,
+   "owned_by": "OpenAI",
+   "active": true,
+   "context_window": 448,
+   "max_completion_tokens": 448
+  }
+ ]
+}

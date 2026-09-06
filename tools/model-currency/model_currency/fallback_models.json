@@ -1,0 +1,19 @@
+{
+  "schema": "model-currency/fallback/v1",
+  "generated": "2026-09-06",
+  "note": "Checked-in offline fallback. Hand-curated free, tool-use-capable, coding-appropriate models known-good at the generated date. Used only when every live source AND the on-disk cache are unavailable. Refresh periodically by running `model-currency --json` online and pruning to the free entries you trust.",
+  "models": [
+    {"provider": "groq", "model_id": "llama-3.3-70b-versatile", "context": 131072, "tool_use": true, "free": true, "deprecated": false, "name": "Llama 3.3 70B Versatile", "notes": ["Groq free tier — rate-limited"]},
+    {"provider": "groq", "model_id": "openai/gpt-oss-120b", "context": 131072, "tool_use": true, "free": true, "deprecated": false, "name": "GPT-OSS 120B", "notes": ["Groq free tier — rate-limited"]},
+    {"provider": "groq", "model_id": "openai/gpt-oss-20b", "context": 131072, "tool_use": true, "free": true, "deprecated": false, "name": "GPT-OSS 20B", "notes": ["Groq free tier — rate-limited"]},
+    {"provider": "groq", "model_id": "moonshotai/kimi-k2-instruct", "context": 131072, "tool_use": true, "free": true, "deprecated": false, "name": "Kimi K2 Instruct", "notes": ["Groq free tier — rate-limited"]},
+    {"provider": "groq", "model_id": "qwen/qwen3-32b", "context": 131072, "tool_use": true, "free": true, "deprecated": false, "name": "Qwen3 32B", "notes": ["Groq free tier — rate-limited"]},
+    {"provider": "opencode", "model_id": "opencode/deepseek-v4-flash", "context": 163840, "tool_use": true, "free": true, "deprecated": false, "name": "DeepSeek V4 Flash (opencode-zen free tier)"},
+    {"provider": "opencode", "model_id": "opencode/gpt-5.3-codex-spark", "context": 256000, "tool_use": true, "free": true, "deprecated": false, "name": "GPT-5.3 Codex Spark (opencode-zen free tier)"},
+    {"provider": "opencode", "model_id": "opencode/muse-spark-1.3-contributor-free", "context": 262144, "tool_use": true, "free": true, "deprecated": false, "name": "Muse Spark 1.3 (opencode-zen contributor-free)"},
+    {"provider": "opencode", "model_id": "opencode/grok-code", "context": 256000, "tool_use": true, "free": true, "deprecated": false, "name": "Grok Code (opencode-zen free tier)"},
+    {"provider": "openrouter", "model_id": "deepseek/deepseek-chat-v3.1:free", "context": 163840, "tool_use": true, "free": true, "deprecated": false, "name": "DeepSeek: DeepSeek V3.1 (free)"},
+    {"provider": "openrouter", "model_id": "qwen/qwen3-coder:free", "context": 262144, "tool_use": true, "free": true, "deprecated": false, "name": "Qwen: Qwen3 Coder (free)"},
+    {"provider": "openrouter", "model_id": "z-ai/glm-4.5-air:free", "context": 131072, "tool_use": true, "free": true, "deprecated": false, "name": "Z.AI: GLM 4.5 Air (free)"}
+  ]
+}
