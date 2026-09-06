@@ -330,8 +330,7 @@ class EbayPublishWorker(QueueWorker):
                     error_detail=f'{type(exc).__name__}: {exc}',
                 )
                 raise TreatmentFailure(
-                    f'{sku}: provider publish outcome ambiguous; reconciliation required '
-                    f'({type(exc).__name__}: {exc})',
+                    f'{sku}: provider publish outcome ambiguous; reconciliation required',
                     self._provider_effect_receipt(
                         payload, sku, ambiguous.effect_id, 'ambiguous',
                         'PROVIDER_EFFECT_AMBIGUOUS', None,
@@ -343,8 +342,7 @@ class EbayPublishWorker(QueueWorker):
                 error_detail=f'{type(exc).__name__}: {exc}',
             )
             raise TreatmentFailure(
-                f'{sku}: provider publish outcome ambiguous; reconciliation required '
-                f'({type(exc).__name__}: {exc})',
+                f'{sku}: provider publish outcome ambiguous; reconciliation required',
                 self._provider_effect_receipt(
                     payload, sku, ambiguous.effect_id, 'ambiguous',
                     'PROVIDER_EFFECT_AMBIGUOUS', None,

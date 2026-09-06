@@ -1,9 +1,0 @@
-{
-  "findings": [
-    {
-      "blocking": false,
-      "message": "Minor duplication: the new `except TreatmentFailure` block in src/tgw/queue/worker_base.py (_process) duplicates most of the dead-letter/notify logic already in the adjacent `except HardFailure` block. Not a correctness issue \u2014 behavior is verified correct by tests \u2014 but could be factored into a shared helper for maintainability."
-    }
-  ],
-  "verdict": "FINDINGS"
-}

@@ -80,6 +80,25 @@ def test_multi_round_task_lands_as_one_commit(repo):
     assert landed["base_commit"] == base
 
 
+def test_land_excludes_the_harness_scratch_from_the_commit(repo):
+    wt = _worktree(repo, "todo-scratch")
+    (wt / "feature.py").write_text("value = 1\n")
+    # the runners write these into the worktree; they must not land
+    (wt / ".tgw-harness").mkdir()
+    (wt / ".tgw-harness" / "job.json").write_text('{"task_id": "todo-scratch"}')
+    (wt / "implementation-receipt.json").write_text('{"outcome": "satisfied"}')
+    (wt / "review-receipt.json").write_text('{"verdict": "PASS"}')
+
+    landed = harness_git.land_accepted_task(
+        "todo-scratch", repository=repo, worktree=wt, message="Todo: feature",
+    )
+    files = _git(repo, "ls-tree", "-r", "--name-only", landed["commit"]).splitlines()
+    assert "feature.py" in files
+    assert not any(
+        f.startswith(".tgw-harness") or f.endswith("-receipt.json") for f in files
+    )
+
+
 def test_land_refuses_when_base_moved(repo):
     wt = _worktree(repo, "todo-7")
     (wt / "a.txt").write_text("a\n")

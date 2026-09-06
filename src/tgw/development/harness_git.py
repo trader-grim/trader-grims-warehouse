@@ -20,6 +20,7 @@ records the landing in the ledger and advances the task cursor after
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -27,6 +28,14 @@ from typing import Any, Callable
 from tgw.protected_git import protected_git_command, protected_git_environment
 
 _PLAIN_GIT = "/usr/bin/git"
+
+# Paths the harness itself writes into the ephemeral worktree — the job file and
+# the session receipts. They must never reach the squashed commit.
+_HARNESS_SCRATCH: tuple[str, ...] = (
+    ".tgw-harness",
+    "implementation-receipt.json",
+    "review-receipt.json",
+)
 
 # A ref publisher performs the guarded fast-forward advance of the base branch.
 # (ref, expected_old_oid, new_oid) -> None; raises on refusal or a lost race.
@@ -149,6 +158,17 @@ def land_accepted_task(
 
     base_oid = _rev(repository, base_ref)
     base_tree = _rev(repository, f"{base_oid}^{{tree}}")
+
+    # Drop the harness's own scratch (job file, session receipts) before it can
+    # be staged — it is written into the worktree root and would otherwise land
+    # in the squashed tree.
+    for rel in _HARNESS_SCRATCH:
+        target = worktree / rel
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        elif target.exists():
+            target.unlink()
+        _git(worktree, "rm", "-r", "--cached", "--ignore-unmatch", "-q", "--", rel)
 
     # Fold any uncommitted work in the ephemeral worktree into its history so
     # the net tree is complete. The worktree is about to be deleted, so a
