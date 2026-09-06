@@ -99,11 +99,57 @@ def git_worktree_prepare(
 # run_tests — the mechanical gate
 # --------------------------------------------------------------------------- #
 
+def _changed_paths(worktree: Path, base_ref: str) -> set[str]:
+    """Repo-relative paths this change touches: tracked diff vs ``base_ref``
+    plus not-yet-committed new files (``git diff`` never lists untracked)."""
+    def _lines(*args: str) -> list[str]:
+        try:
+            return _git(worktree, *args).splitlines()
+        except RunnerError:
+            return []
+
+    return (
+        set(_lines("diff", "--name-only", base_ref, "--"))
+        | set(_lines("ls-files", "--others", "--exclude-standard"))
+    )
+
+
+def _changed_test_selection(worktree: Path, base_ref: str) -> tuple[list[str], str]:
+    """The test files this change should be gated on:
+
+      * ``tests/test_*.py`` changed or newly added by this change, plus
+      * the sibling ``tests/test_<name>.py`` for every changed
+        ``src/**/<name>.py`` module.
+
+    Returns ``(selection, note)``. An empty selection means the change gates on
+    no test — the caller decides what that means; the gate never falls back to
+    the whole tree, which on this repo carries ~100 unrelated red tests and is
+    not a signal.
+    """
+    touched = _changed_paths(worktree, base_ref)
+    selection: set[str] = set()
+    for path in touched:
+        name = Path(path).name
+        if path.startswith("tests/") and name.startswith("test_") and name.endswith(".py"):
+            selection.add(path)
+    for src in touched:
+        if src.startswith("src/") and src.endswith(".py"):
+            selection.add(f"tests/test_{Path(src).stem}.py")
+
+    existing = sorted(p for p in selection if (worktree / p).is_file())
+    note = (
+        f"{len(existing)} test file(s): {', '.join(existing)}" if existing
+        else "change gates on no test file (no changed/new test, no sibling test)"
+    )
+    return existing, note
+
+
 def pytest_gate(
     *,
     python: str = sys.executable,
     test_paths: tuple[str, ...] = ("tests",),
     changed_tests_only: bool = True,
+    empty_selection_passes: bool = True,
     run_ruff: bool = True,
     ruff_paths: tuple[str, ...] = ("src", "tests"),
     timeout_s: int = 1800,
@@ -115,9 +161,12 @@ def pytest_gate(
     ``PYTHONDONTWRITEBYTECODE=1`` (ad-hoc bytecode breaks release materialize),
     then ``ruff check`` if requested. Fails closed on any non-zero exit.
 
-    ``changed_tests_only`` limits pytest to ``tests/`` files that differ from
-    ``base_ref`` — the fast common case; falls back to ``test_paths`` when the
-    change touches no test file (which is itself usually a finding).
+    ``changed_tests_only`` scopes pytest to the changed / new / sibling test
+    files (see ``_changed_test_selection``) — never the whole ``tests`` tree,
+    which carries unrelated red tests on this repo. When that selection is
+    empty, ``empty_selection_passes`` decides: pass with a note (default), or
+    fail so the loop pushes the session to add a test. ``changed_tests_only``
+    False runs ``test_paths`` verbatim (dev / explicit use only).
     """
 
     def run_tests(task_id: str, worktree: Path) -> dict[str, Any]:
@@ -128,18 +177,12 @@ def pytest_gate(
             "PYTHONPATH": str(worktree / "src"),
         }
         selection: tuple[str, ...] = test_paths
+        note = f"pytest {' '.join(test_paths)}"
         if changed_tests_only:
-            try:
-                diff = _git(worktree, "diff", "--name-only", base_ref, "--")
-            except RunnerError:
-                diff = ""
-            changed = tuple(
-                line for line in diff.splitlines()
-                if line.startswith("tests/") and Path(line).name.startswith("test_")
-                and (worktree / line).exists()
-            )
-            if changed:
-                selection = changed
+            picked, note = _changed_test_selection(worktree, base_ref)
+            if not picked:
+                return {"passed": bool(empty_selection_passes), "detail": note}
+            selection = tuple(picked)
 
         pytest_cmd = [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", *selection]
         result = subprocess.run(
@@ -148,21 +191,27 @@ def pytest_gate(
         )
         tail = (result.stdout + result.stderr).strip()[-1200:]
         if result.returncode:
-            return {"passed": False, "detail": f"pytest exit {result.returncode}\n{tail}"}
+            return {"passed": False, "detail": f"{note}\npytest exit {result.returncode}\n{tail}"}
 
         if run_ruff:
-            ruff = subprocess.run(
-                [python, "-m", "ruff", "check", "--no-cache", *ruff_paths],
-                cwd=worktree, env=env, check=False, text=True, capture_output=True,
-                timeout=300,
+            lint_targets = sorted(
+                p for p in _changed_paths(worktree, base_ref)
+                if p.endswith(".py") and p.split("/", 1)[0] in ruff_paths
+                and (worktree / p).is_file()
             )
-            if ruff.returncode:
-                return {
-                    "passed": False,
-                    "detail": f"ruff exit {ruff.returncode}\n{(ruff.stdout + ruff.stderr).strip()[-800:]}",
-                }
+            if lint_targets:
+                ruff = subprocess.run(
+                    [python, "-m", "ruff", "check", "--no-cache", *lint_targets],
+                    cwd=worktree, env=env, check=False, text=True, capture_output=True,
+                    timeout=300,
+                )
+                if ruff.returncode:
+                    return {
+                        "passed": False,
+                        "detail": f"ruff exit {ruff.returncode}\n{(ruff.stdout + ruff.stderr).strip()[-800:]}",
+                    }
 
-        return {"passed": True, "detail": tail[-400:]}
+        return {"passed": True, "detail": f"{note} — {tail[-360:]}"}
 
     return run_tests
 

@@ -95,6 +95,55 @@ def test_pytest_gate_fails_on_red_test(repo, tmp_path):
     assert "nope" in result["detail"] or "exit" in result["detail"]
 
 
+def test_pytest_gate_picks_up_an_uncommitted_new_test(repo, tmp_path):
+    # the session writes a brand-new test file and does NOT commit; `git diff`
+    # never lists it, but the gate must still run it.
+    prepare = git_worktree_prepare(repo, tmp_path / "wts")
+    wt = prepare("todo-untracked", _git(repo, "rev-parse", "main"))
+    (wt / "tests" / "test_fresh.py").write_text("def test_bad():\n    assert False, 'fresh-nope'\n")
+
+    result = pytest_gate(python=sys.executable, run_ruff=False)("todo-untracked", wt)
+    assert result["passed"] is False
+    assert "fresh-nope" in result["detail"] or "exit" in result["detail"]
+
+
+def test_pytest_gate_scopes_to_the_changed_sources_sibling_test(repo, tmp_path):
+    prepare = git_worktree_prepare(repo, tmp_path / "wts")
+    wt = prepare("todo-sibling", _git(repo, "rev-parse", "main"))
+    # change src/m.py; its sibling tests/test_m.py exists and stays green
+    (wt / "src" / "m.py").write_text("def f():\n    return 1  # touched\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "touch m")
+
+    result = pytest_gate(python=sys.executable, run_ruff=False)("todo-sibling", wt)
+    assert result["passed"] is True
+    assert "test_m.py" in result["detail"]
+
+
+def test_pytest_gate_ruff_lints_only_the_changed_source(repo, tmp_path):
+    prepare = git_worktree_prepare(repo, tmp_path / "wts")
+    wt = prepare("todo-ruff", _git(repo, "rev-parse", "main"))
+    (wt / "src" / "m.py").write_text("import os\n\n\ndef f():\n    return 1\n")  # F401
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "unused import")
+
+    result = pytest_gate(python=sys.executable, run_ruff=True)("todo-ruff", wt)
+    assert result["passed"] is False
+    assert "ruff" in result["detail"]
+
+
+def test_pytest_gate_empty_selection_passes_by_default_and_can_fail(repo, tmp_path):
+    prepare = git_worktree_prepare(repo, tmp_path / "wts")
+    wt = prepare("todo-empty", _git(repo, "rev-parse", "main"))
+    (wt / "README.md").write_text("docs only\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "docs")
+
+    assert pytest_gate(python=sys.executable, run_ruff=False)("todo-empty", wt)["passed"] is True
+    strict = pytest_gate(python=sys.executable, run_ruff=False, empty_selection_passes=False)
+    assert strict("todo-empty", wt)["passed"] is False
+
+
 # --------------------------------------------------------------------------- #
 # external_session — implement / review via a configured runner
 # --------------------------------------------------------------------------- #
