@@ -89,8 +89,11 @@ class SessionUnavailable(RuntimeError):
 # executor selection — an ordered chain, not one choice
 # --------------------------------------------------------------------------- #
 
-_EXECUTORS = ("claude", "codex")
+_EXECUTORS = ("claude", "codex", "stub")
 _DEFAULT_CHAIN = ("claude", "codex")
+# 'stub' is the offline bootstrap executor (LEAF-11-9 W0). It is never in the
+# default chain or a model_selector result — it runs only when a caller asks for
+# it by name (executor_preference / TGW_HARNESS_EXECUTOR).
 
 
 def _executor_chain(job: dict[str, Any] | None = None) -> list[str]:
@@ -389,6 +392,29 @@ def _run_codex(prompt: str, worktree: Path, schema: dict[str, Any], *, invoke: I
             return _last_json_object(completed.stdout)
 
 
+_STUB_CANARY = ".tgw-canary"
+
+
+def _run_stub(worktree: Path, schema: dict[str, Any]) -> dict[str, Any]:
+    """The offline bootstrap executor — LEAF-11-9 W0.
+
+    No binary, no network, no credential. It makes one deterministic change so
+    the orchestrator can prove the whole
+    worktree -> pytest_gate -> harness_git squash+FF -> main_ref_guard -> ledger
+    path with no LLM (harness onboarding must not require a working model).
+    Selected only when the chain explicitly names 'stub'.
+    """
+    if "verdict" in schema.get("properties", {}):
+        return {"verdict": "pass", "findings": []}
+    canary = Path(worktree) / _STUB_CANARY
+    canary.write_text(f"harness offline canary — {Path(worktree).name}\n", encoding="utf-8")
+    return {
+        "status": "implemented",
+        "summary": f"offline stub canary wrote {_STUB_CANARY}",
+        "tests": [],
+    }
+
+
 def _timeout_s() -> int:
     try:
         return int(os.environ.get("TGW_HARNESS_SESSION_TIMEOUT", "1800"))
@@ -422,11 +448,12 @@ def _dispatch_chain(
     skipped: list[str] = []
     for executor in _executor_chain(job):
         try:
-            report = (
-                _run_claude(prompt, worktree, invoke=invoke)
-                if executor == "claude"
-                else _run_codex(prompt, worktree, schema, invoke=invoke)
-            )
+            if executor == "stub":
+                report = _run_stub(worktree, schema)
+            elif executor == "claude":
+                report = _run_claude(prompt, worktree, invoke=invoke)
+            else:
+                report = _run_codex(prompt, worktree, schema, invoke=invoke)
         except SessionUnavailable as exc:
             skipped.append(f"{executor}: {exc}")
             continue

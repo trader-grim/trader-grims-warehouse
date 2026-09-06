@@ -251,3 +251,33 @@ def test_build_runners_stack_lands_end_to_end(env, tmp_path):
     assert _git(env["repo"], "show", "main:src/feature.py").strip() == "VALUE = 1"
     assert _git(env["repo"], "branch", "--list", "coding/*") == ""
     assert [e["kind"] for e in harness_ledger.history(env["task_id"])][-1] == "next_action"
+
+
+def test_stub_executor_lands_offline_end_to_end(env, tmp_path):
+    """LEAF-11-9 W0: the offline bootstrap canary. build_runners wires the REAL
+    harness_session (no fake script), executor 'stub' — no binary, no network,
+    no credential — and the orchestrator lands one commit through the real
+    harness_git + ledger path."""
+    from tgw.development import harness_runners
+    from tgw.development.harness_runners import build_runners
+
+    runners = build_runners(
+        env["repo"], tmp_path / "wts", task_body="prove the pipe",
+        python=sys.executable, coder_user=None,
+        executor_preference=("stub",),
+    )
+    runners = runners.__class__(
+        prepare_worktree=runners.prepare_worktree,
+        implement=runners.implement,
+        run_tests=harness_runners.pytest_gate(python=sys.executable, run_ruff=False),
+        review=runners.review,
+    )
+
+    result = harness_orchestrator.run_task(
+        env["task_id"], repository=env["repo"], runners=runners,
+        commit_message=f"{env['task_id']}: offline canary", lease_seconds=120,
+    )
+    assert result["outcome"] == "landed"
+    assert result["rounds"] == 1
+    assert _git(env["repo"], "show", "main:.tgw-canary").startswith("harness offline canary")
+    assert _git(env["repo"], "branch", "--list", "coding/*") == ""

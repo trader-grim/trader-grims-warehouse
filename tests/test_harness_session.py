@@ -232,3 +232,28 @@ def test_executor_chain_default_is_the_full_list(monkeypatch):
     monkeypatch.delenv("TGW_HARNESS_EXECUTOR", raising=False)
     monkeypatch.setattr("tgw.model_selector.select_executor", lambda role: (_ for _ in ()).throw(Exception()))
     assert harness_session._executor_chain() == ["claude", "codex"]
+
+
+def test_stub_executor_is_offline_only_by_explicit_request(monkeypatch):
+    # never in the default chain / a selector result; only when asked for
+    monkeypatch.delenv("TGW_HARNESS_EXECUTOR", raising=False)
+    monkeypatch.setattr("tgw.model_selector.select_executor",
+                        lambda role: (_ for _ in ()).throw(Exception()))
+    assert "stub" not in harness_session._executor_chain()
+    assert harness_session._executor_chain({"executor_preference": ["stub"]}) == ["stub"]
+    monkeypatch.setenv("TGW_HARNESS_EXECUTOR", "stub")
+    assert harness_session._executor_chain() == ["stub"]
+
+
+def test_stub_executor_lands_offline(tmp_path, monkeypatch):
+    # no binary, no network, no credential — a real dispatch through the chain
+    monkeypatch.setattr(harness_session, "_session_credential", lambda e: None)
+    job = {"task_id": "canary-x", "body": "prove the pipe",
+           "worktree": str(tmp_path), "executor_preference": ["stub"]}
+
+    impl = harness_session.run_implement_session(job)
+    assert impl["outcome"] == "satisfied"
+    assert (tmp_path / ".tgw-canary").read_text().startswith("harness offline canary")
+
+    rev = harness_session.run_review_session(job)
+    assert rev == {"verdict": "PASS", "findings": []}
