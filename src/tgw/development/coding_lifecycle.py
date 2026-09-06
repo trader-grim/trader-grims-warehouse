@@ -940,6 +940,51 @@ def _retry_publication(
     )
 
 
+_WORKTREE_RECEIPT_FILES = (
+    "implementation-receipt.json",
+    "controller-harness-receipt.json",
+    "review-receipt.json",
+)
+
+
+def _archive_worktree_receipts(record: Mapping[str, Any], *, generation: int) -> None:
+    """Move a superseded generation's worktree receipts out of the way.
+
+    Remediation and auto-rebind reset the in-memory ``stages``/``effects``/
+    ``job_ids`` for the new generation but the treatment receipt files live in
+    the worktree root, untracked by git, so a ``git`` worktree reset does not
+    remove them.  A SATISFIED implementation-receipt.json left by the prior
+    generation then makes the next codex-implement job's receipt write hard-fail
+    (``prior coding implementation receipt does not bind the archived
+    generation``, workers/coding.py::_archive_prior_implementation_receipt),
+    which dead-letters the job and burns the auto-rebind budget for a candidate
+    that a later stage merely asked to be remediated.  Archive them under
+    ``.tgw-coding-history`` so the new generation starts from a clean slate.
+    """
+
+    binding = record.get("binding")
+    worktree = binding.get("worktree") if isinstance(binding, Mapping) else None
+    if not isinstance(worktree, str) or not worktree:
+        return
+    root = Path(worktree)
+    archive_dir = root / ".tgw-coding-history" / "superseded" / f"generation-{generation}"
+    for name in _WORKTREE_RECEIPT_FILES:
+        source = root / name
+        try:
+            if not source.is_file() or source.is_symlink():
+                continue
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            target = archive_dir / name
+            if target.exists():
+                target = archive_dir / f"{generation}-{int(time.time()*1000)}-{name}"
+            os.replace(source, target)
+        except OSError:
+            # Best effort: a missing/racing receipt is not a lifecycle failure.
+            # If it genuinely cannot be moved the next job's own receipt-write
+            # reconciliation still applies, exactly as before this change.
+            continue
+
+
 def _begin_bounded_remediation(
     record: dict[str, Any], *, stage: str, result: Mapping[str, Any]
 ) -> bool:
@@ -972,6 +1017,7 @@ def _begin_bounded_remediation(
     }
     archived["history_hash"] = _hash(archived)
     history.append(archived)
+    _archive_worktree_receipts(record, generation=len(history))
     intent = {
         "schema": "tgw-local-coding-remediation-intent/v1",
         "root_id": record["root_id"],
@@ -1041,6 +1087,7 @@ def _begin_bounded_auto_rebind(
     }
     archived["history_hash"] = _hash(archived)
     history.append(archived)
+    _archive_worktree_receipts(record, generation=len(history))
     record["auto_rebind_count"] = rebind_count + 1
     record["stages"] = {}
     record["effects"] = {}

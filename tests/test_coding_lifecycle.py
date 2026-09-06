@@ -1141,6 +1141,41 @@ def test_implementation_failure_auto_rebinds_bounded(tmp_path: Path) -> None:
     assert implementation_calls == 3
 
 
+def test_auto_rebind_archives_superseded_worktree_receipts(tmp_path: Path) -> None:
+    """A prior generation's SATISFIED implementation-receipt.json must not
+    survive into the next generation's worktree.
+
+    Regression (Todo 1986): the leftover PASS receipt makes the next
+    codex-implement job's receipt write hard-fail
+    (``prior coding implementation receipt does not bind the archived
+    generation``), dead-lettering a job that was only asked to remediate.
+    """
+    worktree = tmp_path / "wt"
+    store = store_at(tmp_path / "journal")
+    record = new(store, worktree=worktree)
+    stale = worktree / "implementation-receipt.json"
+    stale.write_text(
+        json.dumps({"status": "PASS", "outcome": "satisfied", "treatment_id": "codex-implement"}),
+        encoding="utf-8",
+    )
+    review_stale = worktree / "review-receipt.json"
+    review_stale.write_text(json.dumps({"status": "FAIL"}), encoding="utf-8")
+
+    def implementation(current):
+        return stage_result(
+            current, "implementation", "failed", reason="dead-lettered, no candidate"
+        )
+
+    advance(store, record["root_id"], {"implementation": implementation})
+
+    assert not stale.exists()
+    assert not review_stale.exists()
+    archived = worktree / ".tgw-coding-history" / "superseded"
+    moved = list(archived.rglob("implementation-receipt.json"))
+    assert moved and json.loads(moved[0].read_text())["status"] == "PASS"
+    assert list(archived.rglob("review-receipt.json"))
+
+
 def test_remediation_outcome_never_auto_rebinds(tmp_path: Path) -> None:
     store = store_at(tmp_path / "journal")
     record = new(store)
