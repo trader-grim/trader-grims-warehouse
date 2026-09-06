@@ -2321,6 +2321,45 @@ def test_auto_repair_decision_allows_repair_when_only_whitelisted_fail() -> None
     assert decision["repair_allowed"] is True
 
 
+def test_auto_repair_supervisor_ok_when_it_correctly_declines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-whitelisted FAIL must not turn the periodic supervisor unit red.
+
+    access.unix-group FAIL (Todo 1945) gates repair_allowed, so the supervisor
+    correctly applies nothing.  `ok` (did the supervisor operate correctly)
+    stays True; `converged` (is the system fully healthy) is False.  Without
+    this the timer-driven unit is permanently `failed` every 300s.
+    """
+    monkeypatch.setattr(
+        doctor_cli,
+        "diagnose",
+        lambda _paths=None: {
+            "ok": False,
+            "state": "FAILED",
+            "checks": [
+                {"id": "access.unix-group", "state": "FAIL", "detail": "dirs differ"},
+                {"id": "context.snapshot", "state": "PASS", "detail": "current"},
+                {"id": "host.boundary", "state": "PASS", "detail": "ok"},
+            ],
+        },
+    )
+    called: list[str] = []
+    monkeypatch.setattr(
+        doctor_cli,
+        "_apply_auto_repair_via_bootstrap",
+        lambda area, commit: called.append(area) or {"ok": True},
+    )
+
+    result = doctor_cli.auto_repair(desired_commit="a" * 40, apply=True)
+
+    assert called == []
+    assert result["decision"]["repair_allowed"] is False
+    assert result["ok"] is True          # supervisor operated correctly
+    assert result["converged"] is False  # system still needs operator action
+    assert result["results"] == []
+
+
 def test_auto_repair_decision_never_auto_runs_unix_git_access() -> None:
     """access.unix-group must be an operator notice, never an auto-repair.
 

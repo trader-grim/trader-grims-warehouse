@@ -13232,12 +13232,22 @@ def auto_repair(
                     encoding="utf-8",
                 )
                 target.chmod(0o444)
+    # `ok` reports whether the bounded SUPERVISOR operated correctly: it applied
+    # only whitelisted repairs and every repair it attempted succeeded (True when
+    # it correctly attempted none).  Whether the system is fully converged is a
+    # separate signal (`converged` / `decision.operator_notices`): a
+    # non-whitelisted FAIL that requires operator or fresh-session action must
+    # not turn the periodic supervisor unit permanently red, the same principle
+    # the single-target `repair` path already applies (an unrelated failing
+    # check is not a global repair gate).
+    supervisor_ok = all(item.get("ok") is True for item in results)
+    converged = not any(
+        item["state"] == "FAIL" for item in decision["operator_notices"]
+    )
     return {
         "schema": "tgw-local-doctor-auto-repair/v1",
-        "ok": not any(
-            item["state"] == "FAIL" for item in decision["operator_notices"]
-        )
-        and all(item.get("ok") is True for item in results),
+        "ok": supervisor_ok,
+        "converged": converged and supervisor_ok,
         "decision": decision,
         "applied": apply,
         "results": results,
