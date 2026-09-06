@@ -1,0 +1,13 @@
+{
+  "artifacts": [
+    {
+      "detail": "Remediated the blocking finding: TreatmentFailure is a subclass of HardFailure, so worker_base.py's _process() was catching it at 'except HardFailure' (which unconditionally calls state_machine.mark_dead_letter) before ever reaching the 'except Exception' branch that calls classify_dead_letter(). This meant round 1's message-text fix (appending the wrapped exception type/text to the TreatmentFailure message in ebay_stage.py, ebay_publish.py x2, ebay_upload.py x2) never actually changed live behavior, as confirmed empirically by the reviewer. Fixed by adding a new 'except TreatmentFailure as exc:' clause in worker_base.py, positioned before 'except HardFailure', that calls classify_dead_letter(repr(exc)) and either requeues with the tuned backoff (mirroring the generic Exception path's requeue logic) or falls through to the same dead_letter/notify/_on_terminal_failure behavior as before. Imported TreatmentFailure from tgw.errors. Left _TRANSIENT_ERRORS, finish_provider_effect(...) calls, reason_code values, the requests.exceptions.HTTPError branch, and plain HardFailure handling completely untouched -- only TreatmentFailure instances are now classified before being dead-lettered. Extended tests/test_provider_ambiguous_timeout_classification.py with two new tests that exercise the live _process() dispatch path directly (not just classify_dead_letter in isolation): one asserts a TreatmentFailure wrapping a ReadTimeout is requeued via state_machine.requeue_with_backoff(..., 120, ...) with mark_dead_letter never called, the other asserts a true-ambiguity TreatmentFailure (e.g. wrapping a KeyError) still calls mark_dead_letter with requeue never called. All 18 tests in the target file plus the related worker_base/ebay_stage/ebay_publish/ebay_upload suites (92 passed, 1 skipped) pass under PYTHONPATH=src (the venv's installed tgw package shadows the worktree source, so PYTHONPATH=src is required to exercise the actual changes).",
+      "kind": "claude_summary"
+    }
+  ],
+  "outcome": "satisfied",
+  "tests_reported": [
+    "PYTHONPATH=src /opt/TGW/.venvs/controller/bin/python -m pytest tests/test_provider_ambiguous_timeout_classification.py tests/test_worker_base_retry.py tests/test_worker_base_terminal_failure.py -q  => 18 passed",
+    "PYTHONPATH=src /opt/TGW/.venvs/controller/bin/python -m pytest tests/ -k \"worker_base or ebay_stage or ebay_publish or ebay_upload or provider_ambiguous\" -q  => 92 passed, 1 skipped"
+  ]
+}

@@ -268,7 +268,8 @@ class EbayStageWorker(QueueWorker):
                 error_detail=f'{type(exc).__name__}: {exc}',
             )
             raise TreatmentFailure(
-                f'{sku}: provider staging outcome ambiguous',
+                f'{sku}: provider staging outcome ambiguous '
+                f'({type(exc).__name__}: {exc})',
                 self._receipt(payload, sku, outcome='ambiguous',
                               effect_id=finished.effect_id,
                               reason_code='PROVIDER_EFFECT_AMBIGUOUS'),
