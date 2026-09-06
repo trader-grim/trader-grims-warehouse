@@ -2321,6 +2321,28 @@ def test_auto_repair_decision_allows_repair_when_only_whitelisted_fail() -> None
     assert decision["repair_allowed"] is True
 
 
+def test_auto_repair_decision_never_auto_runs_unix_git_access() -> None:
+    """access.unix-group must be an operator notice, never an auto-repair.
+
+    Its repair quiesces every coding unit and, on a failed restore, wedges the
+    pipeline (runbook §8b / Todo 1944); `--repair workers` then re-arms the
+    auto-repair timer, self-perpetuating the wedge.  A FAIL here must gate
+    auto-repair (repair_allowed False), not trigger `--repair unix-git-access`.
+    """
+    checks = [
+        doctor_cli._check("access.unix-group", "FAIL", "shared git dirs differ"),
+        doctor_cli._check("context.snapshot", "FAIL", "stale context"),
+    ]
+    decision = doctor_cli.auto_repair_decision(checks)
+    assert "unix-git-access" not in decision["repairable"]
+    assert decision["repairable"] == {"context": ["context.snapshot"]}
+    assert decision["repair_allowed"] is False
+    assert any(
+        item["id"] == "access.unix-group" and item["state"] == "FAIL"
+        for item in decision["operator_notices"]
+    )
+
+
 def test_context_process_entrypoint_rejects_legacy_module_mode(tmp_path: Path) -> None:
     paths, _head, _tree = _fixture(tmp_path)
     selected = (

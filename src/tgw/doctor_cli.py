@@ -12974,12 +12974,21 @@ _REPAIR_POSTCONDITIONS: dict[str, tuple[str, ...]] = {
 # context.snapshot review-evidence probes, git.worktrees, peer-auth) are never
 # auto-repaired: they require operator or fresh-session action and are surfaced
 # as notices only.
+#
+# access.unix-group -> unix-git-access is deliberately NOT auto-repairable.  Its
+# repair (`--repair unix-git-access`) quiesces every coding unit via a transient
+# /run drop-in + marker and SIGTERMs the workers; if its restore step fails the
+# drop-ins persist and every later repair chokes (runbook
+# actor-mcp-onboarding.md §8b, Todo 1944).  Worse, `--repair workers` re-arms
+# the auto-repair timer as a "required coding unit", so an auto-repair of this
+# check self-perpetuates the wedge.  It must be operator-initiated.  Re-add it
+# here only once Todo 1944 (the quiescence restore is reliable) AND Todo 1945
+# (access.unix-group no longer false-FAILs on an unreadable observer path) land.
 _AUTO_REPAIRABLE_CHECKS: dict[str, str] = {
     "context.snapshot": "context",
     "context.launcher": "context-launcher",
     "runtime.local-coding": "runtime",
     "database.local-coding": "database",
-    "access.unix-group": "unix-git-access",
     "services.local-coding": "workers",
     "services.plan-render": "plan-render-worker",
     "cleanup.obsolete-active-surfaces": "obsolete-surfaces",
