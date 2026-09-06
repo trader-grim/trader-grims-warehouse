@@ -396,12 +396,28 @@ def _timeout_s() -> int:
         return 1800
 
 
+def _apply_executor_bins(job: dict[str, Any]) -> None:
+    """Honour explicit executor binary paths carried on the job.
+
+    The confined coder identity runs under ``sudo`` with a minimal
+    ``secure_path`` and cannot discover ``claude`` when it lives under an
+    operator home; the orchestrator resolves the path and passes it here."""
+    bins = job.get("executor_bin")
+    if not isinstance(bins, dict):
+        return
+    if bins.get("claude"):
+        os.environ["TGW_CLAUDE_BIN"] = str(bins["claude"])
+    if bins.get("codex"):
+        os.environ["TGW_CODEX_BIN"] = str(bins["codex"])
+
+
 def _dispatch_chain(
     job: dict[str, Any], prompt: str, schema: dict[str, Any], *, invoke: Invoke,
 ) -> tuple[str, dict[str, Any] | None, list[str]]:
     """Try each executor in the chain. Return (executor, report, skipped) for
     the first that runs and produces something; on total exhaustion return
     ("", None, skipped) with the per-executor reasons."""
+    _apply_executor_bins(job)
     worktree = Path(job["worktree"])
     skipped: list[str] = []
     for executor in _executor_chain(job):

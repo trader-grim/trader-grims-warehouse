@@ -7,6 +7,7 @@ returning canned model output.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 import pytest
@@ -206,6 +207,25 @@ def test_claude_session_gets_only_its_own_credential(tmp_path, monkeypatch):
     for k in ("DEEPSEEK_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
         assert k not in env
     assert "PATH" in env  # non-secret env survives
+
+
+def test_executor_bin_from_job_sets_the_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("TGW_CLAUDE_BIN", raising=False)
+    monkeypatch.delenv("TGW_CODEX_BIN", raising=False)
+    monkeypatch.setattr(harness_session, "_session_credential",
+                        lambda e: ("CLAUDE_CODE_OAUTH_TOKEN", "t"))
+
+    def fake_invoke(cmd, **kw):
+        return subprocess.CompletedProcess(
+            cmd, 0, _claude_out({"status": "implemented", "summary": "ok"}), "")
+
+    harness_session.run_implement_session(
+        {"task_id": "t", "body": "b", "worktree": str(tmp_path),
+         "executor_bin": {"claude": "/opt/x/claude", "codex": "/opt/x/codex"}},
+        invoke=fake_invoke,
+    )
+    assert os.environ["TGW_CLAUDE_BIN"] == "/opt/x/claude"
+    assert os.environ["TGW_CODEX_BIN"] == "/opt/x/codex"
 
 
 def test_executor_chain_default_is_the_full_list(monkeypatch):
