@@ -58,14 +58,17 @@ OVERRIDE_EVENT_SCHEMA = "tgw-main-ref-guard-override-event/v1"
 #: The refs an ordinary agent must never advance by raw Git.
 PROTECTED_REFS: tuple[str, ...] = ("refs/heads/main",)
 
-#: Unix account names that are the sanctioned source publisher.  ``db`` runs the
-#: coding-lifecycle foreman that fast-forwards ``main``.  ``root`` is deliberately
-#: *not* in this list: a root-performed raw advance is still allowed (for
-#: receipt-driven recovery/bootstrap -- ``tgw-coding-bootstrap`` is root-owned),
-#: but never as a silent publisher advance.  It goes through the ``implicit_root``
-#: branch of :func:`evaluate`, which always writes a durable override record with
+#: Unix account names that are the sanctioned source publisher.  ``tgw-harness``
+#: is the continual-harness orchestrator identity — the one process that
+#: squashes an accepted task and fast-forwards ``main`` (leaf 11.1 identity
+#: split; superseded ``db``, which was the operator's personal account wrongly
+#: baked in by the Mordoc apparatus).  ``root`` is deliberately *not* in this
+#: list: a root-performed raw advance is still allowed (for receipt-driven
+#: recovery/bootstrap -- ``tgw-coding-bootstrap`` is root-owned), but never as a
+#: silent publisher advance.  It goes through the ``implicit_root`` branch of
+#: :func:`evaluate`, which always writes a durable override record with
 #: ``"implicit_root": true``.  See :func:`_is_publisher`.
-DEFAULT_PUBLISHER_IDENTITIES: tuple[str, ...] = ("db",)
+DEFAULT_PUBLISHER_IDENTITIES: tuple[str, ...] = ("tgw-harness",)
 
 #: Explicit, umask-independent permissions for the guard's durable audit trail.
 #: The canonical ``.git`` tree is setgid to group ``tgw-coders`` (the population
