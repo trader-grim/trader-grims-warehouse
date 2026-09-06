@@ -1,3 +1,4 @@
+# Host recovery spine (Todo 1926); see reference/runbooks/actor-mcp-onboarding.md
 """tgw-root-effect — the host recovery spine (declared privileged operations).
 
 Self-contained by design: imports only the Python standard library and never
