@@ -1,0 +1,5 @@
+tgw-harness ALL=(tgw-coder) NOPASSWD: /opt/TGW/.venvs/controller/bin/python3 -m tgw.development.harness_session *
+# phase-0, until the interactive session runs as tgw-harness:
+claude       ALL=(tgw-harness) NOPASSWD: /usr/bin/git -C /opt/TGW/tgw-lib/src/trader-grims-warehouse update-ref refs/heads/main *
+claude       ALL=(tgw-harness) NOPASSWD: /opt/TGW/.venvs/controller/bin/python3 -m tgw.development.harness_cli *
+claude       ALL=(tgw-harness) NOPASSWD: /usr/bin/git -C /opt/TGW/tgw-lib/src/trader-grims-warehouse *

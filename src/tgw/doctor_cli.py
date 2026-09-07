@@ -4084,6 +4084,100 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
         )
 
 
+_HARNESS_SUDOERS_INSTALLED = Path("/etc/sudoers.d/tgw-harness")
+_HARNESS_SUDOERS_RELATIVE = Path("config/environment/sudoers.d/tgw-harness")
+
+
+def check_harness_sudoers(paths: DoctorPaths) -> dict[str, Any]:
+    """Compare the installed harness sudoers fragment to the checked-in canonical.
+
+    That fragment grants the only privilege boundary the harness identity model
+    has (`claude` -> `tgw-harness` -> `tgw-coder`), so it stays operator-applied
+    via `visudo`.  This check never writes sudoers: it makes drift or absence a
+    named FAIL and hands the operator the exact expected bytes to install.  When
+    the installed file is mode 0440 and the check is not running as root it can
+    still detect absence but not compare content, so it reports UNKNOWN and
+    points at the privileged path that does the full comparison.
+    """
+    identity = "access.harness-sudoers"
+    try:
+        canonical_path = paths.repository / _HARNESS_SUDOERS_RELATIVE
+        try:
+            expected = canonical_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise DoctorError(
+                f"canonical harness sudoers fragment is unavailable at {canonical_path}"
+            ) from exc
+        operator_action = (
+            f"operator: review {canonical_path}, then run "
+            f"`visudo -cf {canonical_path}` and install it verbatim as "
+            f"{_HARNESS_SUDOERS_INSTALLED} (mode 0440 root:root)"
+        )
+        try:
+            installed: str | None = _HARNESS_SUDOERS_INSTALLED.read_text(
+                encoding="utf-8"
+            )
+            present = True
+        except FileNotFoundError:
+            installed = None
+            present = False
+        except PermissionError as exc:
+            if os.geteuid() != 0:
+                return _check(
+                    identity,
+                    "UNKNOWN",
+                    (
+                        f"installed {_HARNESS_SUDOERS_INSTALLED} is not readable "
+                        "without root; content drift is verified by "
+                        "`tgw-coding-bootstrap --repair harness` or "
+                        "`sudo tgw doctor check`"
+                    ),
+                    evidence={
+                        "installed_path": str(_HARNESS_SUDOERS_INSTALLED),
+                        "canonical_path": str(canonical_path),
+                        "installed_present": True,
+                        "expected": expected,
+                    },
+                )
+            raise DoctorError(
+                f"installed {_HARNESS_SUDOERS_INSTALLED} is unreadable"
+            ) from exc
+        drift = present and installed != expected
+        exact = present and not drift
+        if not present:
+            detail = (
+                f"harness sudoers fragment is absent at {_HARNESS_SUDOERS_INSTALLED}"
+            )
+        elif drift:
+            detail = (
+                f"installed {_HARNESS_SUDOERS_INSTALLED} differs from canonical "
+                f"{_HARNESS_SUDOERS_RELATIVE}"
+            )
+        else:
+            detail = (
+                f"installed harness sudoers fragment matches canonical "
+                f"{_HARNESS_SUDOERS_RELATIVE}"
+            )
+        evidence: dict[str, Any] = {
+            "installed_path": str(_HARNESS_SUDOERS_INSTALLED),
+            "canonical_path": str(canonical_path),
+            "installed_present": present,
+            "drift": drift,
+            "expected": expected,
+        }
+        if not exact:
+            evidence["installed"] = installed
+        return _check(
+            identity,
+            "PASS" if exact else "FAIL",
+            detail,
+            evidence=evidence,
+            repair=None if exact else operator_action,
+        )
+    except Exception as exc:
+        return _failed(identity, exc)
+
+
 _TODO_BINDINGS_SQL = """
 SELECT COALESCE(
     json_agg(json_build_object('id', id, 'agent', agent, 'status_note', status_note)),
@@ -6545,6 +6639,7 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         check_context_launcher(paths),
         check_context_processes(paths),
         check_unix_access(paths),
+        check_harness_sudoers(paths),
         check_worktrees(paths),
         check_database(paths),
         check_database_peer_auth(paths),

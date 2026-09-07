@@ -10548,3 +10548,125 @@ def test_coding_support_roots_reject_incomplete_or_aliased_configuration(tmp_pat
     assert not all(row["exact"] for row in doctor_cli._coding_support_roots(paths, group_gid).values())
     with pytest.raises(doctor_cli.DoctorError, match="distinct non-empty absolute"):
         doctor_cli._provision_coding_support_roots(paths, group_gid, [])
+
+
+# ---------------------------------------------------------------------------
+# access.harness-sudoers  (LEAF-11-9 W4)
+# ---------------------------------------------------------------------------
+
+
+def _harness_sudoers_paths(tmp_path: Path, canonical: str | None) -> doctor_cli.DoctorPaths:
+    repository = tmp_path / "repo"
+    fragment = repository / doctor_cli._HARNESS_SUDOERS_RELATIVE
+    fragment.parent.mkdir(parents=True, exist_ok=True)
+    if canonical is not None:
+        fragment.write_text(canonical, encoding="utf-8")
+    return doctor_cli.DoctorPaths(repository=repository)
+
+
+_HARNESS_SUDOERS_SAMPLE = (
+    "tgw-harness ALL=(tgw-coder) NOPASSWD: /opt/TGW/.venvs/controller/bin/python3 "
+    "-m tgw.development.harness_session *\n"
+)
+
+
+def test_harness_sudoers_passes_when_installed_matches_canonical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _harness_sudoers_paths(tmp_path, _HARNESS_SUDOERS_SAMPLE)
+    installed = tmp_path / "etc-tgw-harness"
+    installed.write_text(_HARNESS_SUDOERS_SAMPLE, encoding="utf-8")
+    monkeypatch.setattr(doctor_cli, "_HARNESS_SUDOERS_INSTALLED", installed)
+
+    result = doctor_cli.check_harness_sudoers(paths)
+
+    assert result["state"] == "PASS"
+    assert result["repairable"] is False
+    assert result["evidence"]["drift"] is False
+
+
+def test_harness_sudoers_fails_on_content_drift_with_expected_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _harness_sudoers_paths(tmp_path, _HARNESS_SUDOERS_SAMPLE)
+    installed = tmp_path / "etc-tgw-harness"
+    installed.write_text(_HARNESS_SUDOERS_SAMPLE + "claude ALL=(ALL) NOPASSWD: ALL\n", encoding="utf-8")
+    monkeypatch.setattr(doctor_cli, "_HARNESS_SUDOERS_INSTALLED", installed)
+
+    result = doctor_cli.check_harness_sudoers(paths)
+
+    assert result["state"] == "FAIL"
+    assert result["evidence"]["drift"] is True
+    assert result["evidence"]["expected"] == _HARNESS_SUDOERS_SAMPLE
+    assert "visudo" in result["operator_action"]
+
+
+def test_harness_sudoers_fails_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _harness_sudoers_paths(tmp_path, _HARNESS_SUDOERS_SAMPLE)
+    installed = tmp_path / "etc-tgw-harness"
+    monkeypatch.setattr(doctor_cli, "_HARNESS_SUDOERS_INSTALLED", installed)
+
+    result = doctor_cli.check_harness_sudoers(paths)
+
+    assert result["state"] == "FAIL"
+    assert result["evidence"]["installed_present"] is False
+    assert result["evidence"]["expected"] == _HARNESS_SUDOERS_SAMPLE
+
+
+def test_harness_sudoers_unknown_when_unreadable_without_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _harness_sudoers_paths(tmp_path, _HARNESS_SUDOERS_SAMPLE)
+    installed = tmp_path / "etc-tgw-harness"
+    installed.write_text(_HARNESS_SUDOERS_SAMPLE, encoding="utf-8")
+    monkeypatch.setattr(doctor_cli, "_HARNESS_SUDOERS_INSTALLED", installed)
+
+    original_read_text = Path.read_text
+
+    def deny(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == installed:
+            raise PermissionError(13, "Permission denied")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 1000)
+
+    result = doctor_cli.check_harness_sudoers(paths)
+
+    assert result["state"] == "UNKNOWN"
+    assert result["evidence"]["installed_present"] is True
+
+
+def test_harness_sudoers_fails_when_canonical_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _harness_sudoers_paths(tmp_path, None)
+    installed = tmp_path / "etc-tgw-harness"
+    installed.write_text(_HARNESS_SUDOERS_SAMPLE, encoding="utf-8")
+    monkeypatch.setattr(doctor_cli, "_HARNESS_SUDOERS_INSTALLED", installed)
+
+    result = doctor_cli.check_harness_sudoers(paths)
+
+    assert result["state"] == "FAIL"
+    assert "canonical harness sudoers fragment is unavailable" in result["detail"]
+
+
+def test_diagnose_includes_harness_sudoers_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = doctor_cli._check("access.harness-sudoers", "PASS", "matches")
+    monkeypatch.setattr(doctor_cli, "check_harness_sudoers", lambda _paths: sentinel)
+    for name in (
+        "check_host", "check_source", "check_context_snapshot", "check_context_launcher",
+        "check_context_processes", "check_unix_access", "check_worktrees", "check_database",
+        "check_database_peer_auth", "check_units", "check_plan_render_worker", "check_runtime",
+        "check_obsolete_surfaces", "check_main_ref_guard",
+    ):
+        monkeypatch.setattr(
+            doctor_cli, name,
+            (lambda _n: (lambda _paths: doctor_cli._check(_n, "PASS", "stub")))(name),
+        )
+
+    report = doctor_cli.diagnose(doctor_cli.DoctorPaths())
+
+    assert any(c["id"] == "access.harness-sudoers" for c in report["checks"])
