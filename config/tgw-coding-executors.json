@@ -57,11 +57,11 @@
       "install_target_path": "/usr/local/bin/opencode",
       "runtime_deps": ["node"],
       "verify_cmd": ["opencode", "--version"],
-      "credential_env": ["OPENCODE_API_KEY", "OPENROUTER_API_KEY"],
+      "credential_env": ["OPENCODE_ZEN_API_KEY"],
       "auth_file": "~/.local/share/opencode/auth.json",
       "enabled": false,
       "discovery_paths": ["/home/opencode/.local/bin/opencode"],
-      "note": "opencode-zen key is a single gateway to ~every provider (see model-availability.json cost_policy). Binary present under /home/opencode but no harness_session runner wired yet — a chain preference of 'opencode' is a WARN skip until then."
+      "note": "opencode-zen key (OPENCODE_ZEN_API_KEY) is a single gateway to ~every provider (see model-availability.json cost_policy). No OpenRouter fallback: a missing key is a WARN (executor unavailable), never a silent spend on the OpenRouter key. Binary present under /home/opencode but no harness_session runner wired yet — a chain preference of 'opencode' is a WARN skip until then."
     },
     "agy": {
       "binary_name": "agy",
