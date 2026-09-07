@@ -66,15 +66,23 @@ def install(
             source_root, "status", "--porcelain=v1", "--untracked-files=all"
         )
         snapshot = current_context()
-        if (
-            snapshot.get("plan_commit") != approved
-            or snapshot.get("source_commit") != source_commit
-            or snapshot.get("source_tree") != source_tree
-        ):
+        # Plan authority still gates hard: the published snapshot must name the
+        # approved Plan commit.  Source drift does NOT gate — every binding below
+        # already uses the live source commit/tree, so a snapshot that is merely
+        # behind the working tree is reported (source_snapshot_synced /
+        # generation_status), never fatal.  Removing this gate is the fix for the
+        # recurring "restart this harness session after the Context cutover"
+        # wedge (concepts.yaml marks context_mcp transitional / read-only).
+        if snapshot.get("plan_commit") != approved:
             raise context_server.ContextError(
-                "atomic Context snapshot differs from Plan or canonical source; restart this harness session after the Context cutover"
+                "published Context snapshot names a different approved Plan commit; republish the Context snapshot"
             )
+        source_snapshot_synced = (
+            snapshot.get("source_commit") == source_commit
+            and snapshot.get("source_tree") == source_tree
+        )
         return {
+            "source_snapshot_synced": source_snapshot_synced,
             "plan_root": plan_root,
             "plan_repository": plan_repository,
             "plan_commit": approved,
@@ -152,14 +160,27 @@ def install(
                 "memory": False,
                 "tgw_prod": False,
             },
-            "generation_status": {
-                "state": "CURRENT",
-                "line": (
-                    "TGW Context: CURRENT local=tgw-lib "
-                    f"plan={binding['plan_commit'][:12]} "
-                    f"source={binding['source_commit'][:12]}"
-                ),
-            },
+            "generation_status": (
+                {
+                    "state": "CURRENT",
+                    "line": (
+                        "TGW Context: CURRENT local=tgw-lib "
+                        f"plan={binding['plan_commit'][:12]} "
+                        f"source={binding['source_commit'][:12]}"
+                    ),
+                }
+                if binding["source_snapshot_synced"]
+                else {
+                    "state": "SOURCE_AHEAD",
+                    "line": (
+                        "TGW Context: SOURCE_AHEAD local=tgw-lib "
+                        f"plan={binding['plan_commit'][:12]} "
+                        f"source={binding['source_commit'][:12]} "
+                        f"(snapshot at {snapshot['source_commit'][:12]}; "
+                        "reads use live source; republish to clear)"
+                    ),
+                }
+            ),
         }
         result["context_sha256"] = _sha(_canonical(result))
         return result
