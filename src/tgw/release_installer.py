@@ -1099,6 +1099,57 @@ def select_owner_directed(
         raise ReleaseError(f"owner-directed release selection refused: {exc}") from exc
 
 
+def select_owner_directed_unsigned(
+    root: Path,
+    generation: str,
+    *,
+    expected_current: str | None,
+    operation_id: str,
+    directive: Mapping[str, Any],
+) -> dict[str, Any]:
+    """CAS-select one exact candidate on the operator's bare directive.
+
+    No admission or environment-preflight signature is required or checked.
+    Per OPERATOR-PRINCIPLE-20260903-SIMPLICITY / DIRECT-OPERATOR-COMMAND-
+    PRECEDENCE the operator's direct command is sufficient authority -- the
+    same authority `cut-mordac` (8ce516f0f) already established for the
+    procedure runner, applied here to release selection.
+
+    Every non-signature protection is kept: the release must already be
+    materialized (archive digest + git-archive commit identity + content
+    manifest all verified by `materialize`), the selection is a compare-and-
+    swap against the exact current generation, the `current` symlink swap is
+    atomic, and the receipt is durable.  The receipt records authority_mode
+    OWNER_DIRECT_UNSIGNED plus the verbatim directive, so an auditor can
+    always see which generations were selected without signed admission.
+    """
+    reason = directive.get("reason")
+    authorized_by = directive.get("authorized_by")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
+        raise ReleaseError("owner-directed selection requires a non-empty directive reason")
+    if not isinstance(authorized_by, str) or not authorized_by.strip() or len(authorized_by) > 200:
+        raise ReleaseError("owner-directed selection requires a directive authorized_by")
+    issued_at = directive.get("issued_at")
+    if issued_at is None:
+        issued_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    recorded = {
+        "reason": reason.strip(),
+        "authorized_by": authorized_by.strip(),
+        "issued_at": str(issued_at),
+    }
+    return _select(
+        root,
+        generation,
+        expected_current=expected_current,
+        operation_id=operation_id,
+        evidence_identity={
+            "authority_mode": "OWNER_DIRECT_UNSIGNED",
+            "directive_sha256": _object_hash(recorded),
+            "directive": recorded,
+        },
+    )
+
+
 def rollback(
     root: Path,
     receipt_path: Path,
@@ -1184,6 +1235,15 @@ def main() -> int:
     install.add_argument("--environment-public-key", type=Path)
     install.add_argument("--current-plan-commit")
     install.add_argument("--current-solution-hash")
+    direct = commands.add_parser(
+        "install-direct",
+        help="materialize + select on the operator's bare directive, no admission signature",
+    )
+    direct.add_argument("--archive", type=Path, required=True)
+    for name in ("generation", "commit", "tree", "archive-sha256", "expected-current", "operation-id"):
+        direct.add_argument(f"--{name}", required=True)
+    direct.add_argument("--reason", required=True, help="why this generation is being selected")
+    direct.add_argument("--authorized-by", required=True, help="operator identity taking responsibility")
     check = commands.add_parser("verify")
     check.add_argument("generation")
     commands.add_parser("recover")
@@ -1290,6 +1350,24 @@ def main() -> int:
                 current_plan_commit=args.current_plan_commit,
                 current_solution_hash=args.current_solution_hash,
                 current_time=current_time,
+            )
+            result = {"manifest": manifest, "receipt": receipt}
+        elif args.command == "install-direct":
+            manifest = materialize(
+                args.root,
+                args.archive,
+                generation=args.generation,
+                commit=args.commit,
+                tree=args.tree,
+                archive_sha256=args.archive_sha256,
+            )
+            expected_current = None if args.expected_current == "none" else args.expected_current
+            receipt = select_owner_directed_unsigned(
+                args.root,
+                args.generation,
+                expected_current=expected_current,
+                operation_id=args.operation_id,
+                directive={"reason": args.reason, "authorized_by": args.authorized_by},
             )
             result = {"manifest": manifest, "receipt": receipt}
         elif args.command == "verify":

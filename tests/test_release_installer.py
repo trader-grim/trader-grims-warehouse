@@ -235,6 +235,108 @@ def test_direct_select_refuses_without_exact_admission_evidence(tmp_path: Path) 
     assert refusal["reasons"] == ["missing-admission-evidence"]
 
 
+def test_owner_directed_unsigned_selects_with_no_keys_and_records_the_directive(
+    tmp_path: Path,
+) -> None:
+    root = _selected_root(tmp_path)
+    _release(root, tmp_path, "release-b", COMMIT_B, b"B\n")
+
+    receipt = release_installer.select_owner_directed_unsigned(
+        root,
+        "release-b",
+        expected_current="release-a",
+        operation_id="direct-b",
+        directive={"reason": "ship Todo 1987 ebay_stage retry fix", "authorized_by": "dave"},
+    )
+    assert receipt["state"] == "completed"
+    assert receipt["selected_commit"] == COMMIT_B
+    assert current_generation(root) == "release-b"
+    identity = receipt["evidence_identity"]
+    assert identity["authority_mode"] == "OWNER_DIRECT_UNSIGNED"
+    assert identity["directive"]["reason"] == "ship Todo 1987 ebay_stage retry fix"
+    assert identity["directive"]["authorized_by"] == "dave"
+    assert identity["directive_sha256"].startswith("sha256:")
+
+    # replay is idempotent
+    assert release_installer.select_owner_directed_unsigned(
+        root,
+        "release-b",
+        expected_current="release-a",
+        operation_id="direct-b",
+        directive={"reason": "ship Todo 1987 ebay_stage retry fix", "authorized_by": "dave"},
+    ) == receipt
+
+
+def test_owner_directed_unsigned_is_still_compare_and_swap(tmp_path: Path) -> None:
+    root = _selected_root(tmp_path)
+    _release(root, tmp_path, "release-b", COMMIT_B, b"B\n")
+    with pytest.raises(ReleaseError, match="current generation changed"):
+        release_installer.select_owner_directed_unsigned(
+            root,
+            "release-b",
+            expected_current="wrong",
+            operation_id="direct-b",
+            directive={"reason": "x", "authorized_by": "dave"},
+        )
+    assert current_generation(root) == "release-a"
+    assert not (root / "operations" / "direct-b.json").exists()
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [{"authorized_by": "dave"}, {"reason": "  ", "authorized_by": "dave"}, {"reason": "x"}],
+)
+def test_owner_directed_unsigned_requires_reason_and_authorized_by(
+    tmp_path: Path, directive: dict[str, str]
+) -> None:
+    root = _selected_root(tmp_path)
+    _release(root, tmp_path, "release-b", COMMIT_B, b"B\n")
+    with pytest.raises(ReleaseError, match="directive"):
+        release_installer.select_owner_directed_unsigned(
+            root,
+            "release-b",
+            expected_current="release-a",
+            operation_id="direct-b",
+            directive=directive,
+        )
+    assert current_generation(root) == "release-a"
+
+
+def test_install_direct_cli_materializes_and_selects_without_keys(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _selected_root(tmp_path)
+    archive = tmp_path / "release-b.tar.gz"
+    digest = _archive(
+        archive,
+        {"src/tgw/example.py": b"B\n", "bin/run.sh": b"#!/bin/sh\n"},
+        commit=COMMIT_B,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog", "--root", str(root), "install-direct",
+            "--archive", str(archive),
+            "--generation", "release-b",
+            "--commit", COMMIT_B,
+            "--tree", TREE,
+            "--archive-sha256", digest,
+            "--expected-current", "release-a",
+            "--operation-id", "direct-b",
+            "--reason", "ship the ebay_stage retry fix",
+            "--authorized-by", "dave",
+        ],
+    )
+    assert release_installer.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["receipt"]["state"] == "completed"
+    assert out["receipt"]["evidence_identity"]["authority_mode"] == "OWNER_DIRECT_UNSIGNED"
+    assert current_generation(root) == "release-b"
+
+
 def test_public_installer_refuses_missing_or_mismatched_admission(tmp_path: Path) -> None:
     archive = tmp_path / "candidate.tar.gz"
     digest = _archive(archive, {"src/tgw/example.py": b"candidate\n"}, commit=COMMIT_A)
