@@ -66,7 +66,6 @@ from .items import (
     _archive_before_overwrite,
     atomic_write_json,
     create_item,
-    locationupdate,
     sync_location_tree,
 )
 from .operator_console_host import configured_authority_principal, configured_console_mount
@@ -247,31 +246,9 @@ _pending_offers_cache: Optional[int] = None
 _pending_offers_cache_at: float = 0.0
 _PENDING_OFFERS_TTL = 300
 
-
-class CodingProvisionStart(BaseModel):
-    todo_id: int = Field(gt=0)
-    object_generation: str | None = None
-    source_commit: str | None = None
-
-
-class CodingWorkerClaim(BaseModel):
-    host: str = Field(min_length=1)
-    envelope_hash: str = Field(min_length=1)
-    location: Dict[str, Any]
-    snapshot: Dict[str, Any]
-
-
-class CodingWorkerLease(BaseModel):
-    lease_token: str = Field(min_length=1)
-
-
-class CodingWorkerComplete(CodingWorkerLease):
-    result: Dict[str, Any]
-
-
-class CodingWorkerFail(CodingWorkerLease):
-    error: str = Field(min_length=1, max_length=2000)
-    result: Dict[str, Any] | None = None
+# Coding-provision request/worker models + routes moved to tgw.http_coding
+# (workflow separation — PP-ROLES-001). See the register_coding_routes() call
+# below the operator-console mount.
 
 
 def _get_listing_index() -> Dict[str, Path]:
@@ -557,137 +534,14 @@ mount_operator_console(
 )
 
 
-def _require_coding_worker(request: Request) -> str:
-    """Authenticate a coding worker with its dedicated referenced secret."""
-    coding = _cfg.get("coding")
-    if not isinstance(coding, dict):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="coding worker is not configured")
-    reference = coding.get("worker_credential_env")
-    supplied = request.headers.get("X-TGW-Worker-Authorization", "")
-    identity = request.headers.get("X-TGW-Worker-Identity", "")
-    expected = os.environ.get(reference) if isinstance(reference, str) and reference else None
-    if not expected or not supplied.startswith("Bearer ") or not identity:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid coding worker credential")
-    if not secrets.compare_digest(supplied.removeprefix("Bearer ").encode(), expected.encode()):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid coding worker credential")
-    if identity != coding.get("worker_identity"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid coding worker identity")
-    return identity
 
+# Coding-provision HTTP surface moved to tgw.http_coding (workflow separation,
+# PP-ROLES-001). Registered only when enabled (default True); production sets
+# coding.routes_enabled=false so tgw-prod serves the item workflow only.
+from .http_coding import coding_routes_enabled, register_coding_routes  # noqa: E402
 
-WORKER_AUTH = Depends(_require_coding_worker)
-
-
-@app.get("/api/coding/worker/requests/next")
-def coding_worker_next(worker_identity: str = WORKER_AUTH):
-    from .coding_provision import next_request
-
-    try:
-        return next_request(_cfg, worker_identity) or {}
-    except Exception as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@app.post("/api/coding/requests", dependencies=[AUTH])
-def coding_provision_start(body: CodingProvisionStart):
-    """Persist a request-safe coding job; the tgw-lib worker resolves and
-    validates its local worktree envelope after claim."""
-    from .coding_provision import create_request
-
-    try:
-        return create_request(
-            _cfg,
-            todo_id=body.todo_id,
-            object_generation=body.object_generation,
-            source_commit=body.source_commit,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/coding/requests/{request_id}", dependencies=[AUTH])
-def coding_provision_status(request_id: str):
-    from .coding_provision import get_request
-
-    try:
-        return get_request(_cfg, request_id)
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post("/api/coding/requests/{request_id}/stop", dependencies=[AUTH])
-def coding_provision_stop(request_id: str):
-    from .coding_provision import stop_request
-
-    try:
-        return stop_request(_cfg, request_id)
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/api/coding/access-status", dependencies=[AUTH])
-def coding_access_status(request_id: str | None = None):
-    from .coding_provision import access_status
-
-    try:
-        return access_status(_cfg, request_id)
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/api/coding/worker/requests/{request_id}")
-def coding_worker_request(request_id: str, worker_identity: str = WORKER_AUTH):
-    from .coding_provision import get_request
-
-    try:
-        document = get_request(_cfg, request_id)
-        if document.get("worker_identity") != worker_identity:
-            raise HTTPException(status_code=403, detail="request is assigned to another worker")
-        return document
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post("/api/coding/worker/requests/{request_id}/claim")
-def coding_worker_claim(request_id: str, body: CodingWorkerClaim, worker_identity: str = WORKER_AUTH):
-    from .coding_provision import claim_request
-
-    try:
-        return claim_request(_cfg, request_id=request_id, local_host=body.host, worker_identity=worker_identity, envelope_hash=body.envelope_hash, location=body.location, snapshot=body.snapshot)
-    except Exception as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@app.post("/api/coding/worker/requests/{request_id}/start")
-def coding_worker_start(request_id: str, body: CodingWorkerLease, worker_identity: str = WORKER_AUTH):
-    from .coding_provision import start_request
-
-    try:
-        return start_request(_cfg, request_id=request_id, worker_identity=worker_identity, lease_token=body.lease_token)
-    except Exception as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@app.post("/api/coding/worker/requests/{request_id}/complete")
-def coding_worker_complete(request_id: str, body: CodingWorkerComplete, worker_identity: str = WORKER_AUTH):
-    from .coding_provision import complete_request
-
-    try:
-        return complete_request(_cfg, request_id=request_id, worker_identity=worker_identity, lease_token=body.lease_token, result=body.result)
-    except Exception as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@app.post("/api/coding/worker/requests/{request_id}/fail")
-def coding_worker_fail(request_id: str, body: CodingWorkerFail, worker_identity: str = WORKER_AUTH):
-    from .coding_provision import fail_request
-
-    try:
-        return fail_request(_cfg, request_id=request_id, worker_identity=worker_identity, lease_token=body.lease_token, error=body.error, result=body.result)
-    except Exception as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+if coding_routes_enabled(_cfg):
+    register_coding_routes(app, lambda: _cfg, AUTH)
 
 
 @app.middleware("http")

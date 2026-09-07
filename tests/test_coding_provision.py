@@ -1684,7 +1684,12 @@ def test_worker_next_route_is_static_and_worker_authenticated():
     route = routes[static_index]
 
     assert static_index < dynamic_index
-    assert any(dependency.call is http_server._require_coding_worker for dependency in route.dependant.dependencies)
+    # worker-auth dependency now lives in tgw.http_coding (workflow separation);
+    # verify by name so the test does not couple to the helper's module.
+    assert any(
+        getattr(dependency.call, "__name__", "") == "_require_coding_worker"
+        for dependency in route.dependant.dependencies
+    )
 
 
 def test_access_status_and_stop_preserve_receipt_model(tmp_path, native):
