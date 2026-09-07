@@ -13657,7 +13657,15 @@ _AUTO_REPAIRABLE_CHECKS: dict[str, str] = {
     "context.launcher": "context-launcher",
     "runtime.local-coding": "runtime",
     "database.local-coding": "database",
-    "services.local-coding": "workers",
+    # services.local-coding (the coding lifecycle workers + orchestrator +
+    # foreman) is deliberately NOT auto-repairable: the operator runs the
+    # coding workflow without the continual-harness apparatus (PP-ROLES-001 /
+    # two-gates directive), so those units stay disabled on purpose.  An
+    # auto-repair of them re-arms tgw-doctor-auto-repair.timer via
+    # repair_workers's _CODING_UNITS (same self-perpetuation as the removed
+    # access.unix-group entry, 22d20eb1) AND resurrects torn-down build units.
+    # Workers-down is an operator notice, not a repair trigger.  The Context
+    # generation, runtime, launcher, and database DO stay auto-maintained.
     "services.plan-render": "plan-render-worker",
     "cleanup.obsolete-active-surfaces": "obsolete-surfaces",
 }
