@@ -10700,10 +10700,12 @@ def test_check_harness_import_path_pass(tmp_path: Path, monkeypatch: pytest.Monk
     assert result["state"] == "PASS"
 
 
-def test_check_harness_import_path_fails_on_legacy_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_check_harness_import_path_warns_on_legacy_copy_when_pth_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # .pth correct + import works, only the superseded copy remains -> cleanup
+    # notice, not a broken surface.  WARN so it does not gate auto-repair.
     paths = _harness_check_env(monkeypatch, tmp_path, legacy=True)
     result = doctor_cli.check_harness_import_path(paths)
-    assert result["state"] == "FAIL"
+    assert result["state"] == "WARN"
     assert doctor_cli._CONTROLLER_PTH_LEGACY in result["detail"]
 
 

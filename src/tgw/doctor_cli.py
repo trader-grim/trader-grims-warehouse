@@ -4330,17 +4330,26 @@ def check_harness_import_path(paths: DoctorPaths) -> dict[str, Any]:
             timeout=30,
         )
         import_ok = probe.returncode == 0
-        exact = pth_ok and not legacy_present and import_ok
+        # A wrong/missing .pth or a failed import is a real FAIL — imports do
+        # not resolve.  The superseded package copy still being present when
+        # the .pth is correct and imports work is a cleanup notice, not a
+        # broken surface: WARN, so it does not gate the auto-repair supervisor.
+        broken = (not pth_ok) or (not import_ok)
+        exact = pth_ok and import_ok and not legacy_present
         parts = []
         if not pth_ok:
             parts.append(f"{_CONTROLLER_PTH_NAME} missing or not '{expected.strip()}'")
-        if legacy_present:
-            parts.append(f"superseded {_CONTROLLER_PTH_LEGACY}/ still present")
         if not import_ok:
             parts.append(f"import probe failed: {probe.stderr.strip()[-200:]}")
+        if legacy_present:
+            parts.append(
+                f"superseded {_CONTROLLER_PTH_LEGACY}/ still present "
+                "(harmless once the .pth resolves; operator: remove it)"
+            )
+        state = "FAIL" if broken else ("WARN" if legacy_present else "PASS")
         return _check(
             identity,
-            "PASS" if exact else "FAIL",
+            state,
             "controller venv resolves tgw.development.* from the checkout"
             if exact
             else "; ".join(parts),
@@ -4352,7 +4361,7 @@ def check_harness_import_path(paths: DoctorPaths) -> dict[str, Any]:
                 "legacy_copy_present": legacy_present,
                 "import_probe_returncode": probe.returncode,
             },
-            repair=None if exact else _privileged_repair_action(paths, "harness"),
+            repair=None if state == "PASS" else _privileged_repair_action(paths, "harness"),
         )
     except Exception as exc:
         return _failed(identity, exc, repair=_privileged_repair_action(paths, "harness"))
