@@ -1,10 +1,20 @@
 """
 tgw.apis.llm — Unified LLM/vision model dispatcher.
 
-Routes calls to OpenRouter, local Ollama, or a direct provider gateway
-(google_direct, deepseek_direct, anthropic_direct, opencode_zen) based on the
-models config (tgw-models.json, loaded into cfg['models']). Every direct
-path falls back to OpenRouter automatically on any failure.
+Routes calls to a direct provider gateway (nous, groq, google_direct,
+deepseek_direct, anthropic_direct, opencode_zen), OpenRouter, or local Ollama
+based on the models config (tgw-models.json, loaded into cfg['models']).
+
+Failover (PP-STATEMACHINE-002 A4): the task's configured (provider, model) is
+tried first, then a fixed provider ORDER — text: nous → groq → deepseek_direct
+→ openrouter; vision: google_direct → deepseek_direct → openrouter. The MODEL
+each failover provider uses is config, not code (cfg['models']['failover'] /
+['failover_vision']); a failover provider with no configured model is skipped.
+OpenRouter is the paid last resort: every hop to it is logged loudly and
+raises an operator notification (its spend ceiling is enforced on the
+OpenRouter account, not here). When the whole chain is exhausted the call
+raises — worker_base requeues the job with backoff (a visible hold), never a
+silent OpenRouter success and never an immediate dead-letter.
 
 Usage:
     from tgw.apis.llm import call_model, get_task_model
@@ -122,18 +132,19 @@ def call_model(
     """
     Call the model configured for task. Returns raw response text.
     provider/model override cfg['models'] when given explicitly.
-    Usage (timing + token counts) is recorded to the ai_usage table.
+    Usage (timing + token counts) is recorded to the ai_usage table against the
+    provider/model that actually served the call (not the configured primary
+    when a failover served it).
     Pass sku to attribute the call to a specific item in the per-SKU report.
-    Pass messages to supply a pre-built multi-turn list (openrouter only);
-    system_prompt/user_prompt are ignored when messages is given.
-    Pass img_b64_list for multi-image calls (OpenRouter/google_direct only);
-    img_b64 used as single-image fallback for Ollama or when list has one entry.
-    provider='google_direct' calls Gemini directly via the google-genai SDK
-    (no OpenRouter markup) and falls back to OpenRouter automatically on any
-    failure — model should be a bare Gemini model id (e.g. 'gemini-2.5-flash-lite').
-    provider='openrouter' with a google/* model falls back the other way for
-    interactive callers only: the Google free tier (~20 calls/day) is the
-    operator emergency reserve, never spent by background jobs.
+    Pass messages to supply a pre-built multi-turn list; system_prompt/
+    user_prompt are ignored when messages is given (OpenAI-shaped providers and
+    Anthropic honour it; google_direct falls back to the prompt args).
+    Pass img_b64_list for multi-image calls; img_b64 is the single-image form.
+
+    A cloud provider's failure moves to the next provider in the fixed order
+    (see the module docstring); OpenRouter is the loud paid last resort; an
+    exhausted chain raises so worker_base requeues the job (a visible hold).
+    Local Ollama has no cloud failover.
     """
     if provider is None or model is None:
         _p, _m = get_task_model(cfg, task)
@@ -153,161 +164,18 @@ def call_model(
     t0 = time.time()
     text = ''
     usage: Dict[str, Any] = {}
+    provider_used, model_used = provider, model
     success = True
     error_msg: Optional[str] = None
 
     try:
-        if provider == 'google_direct':
-            from tgw import quota
-
-            google_exc: Optional[Exception] = None
-            try:
-                # Circuit breaker: after a Google 429, background callers stand
-                # down for the cooldown instead of burning a doomed attempt per
-                # call. The first call after the cooldown expires is the
-                # restoration probe — if Google is back, it stays primary.
-                quota.precheck(cfg, 'llm_google')
-            except quota.QuotaBudgetExceeded as exc:
-                google_exc = exc
-            if google_exc is None:
-                try:
-                    gen_cfg = get_task_generation_config(cfg, task)
-                    text, usage = _call_google_direct(
-                        model, system_prompt, user_prompt, cfg, img_b64_list=_images,
-                        max_output_tokens=gen_cfg.get('max_output_tokens'),
-                        thinking_budget=gen_cfg.get('thinking_budget'),
-                    )
-                except Exception as exc:
-                    google_exc = exc
-            if google_exc is not None:
-                # Fail soft to OpenRouter — a Google-side outage/quota/auth error
-                # must not dead-letter the job when a paid fallback path exists.
-                fallback_model = model if model.startswith('google/') else f'google/{model}'
-                log.warning(
-                    'google_direct unavailable for task %r (%s) — falling back to '
-                    'openrouter/%s: %s', task, model, fallback_model, google_exc,
-                )
-                text, usage = _call_openrouter(
-                    fallback_model, system_prompt, user_prompt, cfg,
-                    img_b64_list=_images, messages=messages,
-                )
-        elif provider == 'deepseek_direct':
-            from tgw import quota
-
-            ds_exc: Optional[Exception] = None
-            try:
-                quota.precheck(cfg, 'llm_deepseek')
-            except quota.QuotaBudgetExceeded as exc:
-                ds_exc = exc
-            if ds_exc is None:
-                try:
-                    text, usage = _call_deepseek_direct(
-                        model, system_prompt, user_prompt, cfg, messages=messages,
-                    )
-                except Exception as exc:
-                    ds_exc = exc
-            if ds_exc is not None:
-                fallback_model = model if model.startswith('deepseek/') else f'deepseek/{model}'
-                log.warning(
-                    'deepseek_direct unavailable for task %r (%s) — falling back to '
-                    'openrouter/%s: %s', task, model, fallback_model, ds_exc,
-                )
-                text, usage = _call_openrouter(
-                    fallback_model, system_prompt, user_prompt, cfg,
-                    img_b64_list=_images, messages=messages,
-                )
-        elif provider == 'opencode_zen':
-            from tgw import quota
-
-            oc_exc: Optional[Exception] = None
-            try:
-                quota.precheck(cfg, 'llm_opencode_zen')
-            except quota.QuotaBudgetExceeded as exc:
-                oc_exc = exc
-            if oc_exc is None:
-                try:
-                    text, usage = _call_opencode_zen(
-                        model, system_prompt, user_prompt, cfg, messages=messages,
-                    )
-                except Exception as exc:
-                    oc_exc = exc
-            if oc_exc is not None:
-                # OpenCode Zen's free ids carry a '-free' suffix the OpenRouter
-                # catalog doesn't (e.g. 'deepseek-v4-flash-free' ->
-                # 'deepseek/deepseek-v4-flash') — strip it for the fallback.
-                base_id = model[:-5] if model.endswith('-free') else model
-                fallback_model = base_id if base_id.startswith('deepseek/') else f'deepseek/{base_id}'
-                log.warning(
-                    'opencode_zen unavailable for task %r (%s) — falling back to '
-                    'openrouter/%s: %s', task, model, fallback_model, oc_exc,
-                )
-                text, usage = _call_openrouter(
-                    fallback_model, system_prompt, user_prompt, cfg,
-                    img_b64_list=_images, messages=messages,
-                )
-        elif provider == 'anthropic_direct':
-            from tgw import quota
-
-            an_exc: Optional[Exception] = None
-            try:
-                quota.precheck(cfg, 'llm_anthropic')
-            except quota.QuotaBudgetExceeded as exc:
-                an_exc = exc
-            if an_exc is None:
-                try:
-                    text, usage = _call_anthropic_direct(
-                        model, system_prompt, user_prompt, cfg, messages=messages,
-                    )
-                except Exception as exc:
-                    an_exc = exc
-            if an_exc is not None:
-                # OpenRouter's alias drops the date suffix Anthropic's direct
-                # API requires (e.g. 'claude-haiku-4-5-20251001' ->
-                # 'anthropic/claude-haiku-4-5') — strip it for the fallback.
-                base_id = model.rsplit('-20', 1)[0] if '-20' in model else model
-                fallback_model = model if model.startswith('anthropic/') else f'anthropic/{base_id}'
-                log.warning(
-                    'anthropic_direct unavailable for task %r (%s) — falling back to '
-                    'openrouter/%s: %s', task, model, fallback_model, an_exc,
-                )
-                text, usage = _call_openrouter(
-                    fallback_model, system_prompt, user_prompt, cfg,
-                    img_b64_list=_images, messages=messages,
-                )
-        elif provider == 'openrouter':
-            try:
-                text, usage = _call_openrouter(
-                    model, system_prompt, user_prompt, cfg,
-                    img_b64_list=_images, messages=messages,
-                )
-            except Exception as exc:
-                from tgw import quota
-
-                # Operator emergency reserve (Dave, 2026-07-04): Google's ~20
-                # free calls/day are held for interactive (C10 operator-lane)
-                # callers so the operator can keep working through an OpenRouter
-                # outage/credit gap. Background jobs re-raise — worker_base
-                # requeues them as transient; they must not drain the reserve.
-                if (
-                    quota.context_kind() == 'interactive'
-                    and messages is None
-                    and model.startswith('google/')
-                ):
-                    reserve_model = model.split('/', 1)[1]
-                    log.warning(
-                        'openrouter call failed for task %r (%s) — operator '
-                        'emergency reserve: google_direct/%s: %s',
-                        task, model, reserve_model, exc,
-                    )
-                    gen_cfg = get_task_generation_config(cfg, task)
-                    text, usage = _call_google_direct(
-                        reserve_model, system_prompt, user_prompt, cfg,
-                        img_b64_list=_images,
-                        max_output_tokens=gen_cfg.get('max_output_tokens'),
-                        thinking_budget=gen_cfg.get('thinking_budget'),
-                    )
-                else:
-                    raise
+        if provider in _CLOUD_PROVIDER_POOL:
+            text, usage, provider_used, model_used = _run_cloud_chain(
+                task, system_prompt, user_prompt, cfg,
+                primary_provider=provider, primary_model=model,
+                images=_images, messages=messages,
+                generation_config=get_task_generation_config(cfg, task),
+            )
         elif _images:
             # Ollama only supports single image; use the first
             text, usage = _call_ollama_vision(model, system_prompt, user_prompt, cfg, _images[0])
@@ -320,7 +188,7 @@ def call_model(
     finally:
         duration_ms = int((time.time() - t0) * 1000)
         _record_usage(
-            task, provider, model, duration_ms,
+            task, provider_used, model_used, duration_ms,
             input_chars=input_chars,
             output_chars=len(text),
             usage=usage,
@@ -330,6 +198,201 @@ def call_model(
         )
 
     return text
+
+
+# ---------------------------------------------------------------------------
+# Provider failover chain (PP-STATEMACHINE-002 A4)
+# ---------------------------------------------------------------------------
+
+# Which quota pool each cloud provider records against.  Membership of this
+# map is also "is a cloud provider that goes through the failover chain".
+_CLOUD_PROVIDER_POOL: Dict[str, str] = {
+    'nous':            'llm_nous',
+    'groq':            'llm_groq',
+    'deepseek_direct': 'llm_deepseek',
+    'opencode_zen':    'llm_opencode_zen',
+    'anthropic_direct': 'llm_anthropic',
+    'google_direct':   'llm_google',
+    'openrouter':      'llm_openrouter',
+}
+
+# The failover ORDER is architecture, not a model choice (Dave, 2026-07-09:
+# "why change code just to change models?").  The MODEL each failover provider
+# uses is config — cfg['models']['failover'][<provider>] (text) or
+# cfg['models']['failover_vision'][<provider>] (a call carrying images).  A
+# failover provider with no configured model is skipped (logged).  The task's
+# own configured (provider, model) is always step 0.
+_TEXT_FAILOVER_ORDER = ('nous', 'groq', 'deepseek_direct', 'openrouter')
+_VISION_FAILOVER_ORDER = ('google_direct', 'deepseek_direct', 'openrouter')
+
+
+def _notify(title: str, body: str, *, level: str) -> None:
+    """Best-effort operator notification; never raises."""
+    try:
+        from tgw.notify import notify
+        notify(title, body, level=level)
+    except Exception:  # noqa: BLE001 — notification must never break a call
+        log.debug('notify failed (%s): %s', title, body)
+
+
+def _dispatch_provider(
+    provider: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    cfg: Dict[str, Any],
+    *,
+    images: List[str],
+    messages: Optional[List[Dict[str, Any]]],
+    generation_config: Dict[str, Any],
+) -> tuple:
+    """Call one cloud provider by name. Returns (text, usage). Raises on failure."""
+    if provider == 'google_direct':
+        return _call_google_direct(
+            model, system_prompt, user_prompt, cfg, img_b64_list=images,
+            max_output_tokens=generation_config.get('max_output_tokens'),
+            thinking_budget=generation_config.get('thinking_budget'),
+        )
+    if provider == 'nous':
+        return _call_nous(model, system_prompt, user_prompt, cfg, messages=messages)
+    if provider == 'groq':
+        return _call_groq(model, system_prompt, user_prompt, cfg, messages=messages)
+    if provider == 'deepseek_direct':
+        return _call_deepseek_direct(
+            model, system_prompt, user_prompt, cfg, messages=messages,
+            img_b64_list=images,
+        )
+    if provider == 'opencode_zen':
+        return _call_opencode_zen(
+            model, system_prompt, user_prompt, cfg, messages=messages,
+        )
+    if provider == 'anthropic_direct':
+        return _call_anthropic_direct(
+            model, system_prompt, user_prompt, cfg, messages=messages,
+        )
+    if provider == 'openrouter':
+        return _call_openrouter(
+            model, system_prompt, user_prompt, cfg,
+            img_b64_list=images, messages=messages,
+        )
+    raise ValueError(f'unknown cloud provider {provider!r}')
+
+
+def _cloud_chain_steps(
+    cfg: Dict[str, Any],
+    task: str,
+    primary_provider: str,
+    primary_model: str,
+    *,
+    vision: bool,
+) -> List[tuple]:
+    """Ordered [(provider, model), ...]: the configured primary, then each
+    failover provider that has a model configured for it."""
+    order = _VISION_FAILOVER_ORDER if vision else _TEXT_FAILOVER_ORDER
+    cfg_key = 'failover_vision' if vision else 'failover'
+    failover_models = (cfg.get('models', {}) or {}).get(cfg_key, {}) or {}
+
+    steps: List[tuple] = [(primary_provider, primary_model)]
+    for prov in order:
+        if prov == primary_provider:
+            continue
+        mdl = failover_models.get(prov)
+        if not mdl:
+            log.warning(
+                'llm chain %s: no cfg models.%s[%r] — %s not used as a failover',
+                task, cfg_key, prov, prov,
+            )
+            continue
+        steps.append((prov, mdl))
+    return steps
+
+
+def _run_cloud_chain(
+    task: str,
+    system_prompt: str,
+    user_prompt: str,
+    cfg: Dict[str, Any],
+    *,
+    primary_provider: str,
+    primary_model: str,
+    images: List[str],
+    messages: Optional[List[Dict[str, Any]]],
+    generation_config: Dict[str, Any],
+) -> tuple:
+    """Try the configured provider, then the fixed failover order. Returns
+    (text, usage, provider_used, model_used). Raises the last error when every
+    provider in the chain has failed or been skipped."""
+    from tgw import quota
+
+    steps = _cloud_chain_steps(
+        cfg, task, primary_provider, primary_model, vision=bool(images),
+    )
+    last_exc: Optional[Exception] = None
+
+    for idx, (prov, mdl) in enumerate(steps):
+        pool = _CLOUD_PROVIDER_POOL.get(prov)
+        if pool:
+            try:
+                quota.precheck(cfg, pool)
+            except quota.QuotaBudgetExceeded as exc:
+                last_exc = exc
+                log.warning(
+                    'llm chain %s: skip %s/%s — quota pool %s halted: %s',
+                    task, prov, mdl, pool, exc,
+                )
+                continue
+
+        if prov == 'openrouter':
+            log.warning(
+                'llm chain %s: FALLING BACK TO OPENROUTER (%s) — paid last '
+                'resort, primary providers exhausted%s',
+                task, mdl,
+                '' if last_exc is None else f'; last error: {repr(last_exc)[:200]}',
+            )
+            _notify(
+                'LLM failover → OpenRouter',
+                f'{task}: primary provider chain exhausted, using openrouter/{mdl}',
+                level='warning',
+            )
+        elif idx > 0:
+            log.warning(
+                'llm chain %s: failover step %d → %s/%s (prior error: %s)',
+                task, idx, prov, mdl, repr(last_exc)[:200],
+            )
+
+        try:
+            text, usage = _dispatch_provider(
+                prov, mdl, system_prompt, user_prompt, cfg,
+                images=images, messages=messages,
+                generation_config=generation_config,
+            )
+        except Exception as exc:  # noqa: BLE001 — try the next provider
+            last_exc = exc
+            log.warning(
+                'llm chain %s: %s/%s failed: %s', task, prov, mdl, repr(exc)[:300],
+            )
+            continue
+
+        if idx > 0:
+            log.warning(
+                'llm chain %s: recovered on failover %s/%s (step %d of %d)',
+                task, prov, mdl, idx, len(steps) - 1,
+            )
+        return text, usage, prov, mdl
+
+    log.error(
+        'llm chain %s: EXHAUSTED — tried %s; last error: %s',
+        task, [p for p, _ in steps], repr(last_exc)[:300],
+    )
+    _notify(
+        'LLM provider chain exhausted',
+        f'{task}: every provider failed ({[p for p, _ in steps]}); '
+        f'last error: {str(last_exc)[:160]}',
+        level='error',
+    )
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f'llm chain for task {task!r} produced no result and no error')
 
 
 def _record_usage(
@@ -459,6 +522,128 @@ def _call_google_direct(
     return text, usage
 
 
+def _user_content(user_prompt: str, images: Optional[List[str]]) -> Any:
+    """OpenAI chat 'content' for the user turn: a bare string, or a
+    text+image_url parts list when *images* (base64 JPEGs) are supplied."""
+    if not images:
+        return user_prompt
+    parts: List[Dict[str, Any]] = [{'type': 'text', 'text': user_prompt}]
+    for b64 in images:
+        parts.append({
+            'type': 'image_url',
+            'image_url': {'url': f'data:image/jpeg;base64,{b64}'},
+        })
+    return parts
+
+
+def _openai_style_chat(
+    *,
+    endpoint: str,
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    cfg: Dict[str, Any],
+    quota_pool: str,
+    messages: Optional[List[Dict[str, Any]]] = None,
+    images: Optional[List[str]] = None,
+    max_retries: int = 3,
+) -> tuple:
+    """POST to an OpenAI-compatible /chat/completions endpoint (Nous, Groq).
+    Returns (text, usage_dict). Raises on any HTTP or parse failure — the
+    caller's provider chain moves on."""
+    if messages is not None:
+        msg_list: Any = messages
+    else:
+        msg_list = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user',   'content': _user_content(user_prompt, images)},
+        ]
+
+    payload = {'model': model, 'messages': msg_list}
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json',
+    }
+
+    from tgw import quota
+
+    for attempt in range(max_retries):
+        resp = requests.post(endpoint, headers=headers, json=payload, timeout=60)
+        quota.record(cfg, quota_pool)
+        if resp.status_code == 429:
+            quota.record_429(cfg, quota_pool, model)
+        if resp.status_code == 429 and attempt < max_retries - 1:
+            time.sleep(15 * (attempt + 1))
+            continue
+        break
+
+    resp.raise_for_status()
+    body = resp.json()
+    text = body['choices'][0]['message']['content']
+    raw_usage = body.get('usage') or {}
+    usage = {
+        'prompt_tokens':     raw_usage.get('prompt_tokens'),
+        'completion_tokens': raw_usage.get('completion_tokens'),
+        'total_tokens':      raw_usage.get('total_tokens'),
+    }
+    return text, usage
+
+
+def _load_nous_key(cfg: Dict[str, Any]) -> str:
+    """Load the Nous Research key (NOUS_API_KEY) — see secrets_root/tgw.env."""
+    from tgw.apis.secrets import get_api_key
+
+    return get_api_key('nous')
+
+
+def _call_nous(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    cfg: Dict[str, Any],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    max_retries: int = 3,
+) -> tuple:
+    """Call Nous Research's OpenAI-compatible inference API. *model* is a bare
+    Nous model id (e.g. 'meituan/longcat-2.0:free'). Free-tier models carry a
+    large hourly token allowance — the primary text provider (PP-STATEMACHINE-002
+    A4). No image support. Raises on any failure. Returns (text, usage_dict)."""
+    return _openai_style_chat(
+        endpoint='https://inference-api.nousresearch.com/v1/chat/completions',
+        api_key=_load_nous_key(cfg), model=model,
+        system_prompt=system_prompt, user_prompt=user_prompt, cfg=cfg,
+        quota_pool='llm_nous', messages=messages, max_retries=max_retries,
+    )
+
+
+def _load_groq_key(cfg: Dict[str, Any]) -> str:
+    """Load the Groq key (GROQ_API_KEY) — see secrets_root/tgw.env."""
+    from tgw.apis.secrets import get_api_key
+
+    return get_api_key('groq')
+
+
+def _call_groq(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    cfg: Dict[str, Any],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    max_retries: int = 3,
+) -> tuple:
+    """Call Groq's OpenAI-compatible API. *model* is a bare Groq model id
+    (e.g. 'qwen/qwen3.8-27b'). Free tier covers steady-state text volume — the
+    second text provider in the chain, after Nous, before paid DeepSeek. No
+    image support. Raises on any failure. Returns (text, usage_dict)."""
+    return _openai_style_chat(
+        endpoint='https://api.groq.com/openai/v1/chat/completions',
+        api_key=_load_groq_key(cfg), model=model,
+        system_prompt=system_prompt, user_prompt=user_prompt, cfg=cfg,
+        quota_pool='llm_groq', messages=messages, max_retries=max_retries,
+    )
+
+
 def _load_deepseek_key(cfg: Dict[str, Any]) -> str:
     """Load DeepSeek API key via the single-facility DEEPSEEK_API_KEY env
     var (tgw.apis.secrets.get_api_key) — see secrets_root/tgw.env."""
@@ -474,13 +659,16 @@ def _call_deepseek_direct(
     cfg: Dict[str, Any],
     messages: Optional[List[Dict[str, Any]]] = None,
     max_retries: int = 3,
+    img_b64_list: Optional[List[str]] = None,
 ) -> tuple:
     """Call DeepSeek's OpenAI-compatible chat completions API directly — no
     OpenRouter markup. *model* is a bare DeepSeek model id (e.g.
-    'deepseek-v4-flash'), not the 'deepseek/...' OpenRouter form. No image
-    support — neither current caller (pm_intake, suggestions_classify) sends
-    photos. Raises on any failure; call_model() catches and falls back to
-    OpenRouter. Returns (text, usage_dict).
+    'deepseek-v4-flash'), not the 'deepseek/...' OpenRouter form. Passes images
+    as OpenAI image_url parts when *img_b64_list* is given (the vision failover
+    for ai_identify / alt_text — the model id must be a vision-capable one from
+    cfg['models']['failover_vision']); text-only callers pass nothing and the
+    request shape is unchanged. Raises on any failure; call_model()'s provider
+    chain moves on. Returns (text, usage_dict).
     """
     api_key = _load_deepseek_key(cfg)
 
@@ -489,7 +677,7 @@ def _call_deepseek_direct(
     else:
         msg_list = [
             {'role': 'system', 'content': system_prompt},
-            {'role': 'user',   'content': user_prompt},
+            {'role': 'user',   'content': _user_content(user_prompt, img_b64_list)},
         ]
 
     payload = {'model': model, 'messages': msg_list}

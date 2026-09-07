@@ -2,8 +2,9 @@
 
 Zen's free 'deepseek-v4-flash-free' id is an OpenAI-compatible chat/completions
 gateway with no prepaid balance and no documented rate cap. call_model() must
-dispatch to it, fall back to OpenRouter on any failure (stripping the '-free'
-suffix Zen adds), and never dead-letter a job on a Zen-side error.
+dispatch to it, and on a Zen-side failure move to the next provider in the
+configured failover chain (or re-raise for a visible hold when none is
+configured) — never dead-letter a job on a Zen-side error.
 
 All HTTP is mocked — tests pass completely offline.
 """
@@ -68,7 +69,9 @@ class TestCallOpencode:
         assert captured['headers']['Authorization'] == 'Bearer sk-test-zen'
         assert captured['payload']['model'] == 'deepseek-v4-flash-free'
 
-    def test_failure_falls_back_to_openrouter_stripping_free_suffix(self, monkeypatch, tmp_path):
+    def test_failure_moves_to_configured_failover(self, monkeypatch, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg['models'] = {'failover': {'openrouter': 'deepseek/deepseek-v4-flash'}}
         monkeypatch.setattr(
             llm_mod, '_call_opencode_zen',
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError('zen 500')),
@@ -78,17 +81,20 @@ class TestCallOpencode:
             llm_mod, '_call_openrouter',
             lambda model, *a, **k: or_calls.append(model) or ('fallback text', {}),
         )
+        monkeypatch.setattr('tgw.quota.precheck', lambda cfg, pool: None)
         monkeypatch.setattr(llm_mod, '_record_usage', lambda *a, **k: None)
 
         text = llm_mod.call_model(
-            'pm_intake', 'sys', 'user', _cfg(tmp_path),
+            'pm_intake', 'sys', 'user', cfg,
             provider='opencode_zen', model='deepseek-v4-flash-free',
         )
 
         assert text == 'fallback text'
+        # model comes verbatim from cfg['models']['failover']['openrouter'] —
+        # no code-level prefix munging any more.
         assert or_calls == ['deepseek/deepseek-v4-flash']
 
-    def test_fallback_does_not_double_prefix_an_already_qualified_model(self, monkeypatch, tmp_path):
+    def test_failure_with_no_failover_configured_reraises(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
             llm_mod, '_call_opencode_zen',
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError('boom')),
@@ -100,12 +106,13 @@ class TestCallOpencode:
         )
         monkeypatch.setattr(llm_mod, '_record_usage', lambda *a, **k: None)
 
-        llm_mod.call_model(
-            'pm_intake', 'sys', 'user', _cfg(tmp_path),
-            provider='opencode_zen', model='deepseek/deepseek-v4-flash',
-        )
-
-        assert or_calls == ['deepseek/deepseek-v4-flash']
+        import pytest
+        with pytest.raises(RuntimeError, match='boom'):
+            llm_mod.call_model(
+                'pm_intake', 'sys', 'user', _cfg(tmp_path),
+                provider='opencode_zen', model='deepseek/deepseek-v4-flash',
+            )
+        assert or_calls == []
 
     def test_get_task_model_routes_a_task_to_opencode_zen(self, tmp_path):
         cfg = {'models': {

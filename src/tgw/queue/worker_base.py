@@ -191,13 +191,24 @@ _TRANSIENT_ERRORS: list[tuple[str, int]] = [
     ('quota budget exhausted', 1800),  # tgw.quota background halt (pre-call)
     ('too many requests',      1800),  # HTTP 429 from any metered API
     ('usage limit',            1800),  # Trading/EPS Ack=Failure quota message
+    # A funding wall on the paid LLM provider is a HOLD, not a dead-letter and
+    # not a fast retry (PP-STATEMACHINE-002 A4 — the 2026-07 OpenRouter-402
+    # storm dead-lettered 2,658 ebay_draft jobs). Requeue on a long delay so
+    # the item stays visible in 'queued' and releases itself once topped up;
+    # the free-tier providers (nous/groq) carry the load in the meantime.
+    ('payment required',       21600),  # HTTP 402
+    ('insufficient balance',   21600),  # DeepSeek's phrasing
+    ('insufficient_quota',     21600),  # OpenAI-shaped "quota" error body
+    ('402 client error',       21600),  # requests.raise_for_status() text
 ]
 
 
 def classify_dead_letter(error_text: str) -> tuple[str, int]:
     """Classify a failure as transient-requeue or permanent dead-letter.
 
-    Returns ('requeue', delay_seconds) or ('dead_letter', 0).
+    Returns ('requeue', delay_seconds) or ('dead_letter', 0). A long delay
+    (hours) is the "hold" class — a funding/quota wall the job should wait out
+    in 'queued', visible, releasing itself, never dead-lettered.
     Called when a job has exhausted normal retries (attempt_count >= max_attempts).
     """
     lower = error_text.lower()

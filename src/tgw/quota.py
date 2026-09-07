@@ -73,6 +73,13 @@ _DEFAULT_BUDGETS: Dict[str, Optional[int]] = {
     'llm_deepseek':        None,
     'llm_anthropic':        100,
     'llm_openrouter':      None,
+    # llm_nous / llm_groq: the free-tier primary text providers
+    # (PP-STATEMACHINE-002 A4). Count-only here — Nous's hourly allowance is
+    # large and Groq's daily free tier covers steady-state; a real per-pool
+    # token budget is A4 follow-up work. record_429() still drives the
+    # post-429 background cooldown in precheck() for both.
+    'llm_nous':            None,
+    'llm_groq':            None,
     # llm_opencode_zen: OpenCode Zen free tier (deepseek-v4-flash-free). Unmetered,
     # no prepaid balance, no documented rate cap (Dave, 2026-09-03) — count-only,
     # like llm_openrouter. Deliberately not a low-balance pool: routing a task

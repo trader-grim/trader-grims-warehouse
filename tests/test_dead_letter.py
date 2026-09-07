@@ -77,6 +77,25 @@ def test_requeue_transient_classification_uses_real_worker_base(monkeypatch):
     assert worker_base.classify_dead_letter("HardFailure: eBay rejected (25709)")[0] == "dead_letter"
 
 
+def test_payment_wall_is_a_long_hold_not_a_dead_letter(monkeypatch):
+    """PP-STATEMACHINE-002 A4: an LLM funding wall (402 / insufficient balance)
+    must requeue on a long delay — a visible hold that releases itself on
+    top-up — never a dead-letter (the 2026-07 OpenRouter-402 storm dead-lettered
+    2,658 ebay_draft jobs). Rate-limit (429) stays a shorter requeue."""
+    for payment_err in (
+        "402 Client Error: Payment Required for url: https://openrouter.ai/...",
+        "deepseek: Insufficient Balance",
+        "{'error': {'code': 'insufficient_quota'}}",
+    ):
+        action, delay = worker_base.classify_dead_letter(payment_err)
+        assert action == "requeue", payment_err
+        assert delay >= 3600, payment_err
+
+    rl_action, rl_delay = worker_base.classify_dead_letter("HTTP 429: Too Many Requests")
+    assert rl_action == "requeue"
+    assert rl_delay < 3600
+
+
 def test_single_requeue_id_path_unaffected(monkeypatch):
     requeued = []
     _patch_common(monkeypatch, requeued)
