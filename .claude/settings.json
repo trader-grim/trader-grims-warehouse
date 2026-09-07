@@ -57,6 +57,17 @@
             "statusMessage": "Checking trace-immutability guardrail..."
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/coding-workflow-allow.py\"",
+            "timeout": 10,
+            "statusMessage": "Checking coding-workflow allow-list..."
+          }
+        ]
       }
     ]
   }
