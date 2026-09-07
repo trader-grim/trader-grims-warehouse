@@ -4557,15 +4557,51 @@ def test_preservation_directory_requires_exact_pinned_attributes(field: str, val
     }
     assert doctor_cli._trusted_preservation_directory(
         SimpleNamespace(**exact),
-        db_uid=1000,
+        owner_uids=frozenset({1000}),
         group_gid=983,
     )
     exact[field] = value
     assert not doctor_cli._trusted_preservation_directory(
         SimpleNamespace(**exact),
-        db_uid=1000,
+        owner_uids=frozenset({1000}),
         group_gid=983,
     )
+
+
+def test_preservation_directory_trusts_the_migrated_harness_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PP-ROLES-001 WU-3: ownership migrates db -> tgw-harness; both are trusted
+    # until the db path is fully removed.
+    exact = {"st_mode": stat.S_IFDIR | 0o2775, "st_nlink": 1, "st_gid": 983}
+    for uid in (1000, 1181):
+        assert doctor_cli._trusted_preservation_directory(
+            SimpleNamespace(st_uid=uid, **exact),
+            owner_uids=frozenset({1000, 1181}),
+            group_gid=983,
+        )
+    assert not doctor_cli._trusted_preservation_directory(
+        SimpleNamespace(st_uid=1234, **exact),
+        owner_uids=frozenset({1000, 1181}),
+        group_gid=983,
+    )
+
+
+def test_preservation_owner_uids_includes_db_and_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = {
+        "db": SimpleNamespace(pw_uid=1000),
+        "tgw-harness": SimpleNamespace(pw_uid=1181),
+    }
+    monkeypatch.setattr(doctor_cli, "_safe_getpwnam", lambda name: table.get(name))
+    assert doctor_cli._preservation_owner_uids() == frozenset({1000, 1181})
+    # tgw-harness absent (host without the sweep): db alone still works
+    monkeypatch.setattr(
+        doctor_cli, "_safe_getpwnam",
+        lambda name: table.get(name) if name == "db" else None,
+    )
+    assert doctor_cli._preservation_owner_uids() == frozenset({1000})
 
 
 def test_noatime_permission_fallback_reflinks_without_source_atime_or_remnant(

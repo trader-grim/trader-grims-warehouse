@@ -9897,11 +9897,31 @@ _STABLE_DIRECTORY_FIELDS = (
 )
 
 
-def _trusted_preservation_directory(state: os.stat_result, *, db_uid: int, group_gid: int) -> bool:
+def _preservation_owner_uids() -> frozenset[int]:
+    """UIDs allowed to own a pre-ledger preservation directory.
+
+    Historically this was ``db`` (Dave's personal login, baked in by the
+    retired apparatus). The coding workflow is migrating ownership to
+    ``tgw-harness`` (PP-ROLES-001 WU-3); the partial sweep already re-chowned
+    some worktree preservation directories, so both are trusted until the
+    ``db`` path is fully removed. ``db`` stays first so it keeps working where
+    the sweep has not reached.
+    """
+    uids: list[int] = []
+    for name in ("db", "tgw-harness"):
+        entry = _safe_getpwnam(name)
+        if entry is not None:
+            uids.append(entry.pw_uid)
+    return frozenset(uids)
+
+
+def _trusted_preservation_directory(
+    state: os.stat_result, *, owner_uids: frozenset[int], group_gid: int
+) -> bool:
     return (
         stat.S_ISDIR(state.st_mode)
         and state.st_nlink == 1
-        and state.st_uid == db_uid
+        and state.st_uid in owner_uids
         and state.st_gid == group_gid
         and stat.S_IMODE(state.st_mode) == 0o2775
     )
@@ -10094,7 +10114,7 @@ def _authenticate_pre_ledger_preservation(worktree: Path, descriptor: int, group
         preservation_state = os.fstat(preservation_fd)
         if not _trusted_preservation_directory(
             preservation_state,
-            db_uid=pwd.getpwnam("db").pw_uid,
+            owner_uids=_preservation_owner_uids(),
             group_gid=group_gid,
         ):
             raise DoctorError(f"Todo {todo_id} preservation directory is untrusted")
@@ -10189,14 +10209,24 @@ def _authenticate_pre_ledger_preservation(worktree: Path, descriptor: int, group
             and claimed_hash == actual_hash
             and expected["manifest"] == actual_hash.removeprefix("sha256:") + ".json"
         )
-        db_uid, codex_uid = pwd.getpwnam("db").pw_uid, pwd.getpwnam("codex").pw_uid
+        # The pre-ledger evidence was written as codex (receipt) and db
+        # (manifest). Content integrity is pinned by the hashes in
+        # _PRE_LEDGER_PRESERVATION and checked exactly above; the owner check
+        # is defence in depth. The db->tgw-harness ownership sweep
+        # (PP-ROLES-001 WU-3) legitimately re-chowned these historical
+        # worktrees, so tgw-harness is also accepted for both files until the
+        # db path is fully removed.
+        harness_pw = _safe_getpwnam("tgw-harness")
+        harness_uids = {harness_pw.pw_uid} if harness_pw is not None else set()
+        receipt_owner_uids = {pwd.getpwnam("codex").pw_uid} | harness_uids
+        manifest_owner_uids = _preservation_owner_uids()
         if (
             not exact
             or receipt_state.st_nlink != 1
-            or receipt_state.st_uid != codex_uid
+            or receipt_state.st_uid not in receipt_owner_uids
             or receipt_state.st_gid != group_gid
             or manifest_state.st_nlink != 1
-            or manifest_state.st_uid != db_uid
+            or manifest_state.st_uid not in manifest_owner_uids
             or manifest_state.st_gid != group_gid
             or stat.S_IMODE(manifest_state.st_mode) not in {0o440, 0o460}
         ):
