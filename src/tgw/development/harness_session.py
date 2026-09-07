@@ -424,7 +424,9 @@ def _run_codex(prompt: str, worktree: Path, schema: dict[str, Any], *, invoke: I
 _STUB_CANARY = ".tgw-canary"
 
 
-def _run_stub(worktree: Path, schema: dict[str, Any]) -> dict[str, Any]:
+def _run_stub(
+    worktree: Path, schema: dict[str, Any], job: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """The offline bootstrap executor — LEAF-11-9 W0.
 
     No binary, no network, no credential. It makes one deterministic change so
@@ -432,11 +434,22 @@ def _run_stub(worktree: Path, schema: dict[str, Any]) -> dict[str, Any]:
     worktree -> pytest_gate -> harness_git squash+FF -> main_ref_guard -> ledger
     path with no LLM (harness onboarding must not require a working model).
     Selected only when the chain explicitly names 'stub'.
+
+    ``job["stub_canary_text"]`` overrides the written line. The onboarding
+    canary (W3) sets it to a fixed host-independent string so a re-run against
+    a main that already carries that exact ``.tgw-canary`` produces no net
+    change (``already_satisfied``) instead of an endless trail of commits.
     """
     if "verdict" in schema.get("properties", {}):
         return {"verdict": "pass", "findings": []}
+    override = (job or {}).get("stub_canary_text")
+    text = override if isinstance(override, str) and override else (
+        f"harness offline canary — {Path(worktree).name}\n"
+    )
+    if not text.endswith("\n"):
+        text += "\n"
     canary = Path(worktree) / _STUB_CANARY
-    canary.write_text(f"harness offline canary — {Path(worktree).name}\n", encoding="utf-8")
+    canary.write_text(text, encoding="utf-8")
     return {
         "status": "implemented",
         "summary": f"offline stub canary wrote {_STUB_CANARY}",
@@ -479,7 +492,7 @@ def _dispatch_chain(
     for executor in _executor_chain(job):
         try:
             if executor == _STUB:
-                report = _run_stub(worktree, schema)
+                report = _run_stub(worktree, schema, job)
             elif executor == "claude":
                 report = _run_claude(prompt, worktree, invoke=invoke)
             elif executor == "codex":

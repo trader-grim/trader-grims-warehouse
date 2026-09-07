@@ -3,9 +3,9 @@
 **Owner:** Dave
 **Applies to:** tgw-lib only; never tgw-prod
   (`host_policy.production_installs_catalog = false`)
-**Status:** current canonical procedure for LEAF-11-9. Supersedes the implicit
-  "operating without the orchestrator" checklist in the plan runbook
-  `actor-mcp-onboarding.md`, which is archived once W2/W3 land.
+**Status:** current canonical procedure for LEAF-11-9 (W0–W7 landed). Supersedes
+  the implicit "operating without the orchestrator" checklist in the plan
+  runbook `actor-mcp-onboarding.md` — archive that section on the next plan pass.
 
 This is the whole onboarding procedure. There is no hand-wiring runbook — the
 first end-to-end run (Todo 1987) needed six ad-hoc fix commits precisely because
@@ -27,11 +27,17 @@ authenticated, so it cannot require them.
 ## The one operation
 
 ```text
+# once, so the root-owned launcher carries the `harness` repair target:
+sudo -n /usr/local/sbin/tgw-coding-bootstrap --commit <sha>
+# then, the onboarding operation itself:
 sudo -n /usr/local/sbin/tgw-coding-bootstrap --repair harness --commit <sha>
 ```
 
 `<sha>` is the exact clean `refs/heads/main` commit you are onboarding. The
-repair is idempotent. It:
+first line is the ordinary full coding bootstrap (it reinstalls
+`/usr/local/sbin/tgw-coding-bootstrap` from the commit tree); skip it only if
+`tgw-coding-bootstrap --repair harness --help` already lists `harness`. The
+`--repair harness` run is idempotent. It:
 
 1. ensures the `tgw-harness` (uid 981, login shell, publisher) and `tgw-coder`
    (uid 980, nologin, confined, non-publisher) identities, their `tgw-coders`
@@ -124,8 +130,11 @@ is a defect in the catalogue contract (W1).
 | model-currency tool | W7 | yes (`9da097144`) |
 | sudoers canonical + `access.harness-sudoers` drift check | W4 | yes |
 | this document | W6 | yes |
-| `--repair harness` Doctor op + 3-tier canary dispatch | W2, W3 | pending |
+| `--repair harness` Doctor op (`repair_harness`) | W2 | yes |
+| 3-tier canary dispatch (`tgw.development.harness_canary`) | W3 | yes |
 
-Until W2/W3 land, `--repair harness` is not yet a Doctor target; the identity,
-import-path, catalogue, and model-currency pieces it will orchestrate are
-already on `main` and individually usable.
+`doctor check` gains three standing checks after onboarding — `harness.identities`
+and `harness.import-path` (repair postconditions) and `harness.executors`
+(advisory: a missing model credential is a WARN, never a gate). The offline
+canary landing is enforced inside `repair_harness` itself: the operation exits
+non-zero if it does not land.

@@ -4178,6 +4178,182 @@ def check_harness_sudoers(paths: DoctorPaths) -> dict[str, Any]:
         return _failed(identity, exc)
 
 
+# --------------------------------------------------------------------------- #
+# harness onboarding — LEAF-11-9 W2/W3
+# --------------------------------------------------------------------------- #
+
+_CONTROLLER_VENV = Path("/opt/TGW/.venvs/controller")
+_CONTROLLER_PTH_NAME = "__editable__.trader_grims_warehouse.pth"
+_CONTROLLER_PTH_LEGACY = "tgw.superseded-by-editable-pth-20260906"
+_HARNESS_LOGIN = {"tgw-harness": "/bin/bash", "tgw-coder": "/usr/sbin/nologin"}
+
+
+def _controller_site_packages() -> Path:
+    matches = sorted(_CONTROLLER_VENV.glob("lib/python3.*/site-packages"))
+    if not matches:
+        raise DoctorError(f"controller venv has no site-packages under {_CONTROLLER_VENV}")
+    return matches[-1]
+
+
+def check_harness_identities(paths: DoctorPaths) -> dict[str, Any]:
+    """The two harness identities exist and are in ``tgw-coders``.
+
+    ``tgw-harness`` (publisher, login shell) and ``tgw-coder`` (confined,
+    nologin) are the whole privilege boundary of the identity model. The
+    ``tgw-harness`` PostgreSQL peer-map entry is verified by
+    ``database.local-coding-peer-auth``; this check does not duplicate it.
+    """
+    identity = "harness.identities"
+    try:
+        try:
+            group = grp.getgrnam(_CODING_RUNTIME_GROUP)
+        except KeyError as exc:
+            raise DoctorError(f"platform group {_CODING_RUNTIME_GROUP} is absent") from exc
+        rows: dict[str, Any] = {}
+        exact = True
+        for name, want_shell in _HARNESS_LOGIN.items():
+            try:
+                record = pwd.getpwnam(name)
+            except KeyError:
+                rows[name] = {"present": False, "member": False, "exact": False}
+                exact = False
+                continue
+            memberships = set(os.getgrouplist(name, record.pw_gid))
+            member = group.gr_gid in memberships or name in group.gr_mem
+            shell_ok = record.pw_shell == want_shell
+            rows[name] = {
+                "present": True,
+                "uid": record.pw_uid,
+                "shell": record.pw_shell,
+                "shell_expected": want_shell,
+                "member": member,
+                "exact": member and shell_ok,
+            }
+            exact = exact and member and shell_ok
+        return _check(
+            identity,
+            "PASS" if exact else "FAIL",
+            "tgw-harness / tgw-coder identities and tgw-coders membership are exact"
+            if exact
+            else "a harness identity is absent, has the wrong shell, or is not in tgw-coders",
+            evidence={"group": _CODING_RUNTIME_GROUP, "identities": rows},
+            repair=None if exact else _privileged_repair_action(paths, "harness"),
+        )
+    except Exception as exc:
+        return _failed(identity, exc, repair=_privileged_repair_action(paths, "harness"))
+
+
+def check_harness_import_path(paths: DoctorPaths) -> dict[str, Any]:
+    """The controller venv imports ``tgw.development.*`` from the checkout.
+
+    W5 replaced the frozen Aug-11 package copy with an editable-style ``.pth``
+    pointing at ``<repo>/src``; onboarding (W2) owns creating it and removing
+    the superseded copy. Verified: the ``.pth`` exists with the exact expected
+    line, the legacy directory is gone, and ``import tgw.development.harness_cli``
+    succeeds from ``/`` as cwd with no PYTHONPATH.
+    """
+    identity = "harness.import-path"
+    try:
+        site = _controller_site_packages()
+        pth = site / _CONTROLLER_PTH_NAME
+        legacy = site / _CONTROLLER_PTH_LEGACY
+        expected = f"{paths.repository / 'src'}\n"
+        try:
+            observed = pth.read_text(encoding="utf-8")
+        except OSError:
+            observed = None
+        pth_ok = observed == expected
+        legacy_present = legacy.exists()
+        probe = _run(
+            [str(_CONTROLLER_VENV / "bin" / "python3"), "-P", "-c",
+             "import tgw.development.harness_cli, tgw.development.harness_canary"],
+            cwd=Path("/"),
+            timeout=30,
+        )
+        import_ok = probe.returncode == 0
+        exact = pth_ok and not legacy_present and import_ok
+        parts = []
+        if not pth_ok:
+            parts.append(f"{_CONTROLLER_PTH_NAME} missing or not '{expected.strip()}'")
+        if legacy_present:
+            parts.append(f"superseded {_CONTROLLER_PTH_LEGACY}/ still present")
+        if not import_ok:
+            parts.append(f"import probe failed: {probe.stderr.strip()[-200:]}")
+        return _check(
+            identity,
+            "PASS" if exact else "FAIL",
+            "controller venv resolves tgw.development.* from the checkout"
+            if exact
+            else "; ".join(parts),
+            evidence={
+                "site_packages": str(site),
+                "pth_present": observed is not None,
+                "pth_exact": pth_ok,
+                "expected_pth": expected,
+                "legacy_copy_present": legacy_present,
+                "import_probe_returncode": probe.returncode,
+            },
+            repair=None if exact else _privileged_repair_action(paths, "harness"),
+        )
+    except Exception as exc:
+        return _failed(identity, exc, repair=_privileged_repair_action(paths, "harness"))
+
+
+def check_harness_executors(paths: DoctorPaths) -> dict[str, Any]:
+    """Per enabled coding executor: binary discoverable, runtime deps present,
+    credential ready.
+
+    A missing binary / credential is advisory, never a hard FAIL — the offline
+    ``stub`` keeps the harness working and the dispatch chain already handles an
+    unavailable executor. FAIL only when the catalogue itself is unusable; WARN
+    when an *installed* executor is half-broken (binary present but its verify
+    command fails, or a declared runtime dep is missing).
+    """
+    identity = "harness.executors"
+    try:
+        from tgw import coding_executor_catalog
+
+        try:
+            specs = coding_executor_catalog.executor_specs(enabled_only=True)
+        except coding_executor_catalog.CatalogError as exc:
+            raise DoctorError(f"coding-executor catalogue is unusable: {exc}") from exc
+        rows: dict[str, Any] = {}
+        degraded: list[str] = []
+        for name, spec in specs.items():
+            binary = coding_executor_catalog.discover_binary(name, spec=spec)
+            deps_missing = [d for d in spec.runtime_deps if shutil.which(d) is None]
+            cred = coding_executor_catalog.credential_ready(name, spec=spec)
+            verify_ok: bool | None = None
+            if binary and spec.verify_cmd:
+                probe = _run([binary, *spec.verify_cmd[1:]], timeout=20)
+                verify_ok = probe.returncode == 0
+            half_broken = bool(binary) and (deps_missing or verify_ok is False)
+            if half_broken:
+                degraded.append(name)
+            rows[name] = {
+                "binary": binary,
+                "runtime_deps_missing": deps_missing,
+                "verify_ok": verify_ok,
+                "credential_ready": cred,
+                "available": bool(binary) and not deps_missing and verify_ok is not False,
+            }
+        ready = [n for n, r in rows.items() if r["available"] and r["credential_ready"]]
+        state = "WARN" if degraded else "PASS"
+        return _check(
+            identity,
+            state,
+            (
+                f"{len(ready)}/{len(rows)} enabled executor(s) fully ready"
+                + (f"; half-installed: {', '.join(degraded)}" if degraded else "")
+            )
+            if rows
+            else "no enabled coding executors (offline stub still available)",
+            evidence={"executors": rows, "fully_ready": ready},
+        )
+    except Exception as exc:
+        return _failed(identity, exc)
+
+
 _TODO_BINDINGS_SQL = """
 SELECT COALESCE(
     json_agg(json_build_object('id', id, 'agent', agent, 'status_note', status_note)),
@@ -6640,6 +6816,9 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         check_context_processes(paths),
         check_unix_access(paths),
         check_harness_sudoers(paths),
+        check_harness_identities(paths),
+        check_harness_import_path(paths),
+        check_harness_executors(paths),
         check_worktrees(paths),
         check_database(paths),
         check_database_peer_auth(paths),
@@ -9302,6 +9481,296 @@ def repair_database(
         raise DoctorError("peer-auth host materialization remains incomplete after repair")
     receipt = _receipt(paths, "database", before, after)
     return {"ok": True, "operation": "database", "changed": before != after, "receipt": receipt}
+
+
+# --------------------------------------------------------------------------- #
+# repair_harness — LEAF-11-9 W2/W3: bring "code on main" to "canary landed"
+# --------------------------------------------------------------------------- #
+
+
+def _safe_getpwnam(name: str) -> Any | None:
+    try:
+        return pwd.getpwnam(name)
+    except KeyError:
+        return None
+
+
+def _ensure_harness_identities() -> list[str]:
+    """Ensure tgw-harness / tgw-coder exist and are in tgw-coders. Idempotent.
+
+    Creates a system group + user with the exact shell when absent; the
+    confined tgw-coder is deliberately nologin and stays out of pg_ident.
+    """
+    changed: list[str] = []
+    need_create = any(
+        _safe_getpwnam(name) is None for name in _HARNESS_LOGIN
+    )
+    if need_create:
+        for tool in ("/usr/sbin/groupadd", "/usr/sbin/useradd", "/usr/sbin/usermod"):
+            if not Path(tool).exists():
+                raise DoctorError(f"cannot create harness identities: {tool} is absent")
+    for name, shell in _HARNESS_LOGIN.items():
+        present = _safe_getpwnam(name) is not None
+        if not present:
+            if _run(["getent", "group", name], timeout=10).returncode != 0:
+                created = _run(["/usr/sbin/groupadd", "--system", name], timeout=30)
+                if created.returncode:
+                    raise DoctorError(
+                        f"groupadd --system {name} failed: {created.stderr.strip()}"
+                    )
+            command = [
+                "/usr/sbin/useradd", "--system", "--gid", name,
+                "--home-dir", f"/var/lib/{name}", "--shell", shell,
+            ]
+            if shell != "/usr/sbin/nologin":
+                command.append("--create-home")
+            created = _run([*command, name], timeout=30)
+            if created.returncode:
+                raise DoctorError(f"useradd --system {name} failed: {created.stderr.strip()}")
+            changed.append(f"created identity {name}")
+        current = _run(["id", "-nG", name], timeout=10)
+        if current.returncode:
+            raise DoctorError(f"cannot read groups for {name}: {current.stderr.strip()}")
+        if _CODING_RUNTIME_GROUP not in current.stdout.split():
+            added = _run(
+                ["/usr/sbin/usermod", "-a", "-G", _CODING_RUNTIME_GROUP, name], timeout=30
+            )
+            if added.returncode:
+                raise DoctorError(
+                    f"usermod -a -G {_CODING_RUNTIME_GROUP} {name} failed: {added.stderr.strip()}"
+                )
+            changed.append(f"{name} added to {_CODING_RUNTIME_GROUP}")
+    return changed
+
+
+def _ensure_harness_peer_auth(paths: DoctorPaths, *, commit: str, tree: str) -> list[str]:
+    """Ensure the tgw-harness pg_ident entry exists (materialised from the tree).
+
+    Delegates to the same universal peer-map materialisation as
+    ``repair_database`` — a no-op when ``database.local-coding-peer-auth`` is
+    already PASS.
+    """
+    if check_database_peer_auth(paths).get("state") == "PASS":
+        return []
+    ident_mode, ident_bytes = read_exact_tree_file(
+        paths.repository, commit=commit, tree=tree,
+        path="config/environment/postgresql/pg_ident.conf",
+    )
+    hba_mode, hba_bytes = read_exact_tree_file(
+        paths.repository, commit=commit, tree=tree,
+        path="config/environment/postgresql/pg_hba.conf",
+    )
+    if ident_mode != 0o644 or hba_mode != 0o644:
+        raise DoctorError("exact pg_ident/pg_hba materialization mode differs")
+    managed_line = next(
+        (line for line in hba_bytes.decode("utf-8").splitlines() if _PEER_HBA_LINE.match(line)),
+        None,
+    )
+    if managed_line is None:
+        raise DoctorError("exact pg_hba materialization has no tgw_coding peer line")
+    _materialize_peer_auth(paths, ident_bytes=ident_bytes, managed_line=managed_line)
+    reload_result = _run(
+        ["sudo", "-n", "-u", "postgres", "psql", "--dbname=tgw_lib_dev_state_machine",
+         "--no-align", "--tuples-only", "--command", "SELECT pg_reload_conf();"],
+        timeout=30,
+    )
+    if reload_result.returncode or reload_result.stdout.strip() != "t":
+        raise DoctorError("PostgreSQL peer-auth configuration reload failed")
+    if check_database_peer_auth(paths).get("state") != "PASS":
+        raise DoctorError("tgw-harness peer-auth entry incomplete after materialization")
+    return ["materialized tgw-coders pg_ident map + reloaded PostgreSQL"]
+
+
+def _ensure_controller_import_path(paths: DoctorPaths) -> list[str]:
+    """Editable-style ``.pth`` → ``<repo>/src`` in the controller venv; drop the
+    superseded frozen package copy. Idempotent."""
+    changed: list[str] = []
+    site = _controller_site_packages()
+    pth = site / _CONTROLLER_PTH_NAME
+    expected = f"{paths.repository / 'src'}\n".encode()
+    try:
+        current = pth.read_bytes()
+    except OSError:
+        current = None
+    if current != expected:
+        privileged = os.geteuid() == 0
+        _atomic_bytes(
+            pth, expected, mode=0o644,
+            uid=0 if privileged else None,
+            gid=0 if privileged else None,
+        )
+        changed.append(f"wrote {pth}")
+    legacy = site / _CONTROLLER_PTH_LEGACY
+    if legacy.exists():
+        if legacy.is_dir() and not legacy.is_symlink():
+            shutil.rmtree(legacy)
+        else:
+            legacy.unlink()
+        changed.append(f"removed superseded {legacy}")
+    probe = _run(
+        [str(_CONTROLLER_VENV / "bin" / "python3"), "-P", "-c",
+         "import tgw.development.harness_cli, tgw.development.harness_canary"],
+        cwd=Path("/"), timeout=30,
+    )
+    if probe.returncode:
+        raise DoctorError(
+            f"controller venv cannot import tgw.development.* after repair: "
+            f"{probe.stderr.strip()[-300:]}"
+        )
+    return changed
+
+
+def _verify_harness_executors() -> dict[str, Any]:
+    """Best-effort per-executor readiness. Never raises: a missing binary or
+    credential marks the executor unavailable (WARN), it does not fail onboarding.
+    """
+    from tgw import coding_executor_catalog
+
+    rows: dict[str, Any] = {}
+    try:
+        specs = coding_executor_catalog.executor_specs(enabled_only=True)
+    except coding_executor_catalog.CatalogError as exc:
+        return {"catalogue_error": str(exc), "executors": {}}
+    for name, spec in specs.items():
+        binary = coding_executor_catalog.discover_binary(name, spec=spec)
+        install_note = None
+        if (
+            binary is None
+            and spec.install_source
+            and str(spec.install_source).startswith("npm:")
+            and shutil.which("npm")
+        ):
+            package = str(spec.install_source).split(":", 1)[1]
+            installed = _run(["npm", "install", "-g", package], timeout=180)
+            install_note = "installed" if installed.returncode == 0 else "install failed"
+            binary = coding_executor_catalog.discover_binary(name, spec=spec)
+        deps_missing = [d for d in spec.runtime_deps if shutil.which(d) is None]
+        verify_ok: bool | None = None
+        if binary and spec.verify_cmd:
+            verify_ok = _run([binary, *spec.verify_cmd[1:]], timeout=20).returncode == 0
+        rows[name] = {
+            "binary": binary,
+            "install_note": install_note,
+            "runtime_deps_missing": deps_missing,
+            "verify_ok": verify_ok,
+            "credential_ready": coding_executor_catalog.credential_ready(name, spec=spec),
+        }
+    return {"executors": rows}
+
+
+def _harness_canary(paths: DoctorPaths, tier: str, *, timeout: int = 900) -> dict[str, Any]:
+    """Run one canary tier via harness_canary AS tgw-harness (the publisher)."""
+    python = str(_CONTROLLER_VENV / "bin" / "python3")
+    result = _run(
+        ["sudo", "-n", "-u", "tgw-harness", python, "-m", "tgw.development.harness_canary",
+         "--tier", tier, "--repository", str(paths.repository), "--json"],
+        timeout=timeout,
+    )
+    tail = (result.stdout or "").strip()
+    start = tail.rfind("\n{")
+    blob = tail[start + 1:] if start >= 0 else tail
+    try:
+        row = json.loads(blob)
+    except (ValueError, TypeError) as exc:
+        raise DoctorError(
+            f"{tier} canary produced no parseable result "
+            f"(exit {result.returncode}): {(result.stderr or tail).strip()[-400:]}"
+        ) from exc
+    row["canary_exit"] = result.returncode
+    return row
+
+
+def repair_harness(
+    paths: DoctorPaths, *, desired_commit: str | None = None, live_canary: bool = False
+) -> dict[str, Any]:
+    """Bring the harness from "code on main" to "canary landed" (LEAF-11-9).
+
+    Idempotent. Each step fails closed with a precise reason:
+      1. tgw-harness / tgw-coder identities + tgw-coders membership + the
+         tgw-harness pg_ident entry (from the commit tree);
+      2. the controller-venv editable ``.pth`` (→ ``<repo>/src``), superseded
+         package copy removed;
+      3. per enabled executor (W1 catalogue): binary / runtime deps / credential
+         — best effort, recorded ready-or-unavailable, never a gate;
+      4. free-route probe for the W3(b) canary (W7 model-currency tool);
+      5. the W3 canary, cheapest-first — OFFLINE stub is the gate (this repair
+         fails unless it lands or is already satisfied); FREE-MODEL and LIVE
+         SKIP unless reachable / opted in.
+    """
+    _require_root()
+    head, tree, status = _source_identity(paths)
+    if status:
+        raise DoctorError("harness repair requires a clean canonical source")
+    if desired_commit is not None and head != desired_commit:
+        raise DoctorError("harness repair commit does not match the canonical source")
+    if _COMMIT.fullmatch(tree) is None:
+        raise DoctorError("canonical source has no exact tree identity")
+
+    before = {
+        "identities": check_harness_identities(paths),
+        "import_path": check_harness_import_path(paths),
+        "executors": check_harness_executors(paths),
+    }
+
+    steps: dict[str, Any] = {}
+    steps["identities"] = _ensure_harness_identities()
+    steps["peer_auth"] = _ensure_harness_peer_auth(paths, commit=head, tree=tree)
+    steps["import_path"] = _ensure_controller_import_path(paths)
+    steps["executors"] = _verify_harness_executors()
+
+    try:
+        from tgw.model_currency_adapter import reachable_free_models
+
+        free_models = reachable_free_models()
+    except Exception as exc:  # noqa: BLE001 — advisory only
+        free_models = []
+        steps["free_route_error"] = str(exc)
+    steps["free_route_reachable"] = bool(free_models)
+
+    canary: dict[str, Any] = {}
+    offline = _harness_canary(paths, "offline")
+    canary["offline"] = offline
+    if offline.get("result") not in {"landed", "already_satisfied"}:
+        raise DoctorError(f"offline stub canary did not land: {offline}")
+
+    if free_models:
+        canary["free_model"] = _harness_canary(paths, "free-model")
+    else:
+        canary["free_model"] = {"result": "skipped", "reason": "no reachable free route (W7)"}
+
+    if live_canary:
+        live = _harness_canary(paths, "live", timeout=1200)
+        canary["live"] = live
+        if live.get("result") == "failed":
+            raise DoctorError(f"--live-canary requested and the live canary failed: {live}")
+    else:
+        canary["live"] = {"result": "skipped", "reason": "opt-in only (--repair harness --live-canary)"}
+
+    after = {
+        "identities": check_harness_identities(paths),
+        "import_path": check_harness_import_path(paths),
+        "executors": check_harness_executors(paths),
+    }
+    for key in ("identities", "import_path"):
+        if after[key]["state"] != "PASS":
+            raise DoctorError(f"harness.{key.replace('_', '-')} not PASS after repair: {after[key]['detail']}")
+
+    result = {
+        "schema": "tgw-local-harness-repair/v1",
+        "ok": True,
+        "operation": "harness",
+        "commit": head,
+        "tree": tree,
+        "steps": steps,
+        "canary": canary,
+        "live_canary": live_canary,
+    }
+    changed = bool(
+        steps["identities"] or steps["peer_auth"] or steps["import_path"]
+        or offline.get("result") == "landed"
+    )
+    receipt = _receipt(paths, "harness", before, after)
+    return {**result, "changed": changed, "receipt": receipt}
 
 
 def _set_shared_fd(descriptor: int, group_gid: int, *, directory: bool) -> None:
@@ -13049,6 +13518,7 @@ _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
     "workers": repair_workers,
     "plan-render-worker": repair_plan_render_worker,
     "obsolete-surfaces": repair_obsolete_surfaces,
+    "harness": repair_harness,
 }
 
 _REPAIR_POSTCONDITIONS: dict[str, tuple[str, ...]] = {
@@ -13061,6 +13531,11 @@ _REPAIR_POSTCONDITIONS: dict[str, tuple[str, ...]] = {
     "workers": ("services.local-coding",),
     "plan-render-worker": ("services.plan-render",),
     "obsolete-surfaces": ("cleanup.obsolete-active-surfaces",),
+    # The canary landing is the real gate and repair_harness raises if it does
+    # not land; the standing postconditions are the mechanical pieces the canary
+    # rides on. harness.executors is advisory (a missing model credential is a
+    # WARN) and is deliberately not a postcondition.
+    "harness": ("harness.identities", "harness.import-path"),
 }
 
 # Checks that may be auto-repaired by the bounded Doctor supervisor.  Each maps
@@ -13136,6 +13611,7 @@ def repair(
     desired_commit: str | None = None,
     source_root: Path | None = None,
     review_evidence: Path | None = None,
+    live_canary: bool = False,
 ) -> dict[str, Any]:
     function = _REPAIRS.get(operation)
     if function is None:
@@ -13203,6 +13679,10 @@ def repair(
                 "plan-render-worker",
             }:
                 result = function(paths, desired_commit=desired_commit)
+            elif operation == "harness":
+                result = function(
+                    paths, desired_commit=desired_commit, live_canary=live_canary
+                )
             else:
                 result = function(paths)
             result = {**result, "started_receipt": started_receipt}
@@ -13727,6 +14207,14 @@ def _parser() -> argparse.ArgumentParser:
             "explicit Context source transition"
         ),
     )
+    repair_parser.add_argument(
+        "--live-canary",
+        action="store_true",
+        help=(
+            "harness repair only: also run the LIVE/PAID canary tier and let a "
+            "real model failure fail the run (default: SKIP it)"
+        ),
+    )
     repair_parser.add_argument("--json", action="store_true", dest="repair_json_output")
     auto_repair_parser = sub.add_parser(
         "auto-repair", help="bounded Doctor supervisor: decide then optionally repair"
@@ -13757,6 +14245,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 desired_commit=args.commit,
                 source_root=Path(__file__).resolve().parents[2],
                 review_evidence=args.review_evidence,
+                live_canary=getattr(args, "live_canary", False),
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             # Each repair is bounded to its selected target.  The complete

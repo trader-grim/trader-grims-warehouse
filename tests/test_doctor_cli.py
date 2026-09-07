@@ -10670,3 +10670,185 @@ def test_diagnose_includes_harness_sudoers_check(monkeypatch: pytest.MonkeyPatch
     report = doctor_cli.diagnose(doctor_cli.DoctorPaths())
 
     assert any(c["id"] == "access.harness-sudoers" for c in report["checks"])
+
+
+# ---------------------------------------------------------------------------
+# harness onboarding — repair_harness + harness.* checks  (LEAF-11-9 W2/W3)
+# ---------------------------------------------------------------------------
+
+
+def _harness_check_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, legacy: bool):
+    """A fake controller site-packages + a repo path, wired into doctor_cli."""
+    site = tmp_path / "venv" / "lib" / "python3.13" / "site-packages"
+    site.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (site / doctor_cli._CONTROLLER_PTH_NAME).write_text(f"{repo / 'src'}\n", encoding="utf-8")
+    if legacy:
+        (site / doctor_cli._CONTROLLER_PTH_LEGACY).mkdir()
+    monkeypatch.setattr(doctor_cli, "_controller_site_packages", lambda: site)
+    monkeypatch.setattr(
+        doctor_cli, "_run",
+        lambda *_a, **_k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    return doctor_cli.DoctorPaths(repository=repo)
+
+
+def test_check_harness_import_path_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = _harness_check_env(monkeypatch, tmp_path, legacy=False)
+    result = doctor_cli.check_harness_import_path(paths)
+    assert result["state"] == "PASS"
+
+
+def test_check_harness_import_path_fails_on_legacy_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = _harness_check_env(monkeypatch, tmp_path, legacy=True)
+    result = doctor_cli.check_harness_import_path(paths)
+    assert result["state"] == "FAIL"
+    assert doctor_cli._CONTROLLER_PTH_LEGACY in result["detail"]
+
+
+def test_check_harness_import_path_fails_on_bad_pth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = _harness_check_env(monkeypatch, tmp_path, legacy=False)
+    site = doctor_cli._controller_site_packages()
+    (site / doctor_cli._CONTROLLER_PTH_NAME).write_text("/wrong/path\n", encoding="utf-8")
+    result = doctor_cli.check_harness_import_path(paths)
+    assert result["state"] == "FAIL"
+
+
+def test_check_harness_identities_fail_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        doctor_cli.grp, "getgrnam",
+        lambda _n: SimpleNamespace(gr_gid=983, gr_mem=[]),
+    )
+    def _pwnam(name):
+        raise KeyError(name)
+    monkeypatch.setattr(doctor_cli.pwd, "getpwnam", _pwnam)
+    result = doctor_cli.check_harness_identities(doctor_cli.DoctorPaths())
+    assert result["state"] == "FAIL"
+    assert result["evidence"]["identities"]["tgw-harness"]["present"] is False
+
+
+def test_check_harness_executors_never_fails_on_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tgw import coding_executor_catalog
+    spec = coding_executor_catalog.ExecutorSpec(
+        name="ghost", binary_name="ghost", install_source=None, install_target_path=None,
+        runtime_deps=(), verify_cmd=None, credential_env=(), auth_file=None, enabled=True,
+    )
+    monkeypatch.setattr(coding_executor_catalog, "executor_specs", lambda **_k: {"ghost": spec})
+    monkeypatch.setattr(coding_executor_catalog, "discover_binary", lambda *_a, **_k: None)
+    monkeypatch.setattr(coding_executor_catalog, "credential_ready", lambda *_a, **_k: False)
+    result = doctor_cli.check_harness_executors(doctor_cli.DoctorPaths())
+    assert result["state"] == "PASS"
+    assert result["evidence"]["executors"]["ghost"]["available"] is False
+
+
+def test_repair_harness_is_registered_with_postconditions() -> None:
+    assert doctor_cli._REPAIRS["harness"] is doctor_cli.repair_harness
+    assert doctor_cli._REPAIR_POSTCONDITIONS["harness"] == (
+        "harness.identities", "harness.import-path",
+    )
+    # advisory only — a missing model credential must not gate the repair
+    assert "harness.executors" not in doctor_cli._REPAIR_POSTCONDITIONS["harness"]
+    # and it is not an auto-repair area (operator-run only)
+    assert "harness" not in doctor_cli._AUTO_REPAIRABLE_CHECKS.values()
+
+
+def test_ensure_controller_import_path_writes_pth_and_drops_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    site = tmp_path / "sp"
+    site.mkdir()
+    (site / doctor_cli._CONTROLLER_PTH_LEGACY).mkdir()
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    monkeypatch.setattr(doctor_cli, "_controller_site_packages", lambda: site)
+    monkeypatch.setattr(
+        doctor_cli, "_run",
+        lambda *_a, **_k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    changed = doctor_cli._ensure_controller_import_path(doctor_cli.DoctorPaths(repository=repo))
+    assert (site / doctor_cli._CONTROLLER_PTH_NAME).read_text() == f"{repo / 'src'}\n"
+    assert not (site / doctor_cli._CONTROLLER_PTH_LEGACY).exists()
+    assert len(changed) == 2
+    # idempotent second run
+    assert doctor_cli._ensure_controller_import_path(doctor_cli.DoctorPaths(repository=repo)) == []
+
+
+def test_ensure_controller_import_path_fails_closed_on_bad_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    site = tmp_path / "sp"
+    site.mkdir()
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    monkeypatch.setattr(doctor_cli, "_controller_site_packages", lambda: site)
+    monkeypatch.setattr(
+        doctor_cli, "_run",
+        lambda *_a, **_k: SimpleNamespace(returncode=1, stdout="", stderr="ModuleNotFoundError: tgw"),
+    )
+    with pytest.raises(doctor_cli.DoctorError, match="cannot import tgw.development"):
+        doctor_cli._ensure_controller_import_path(doctor_cli.DoctorPaths(repository=repo))
+
+
+def test_ensure_harness_identities_idempotent_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _n: SimpleNamespace(pw_uid=980))
+    calls: list[list[str]] = []
+    def _run(cmd, **_k):
+        calls.append(cmd)
+        if cmd[:2] == ["id", "-nG"]:
+            return SimpleNamespace(returncode=0, stdout="tgw-coders other", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(doctor_cli, "_run", _run)
+    assert doctor_cli._ensure_harness_identities() == []
+    assert not any(c[0].endswith("useradd") for c in calls)
+
+
+def test_bootstrap_launcher_offers_harness_repair_and_live_canary() -> None:
+    launcher = (ROOT / "bin/tgw-coding-bootstrap").read_text(encoding="utf-8")
+    assert '"harness",' in launcher
+    assert '"--live-canary"' in launcher
+    # the launcher must stay free of the higher-level vocabulary the guard test bans
+    assert "onboarding" not in launcher.lower()
+
+
+def _bootstrap_module():
+    launcher = ROOT / "bin/tgw-coding-bootstrap"
+    loader = importlib.machinery.SourceFileLoader("tgw_harness_bootstrap_test", str(launcher))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def test_source_bootstrap_routes_repair_harness_with_live_canary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _bootstrap_module()
+    commit = "a" * 40
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    observed: list[str] = []
+    monkeypatch.setattr(module, "_require_installed_root_copy", lambda: None)
+    monkeypatch.setattr(module, "_unprivileged_status", lambda: b"")
+    monkeypatch.setattr(module, "_git", lambda *_a: (commit + "\n").encode())
+    monkeypatch.setattr(module, "_extract_exact", lambda *_a: "b" * 40)
+    monkeypatch.setattr(module.tempfile, "mkdtemp", lambda **_k: str(staging))
+    monkeypatch.setattr(module.shutil, "rmtree", lambda *_a: None)
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda command, **_k: observed.extend(command)
+        or subprocess.CompletedProcess(command, 0, "", ""),
+    )
+    assert module.main(["--commit", commit, "--repair", "harness", "--live-canary"]) == 0
+    assert observed[observed.index("tgw.doctor_cli") + 1:] == [
+        "repair", "harness", "--commit", commit, "--json", "--live-canary",
+    ]
+
+
+def test_source_bootstrap_rejects_live_canary_without_harness(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _bootstrap_module()
+    monkeypatch.setattr(module, "_require_installed_root_copy", lambda: None)
+    monkeypatch.setattr(module, "_unprivileged_status", lambda: b"")
+    monkeypatch.setattr(module, "_git", lambda *_a: (("a" * 40) + "\n").encode())
+    assert module.main(["--commit", "a" * 40, "--repair", "database", "--live-canary"]) == 1

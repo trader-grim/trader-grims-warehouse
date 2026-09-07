@@ -330,6 +330,7 @@ def build_runners(
     coder_user: str | None = "tgw-coder",
     executor_preference: tuple[str, ...] | None = None,
     executor_bin: dict[str, str] | None = None,
+    stub_canary_text: str | None = None,
     session_timeout_s: int = 1800,
     implement_argv: tuple[str, ...] | None = None,
     review_argv: tuple[str, ...] | None = None,
@@ -350,27 +351,26 @@ def build_runners(
     pref = list(executor_preference) if executor_preference else None
     bins = {k: v for k, v in (executor_bin or {}).items() if v} or None
 
+    def _common(payload: dict[str, Any]) -> dict[str, Any]:
+        if pref:
+            payload["executor_preference"] = pref
+        if bins:
+            payload["executor_bin"] = bins
+        if stub_canary_text:
+            payload["stub_canary_text"] = stub_canary_text
+        return payload
+
     def implement_payload(task_id: str, worktree: Path, context: dict[str, Any]) -> dict[str, Any]:
-        payload = {
+        return _common({
             "task_id": task_id,
             "body": task_body,
             "worktree": str(worktree),
             "round": context.get("round", 1),
             "prior_findings": context.get("prior_findings", []),
-        }
-        if pref:
-            payload["executor_preference"] = pref
-        if bins:
-            payload["executor_bin"] = bins
-        return payload
+        })
 
     def review_payload(task_id: str, worktree: Path, _context: dict[str, Any]) -> dict[str, Any]:
-        payload = {"task_id": task_id, "body": task_body, "worktree": str(worktree)}
-        if pref:
-            payload["executor_preference"] = pref
-        if bins:
-            payload["executor_bin"] = bins
-        return payload
+        return _common({"task_id": task_id, "body": task_body, "worktree": str(worktree)})
 
     return Runners(
         prepare_worktree=git_worktree_prepare(repository, worktree_root, actor=actor),

@@ -291,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
             "release-ownership",
             "unix-git-access",
             "obsolete-surfaces",
+            "harness",
         ),
         help="run one exact Doctor repair instead of the coding bootstrap",
     )
@@ -300,6 +301,14 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "bind an explicit non-authoritative diagnostic review while "
             "atomically migrating a Context source transition"
+        ),
+    )
+    parser.add_argument(
+        "--live-canary",
+        action="store_true",
+        help=(
+            "with --repair harness: also run the live paid canary tier and let "
+            "a real model failure fail the run"
         ),
     )
     args = parser.parse_args(argv)
@@ -315,6 +324,8 @@ def main(argv: list[str] | None = None) -> int:
             raise BootstrapError(
                 "--review-evidence is valid only with --repair context"
             )
+        if args.live_canary and args.repair != "harness":
+            raise BootstrapError("--live-canary is valid only with --repair harness")
         staging = Path(
             tempfile.mkdtemp(
                 prefix="tgw-coding-bootstrap-", dir=str(_STAGING_PARENT)
@@ -337,6 +348,8 @@ def main(argv: list[str] | None = None) -> int:
                 doctor_arguments.extend(
                     ["--review-evidence", str(args.review_evidence)]
                 )
+            if args.live_canary:
+                doctor_arguments.append("--live-canary")
             completed = subprocess.run(
                 [str(_PYTHON), "-S", "-P", "-m", "tgw.doctor_cli", *doctor_arguments],
                 cwd=staging,
