@@ -109,6 +109,29 @@ _CODING_UNITS = (
     "tgw-context-snapshot-promote.service",
     "tgw-doctor-auto-repair.service",
 )
+# The continual-harness coding lifecycle apparatus: implement / review / verify
+# workers, the orchestrator supervisor, the root-effect surface, the foreman,
+# and the runtime-restart path.  The operator runs the coding workflow WITHOUT
+# this apparatus (PP-ROLES-001 / two-gates directive), so these units are torn
+# down on purpose.  When ONLY apparatus units are down, services.local-coding is
+# a WARN operator-notice, never a FAIL -- a FAIL here would land in
+# auto_repair_decision's operator_notices and block repair_allowed, stopping
+# tgw-doctor-auto-repair from keeping the Context snapshot, generation/launcher,
+# runtime, and database current on every main advance.  The Context and
+# plan-render units are deliberately NOT in this set: they must stay active.
+_APPARATUS_CODING_UNITS = frozenset(
+    {
+        "tgw-codex-implement-worker.service",
+        "tgw-claude-review-worker.service",
+        "tgw-controller-verify-worker.service",
+        "tgw-coding-lifecycle-supervisor.service",
+        "tgw-coding-root-effect.service",
+        "tgw-coding-runtime-restart.path",
+        "tgw-coding-runtime-restart.service",
+        "tgw-coding-local-foreman.timer",
+        "tgw-coding-local-foreman.service",
+    }
+)
 _PLAN_RENDER_UNIT = "tgw-plan-render-local.service"
 _PLAN_RENDER_DIRECTORY_MODE = 0o2770
 _SYSTEMD_UNIT_ROOTS = (
@@ -5900,12 +5923,66 @@ def check_units(
                 and state["restart_obligation"]["status"] != "ABSENT"
             )
         ]
+        # An apparatus unit that is simply not running is the operator's
+        # deliberate teardown (WARN).  An apparatus unit that IS active but
+        # broken -- wrong load state, stale runtime, pending restart -- is a
+        # genuine fault (FAIL): if it runs at all it must run exactly.
+        def _apparatus_deliberately_down(unit: str, state: Mapping[str, Any]) -> bool:
+            if unit not in _APPARATUS_CODING_UNITS:
+                return False
+            if state.get("ActiveState") == "active":
+                return False
+            if state.get("LoadState") not in {"loaded", "not-found", "masked", None, ""}:
+                return False
+            if (
+                observe_restart_obligations
+                and state["restart_obligation"]["status"] != "ABSENT"
+            ):
+                return False
+            return True
+
+        apparatus_down = [
+            unit
+            for unit in unhealthy
+            if _apparatus_deliberately_down(unit, observed[unit])
+        ]
+        genuine = [unit for unit in unhealthy if unit not in apparatus_down]
+        if genuine:
+            state, detail, repair_action = (
+                "FAIL",
+                "inactive or missing units: " + ", ".join(genuine),
+                repair,
+            )
+        elif apparatus_down:
+            # Only the deliberately-torn-down continual-harness apparatus is
+            # down.  Report it as an operator notice so repair_allowed stays
+            # true and tgw-doctor-auto-repair keeps the Context / runtime /
+            # launcher / database current (91802dca: same rationale that
+            # dropped services.local-coding from the auto-repairable set).
+            state, detail, repair_action = (
+                "WARN",
+                "coding lifecycle apparatus deliberately disabled "
+                "(PP-ROLES-001 / two-gates directive): "
+                + ", ".join(apparatus_down)
+                + " -- operator notice, not a repair trigger",
+                None,
+            )
+        else:
+            state, detail, repair_action = (
+                "PASS",
+                "all local coding definitions are exact and required units are active",
+                None,
+            )
         return _check(
             "services.local-coding",
-            "PASS" if not unhealthy else "FAIL",
-            "all local coding definitions are exact and required units are active" if not unhealthy else "inactive or missing units: " + ", ".join(unhealthy),
-            evidence={"units": observed},
-            repair=None if not unhealthy else repair,
+            state,
+            detail,
+            evidence={
+                "units": observed,
+                "apparatus_deliberately_disabled": apparatus_down,
+                "genuine_unhealthy": genuine,
+            },
+            repair=repair_action,
         )
     except Exception as exc:
         return _check(

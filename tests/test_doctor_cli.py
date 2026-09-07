@@ -7944,6 +7944,138 @@ def test_check_units_rejects_active_service_from_stale_release(
     assert result["evidence"]["units"][stale_unit]["process_runtime"]["exact"] is False
 
 
+def _stub_units_all_down_except_active(
+    monkeypatch: pytest.MonkeyPatch, commit: str
+) -> None:
+    """Every apparatus unit inactive; the keep-on Context/timer units active."""
+    monkeypatch.setattr(doctor_cli, "_privileged_repair_action", lambda *_a: "repair")
+    monkeypatch.setattr(
+        doctor_cli,
+        "_restart_obligation_presence",
+        lambda *_a, **_k: {"status": "ABSENT"},
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda unit: {
+            "Unit": unit,
+            "LoadState": "loaded",
+            "ActiveState": (
+                "inactive"
+                if unit in doctor_cli._APPARATUS_CODING_UNITS
+                else "active"
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_definition",
+        lambda *_a, **_k: {"exact": True, "desired_commit": commit, "reasons": []},
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_service_process_runtime_identity",
+        lambda *_a, **_k: {"exact": True, "status": "EXACT"},
+    )
+
+
+def test_check_units_warns_not_fails_when_only_apparatus_is_torn_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator runs the coding workflow without the continual-harness
+    apparatus (PP-ROLES-001 / two-gates).  services.local-coding must then be a
+    WARN operator-notice, not a FAIL that gates repair_allowed."""
+    commit = "a" * 40
+    paths = replace(doctor_cli.DoctorPaths(), runtime_root=tmp_path / "runtime")
+    (paths.runtime_root / "releases" / commit).mkdir(parents=True)
+    _stub_units_all_down_except_active(monkeypatch, commit)
+
+    result = doctor_cli.check_units(paths, desired_commit=commit)
+
+    assert result["state"] == "WARN"
+    assert result["repairable"] is False
+    assert "operator_action" not in result
+    # Only the apparatus units that are *expected active* show up as
+    # deliberately-down; the transiently-run .service units are never "active".
+    expected_down = doctor_cli._APPARATUS_CODING_UNITS & set(
+        doctor_cli._ACTIVE_CODING_UNITS
+    )
+    assert set(result["evidence"]["apparatus_deliberately_disabled"]) == expected_down
+    assert result["evidence"]["genuine_unhealthy"] == []
+    # This WARN must not gate auto-repair.
+    decision = doctor_cli.auto_repair_decision(
+        [result, doctor_cli._check("context.snapshot", "FAIL", "stale")]
+    )
+    assert decision["repair_allowed"] is True
+
+
+def test_check_units_still_fails_when_a_required_unit_is_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-apparatus unit (the Context snapshot-promote path) being inactive
+    is a genuine FAIL, even while the apparatus is deliberately torn down."""
+    commit = "a" * 40
+    paths = replace(doctor_cli.DoctorPaths(), runtime_root=tmp_path / "runtime")
+    (paths.runtime_root / "releases" / commit).mkdir(parents=True)
+    _stub_units_all_down_except_active(monkeypatch, commit)
+    required_down = "tgw-context-snapshot-promote.path"
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda unit: {
+            "Unit": unit,
+            "LoadState": "loaded",
+            "ActiveState": (
+                "inactive"
+                if unit in doctor_cli._APPARATUS_CODING_UNITS or unit == required_down
+                else "active"
+            ),
+        },
+    )
+
+    result = doctor_cli.check_units(paths, desired_commit=commit)
+
+    assert result["state"] == "FAIL"
+    assert required_down in result["detail"]
+    assert result["evidence"]["genuine_unhealthy"] == [required_down]
+    assert result["repairable"] is True
+
+
+def test_check_units_fails_when_an_apparatus_unit_runs_but_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A torn-down apparatus unit is a WARN, but one that is somehow ACTIVE on a
+    stale runtime is a genuine FAIL: if it runs at all it must run exactly."""
+    commit = "a" * 40
+    paths = replace(doctor_cli.DoctorPaths(), runtime_root=tmp_path / "runtime")
+    (paths.runtime_root / "releases" / commit).mkdir(parents=True)
+    _stub_units_all_down_except_active(monkeypatch, commit)
+    rogue = "tgw-codex-implement-worker.service"
+    monkeypatch.setattr(
+        doctor_cli,
+        "_unit_state",
+        lambda unit: {
+            "Unit": unit,
+            "LoadState": "loaded",
+            "ActiveState": (
+                "active"
+                if unit not in doctor_cli._APPARATUS_CODING_UNITS or unit == rogue
+                else "inactive"
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        doctor_cli,
+        "_service_process_runtime_identity",
+        lambda state, _r: {"exact": state["Unit"] != rogue, "status": "STALE"},
+    )
+
+    result = doctor_cli.check_units(paths, desired_commit=commit)
+
+    assert result["state"] == "FAIL"
+    assert rogue in result["evidence"]["genuine_unhealthy"]
+
+
 def _stub_worker_repair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
