@@ -5,10 +5,10 @@ workflow are distinct applications on the same state-machine substrate and must
 not share a running server.  These routes were inline in ``http_server.py`` and
 therefore live on tgw-prod, which is supposed to carry no coding surface.
 
-They are now registered onto the FastAPI app only when the config enables it
-(``coding.routes_enabled``, default ``True``).  Production sets it ``False`` so
-tgw-prod serves the item workflow only; tgw-lib leaves it on (or, later, runs a
-dedicated coding server).  The route bodies are unchanged.
+They register onto the FastAPI app unconditionally (the item server loads its
+config lazily), but every ``/api/coding/*`` path checks ``coding.routes_enabled``
+per request and returns 404 when it is ``false``.  Production sets it ``false``
+so tgw-prod serves the item workflow only.  The route bodies are unchanged.
 """
 from __future__ import annotations
 
@@ -61,9 +61,21 @@ def register_coding_routes(
 ) -> None:
     """Attach the ``/api/coding/*`` provision + worker routes to *app*.
 
+    The routes are always registered (the item server loads its config lazily,
+    so an import-time check would see an empty config); ``coding.routes_enabled``
+    is enforced per request via ``_require_coding_enabled``.  When it is
+    ``false`` every ``/api/coding/*`` path returns 404 — tgw-prod's item-only
+    posture.
+
     *get_cfg* is re-read on every request so a config reload takes effect.
     *auth_dependency* is the item server's operator ``Depends(_require_auth)``.
     """
+
+    def _require_coding_enabled() -> None:
+        if not coding_routes_enabled(get_cfg()):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+
+    ENABLED = Depends(_require_coding_enabled)
     AUTH = auth_dependency
 
     def _require_coding_worker(request: Request) -> str:
@@ -85,7 +97,7 @@ def register_coding_routes(
 
     WORKER_AUTH = Depends(_require_coding_worker)
 
-    @app.get("/api/coding/worker/requests/next")
+    @app.get("/api/coding/worker/requests/next", dependencies=[ENABLED])
     def coding_worker_next(worker_identity: str = WORKER_AUTH):
         from .coding_provision import next_request
 
@@ -94,7 +106,7 @@ def register_coding_routes(
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.post("/api/coding/requests", dependencies=[AUTH])
+    @app.post("/api/coding/requests", dependencies=[ENABLED, AUTH])
     def coding_provision_start(body: CodingProvisionStart):
         """Persist a request-safe coding job; the tgw-lib worker resolves and
         validates its local worktree envelope after claim."""
@@ -110,7 +122,7 @@ def register_coding_routes(
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.get("/api/coding/requests/{request_id}", dependencies=[AUTH])
+    @app.get("/api/coding/requests/{request_id}", dependencies=[ENABLED, AUTH])
     def coding_provision_status(request_id: str):
         from .coding_provision import get_request
 
@@ -119,7 +131,7 @@ def register_coding_routes(
         except Exception as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/api/coding/requests/{request_id}/stop", dependencies=[AUTH])
+    @app.post("/api/coding/requests/{request_id}/stop", dependencies=[ENABLED, AUTH])
     def coding_provision_stop(request_id: str):
         from .coding_provision import stop_request
 
@@ -128,7 +140,7 @@ def register_coding_routes(
         except Exception as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.get("/api/coding/access-status", dependencies=[AUTH])
+    @app.get("/api/coding/access-status", dependencies=[ENABLED, AUTH])
     def coding_access_status(request_id: str | None = None):
         from .coding_provision import access_status
 
@@ -137,7 +149,7 @@ def register_coding_routes(
         except Exception as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.get("/api/coding/worker/requests/{request_id}")
+    @app.get("/api/coding/worker/requests/{request_id}", dependencies=[ENABLED])
     def coding_worker_request(request_id: str, worker_identity: str = WORKER_AUTH):
         from .coding_provision import get_request
 
@@ -151,7 +163,7 @@ def register_coding_routes(
         except Exception as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/api/coding/worker/requests/{request_id}/claim")
+    @app.post("/api/coding/worker/requests/{request_id}/claim", dependencies=[ENABLED])
     def coding_worker_claim(request_id: str, body: CodingWorkerClaim, worker_identity: str = WORKER_AUTH):
         from .coding_provision import claim_request
 
@@ -164,7 +176,7 @@ def register_coding_routes(
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.post("/api/coding/worker/requests/{request_id}/start")
+    @app.post("/api/coding/worker/requests/{request_id}/start", dependencies=[ENABLED])
     def coding_worker_start(request_id: str, body: CodingWorkerLease, worker_identity: str = WORKER_AUTH):
         from .coding_provision import start_request
 
@@ -173,7 +185,7 @@ def register_coding_routes(
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.post("/api/coding/worker/requests/{request_id}/complete")
+    @app.post("/api/coding/worker/requests/{request_id}/complete", dependencies=[ENABLED])
     def coding_worker_complete(request_id: str, body: CodingWorkerComplete, worker_identity: str = WORKER_AUTH):
         from .coding_provision import complete_request
 
@@ -182,7 +194,7 @@ def register_coding_routes(
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.post("/api/coding/worker/requests/{request_id}/fail")
+    @app.post("/api/coding/worker/requests/{request_id}/fail", dependencies=[ENABLED])
     def coding_worker_fail(request_id: str, body: CodingWorkerFail, worker_identity: str = WORKER_AUTH):
         from .coding_provision import fail_request
 
