@@ -1,0 +1,81 @@
+{
+  "capabilities": [
+    "continual-harness.core@1",
+    "queue.durable-claims@1",
+    "evidence.immutable-receipts@1"
+  ],
+  "id": "leaf-11-1-continual-harness-core-providers@1",
+  "observations": [
+    {
+      "capability": "continual-harness.core@1",
+      "evidence": [
+        "plan-source:plan/execution/LEAF-11-1-CONTINUAL-HARNESS-CORE-v1.yaml",
+        "plan-source:plan/execution/AMENDMENT-20260904-LEAF-11-1-CONTINUAL-HARNESS-BOOTSTRAP.yaml",
+        "plan-source:plan/reconciliation/NEXT-EVOLUTION-1916-RECONCILIATION-v1.md#11.1"
+      ],
+      "provider": "continual-harness-core-bootstrap-manual-provider",
+      "state": "designed"
+    },
+    {
+      "capability": "queue.durable-claims@1",
+      "evidence": [
+        "live-observation:tgw_health.postgres.2026-09-04",
+        "live-observation:tgw coding status job leases/dedupe/dead-letter, session tgw-25 2026-09-04"
+      ],
+      "provider": "existing-tgw-coding-queue",
+      "state": "operationally_verified"
+    },
+    {
+      "capability": "evidence.immutable-receipts@1",
+      "evidence": [
+        "live-observation:tgw coding log de521ab2-f13c-42cb-9177-ec5b905f3853, session tgw-25 2026-09-04"
+      ],
+      "provider": "existing-tgw-coding-receipts",
+      "state": "operationally_verified"
+    }
+  ],
+  "plan_commit": "f7b42e66c584d20e4173d4dd948d54ca85ac6af9",
+  "plan_id": "PLAN-LEAF-11-1-CONTINUAL-HARNESS-CORE",
+  "profiles": {
+    "implementation": {
+      "minimum_state": "designed"
+    },
+    "planning": {
+      "minimum_state": "designed"
+    }
+  },
+  "providers": [
+    {
+      "id": "continual-harness-core-bootstrap-manual-provider",
+      "provides": [
+        "continual-harness.core@1"
+      ],
+      "requires": [
+        "queue.durable-claims@1",
+        "evidence.immutable-receipts@1"
+      ]
+    },
+    {
+      "id": "existing-tgw-coding-queue",
+      "provides": [
+        "queue.durable-claims@1"
+      ],
+      "requires": []
+    },
+    {
+      "id": "existing-tgw-coding-receipts",
+      "provides": [
+        "evidence.immutable-receipts@1"
+      ],
+      "requires": []
+    }
+  ],
+  "schema": "tgw-plan-provider-catalog/v1",
+  "target": {
+    "id": "leaf-11-1",
+    "profile": "planning",
+    "requires": [
+      "continual-harness.core@1"
+    ]
+  }
+}

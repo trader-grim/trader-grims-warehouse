@@ -1,0 +1,90 @@
+{
+  "closure_hash": "sha256:bce428e655d26a4a9a895d73d2317d9ee7a2f4ed4ea7fb180ae2e13430cf115a",
+  "complete": true,
+  "conformance_providers": [
+    {
+      "available": true,
+      "id": "tgw-native-exact@1",
+      "result": "selected"
+    },
+    {
+      "agreement": "not-claimed",
+      "available": false,
+      "closure_hash": null,
+      "id": "luet-adapter@1",
+      "result": "UNAVAILABLE"
+    }
+  ],
+  "conformance_verified": false,
+  "dispatchable": false,
+  "invalidated_receipts": [],
+  "phase_order": [
+    [
+      "existing-tgw-coding-queue",
+      "existing-tgw-coding-receipts"
+    ],
+    [
+      "continual-harness-core-bootstrap-manual-provider"
+    ]
+  ],
+  "plan_commit": "f7b42e66c584d20e4173d4dd948d54ca85ac6af9",
+  "rejected_alternatives": [],
+  "resolver": "tgw-native-exact@1",
+  "reusable_receipts": [
+    "live-observation:tgw coding log de521ab2-f13c-42cb-9177-ec5b905f3853, session tgw-25 2026-09-04",
+    "live-observation:tgw coding status job leases/dedupe/dead-letter, session tgw-25 2026-09-04",
+    "live-observation:tgw_health.postgres.2026-09-04",
+    "plan-source:plan/execution/AMENDMENT-20260904-LEAF-11-1-CONTINUAL-HARNESS-BOOTSTRAP.yaml",
+    "plan-source:plan/execution/LEAF-11-1-CONTINUAL-HARNESS-CORE-v1.yaml",
+    "plan-source:plan/reconciliation/NEXT-EVOLUTION-1916-RECONCILIATION-v1.md#11.1"
+  ],
+  "root": {
+    "id": "leaf-11-1",
+    "minimum_state": "designed",
+    "profile": "planning"
+  },
+  "satisfied_installed": [
+    {
+      "capability": "continual-harness.core@1",
+      "evidence": [
+        "plan-source:plan/execution/AMENDMENT-20260904-LEAF-11-1-CONTINUAL-HARNESS-BOOTSTRAP.yaml",
+        "plan-source:plan/execution/LEAF-11-1-CONTINUAL-HARNESS-CORE-v1.yaml",
+        "plan-source:plan/reconciliation/NEXT-EVOLUTION-1916-RECONCILIATION-v1.md#11.1"
+      ],
+      "provider": "continual-harness-core-bootstrap-manual-provider",
+      "state": "designed"
+    },
+    {
+      "capability": "queue.durable-claims@1",
+      "evidence": [
+        "live-observation:tgw coding status job leases/dedupe/dead-letter, session tgw-25 2026-09-04",
+        "live-observation:tgw_health.postgres.2026-09-04"
+      ],
+      "provider": "existing-tgw-coding-queue",
+      "state": "operationally_verified"
+    },
+    {
+      "capability": "evidence.immutable-receipts@1",
+      "evidence": [
+        "live-observation:tgw coding log de521ab2-f13c-42cb-9177-ec5b905f3853, session tgw-25 2026-09-04"
+      ],
+      "provider": "existing-tgw-coding-receipts",
+      "state": "operationally_verified"
+    }
+  ],
+  "schema": "tgw-plan-solution/v1",
+  "selected_alternatives": [],
+  "selected_capabilities": [
+    "continual-harness.core@1",
+    "evidence.immutable-receipts@1",
+    "queue.durable-claims@1"
+  ],
+  "selected_providers": [
+    "continual-harness-core-bootstrap-manual-provider",
+    "existing-tgw-coding-queue",
+    "existing-tgw-coding-receipts"
+  ],
+  "solution_hash": "sha256:f601fba0a4c01924f487ec9ec54c0a9bd8a351a3de2c900d0d8161b4c3de16f9",
+  "unresolved": [],
+  "work_units": []
+}
