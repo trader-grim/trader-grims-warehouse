@@ -10852,3 +10852,74 @@ def test_source_bootstrap_rejects_live_canary_without_harness(monkeypatch: pytes
     monkeypatch.setattr(module, "_unprivileged_status", lambda: b"")
     monkeypatch.setattr(module, "_git", lambda *_a: (("a" * 40) + "\n").encode())
     assert module.main(["--commit", "a" * 40, "--repair", "database", "--live-canary"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# access.unix-group privilege-blindness -> UNKNOWN, never FAIL  (Todo 1945)
+# ---------------------------------------------------------------------------
+
+
+def test_actor_path_access_flags_raises_unverifiable_on_permission_error(monkeypatch):
+    def deny_stat(self, *a, **k):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(doctor_cli.Path, "stat", deny_stat)
+    monkeypatch.setattr(
+        doctor_cli.pwd, "getpwnam",
+        lambda n: SimpleNamespace(pw_uid=4242, pw_gid=doctor_cli.grp.getgrnam("tgw-coders").gr_gid),
+    )
+    monkeypatch.setattr(
+        doctor_cli.os, "getgrouplist",
+        lambda n, g: [doctor_cli.grp.getgrnam("tgw-coders").gr_gid],
+    )
+    with pytest.raises(doctor_cli._UnverifiablePrivilege):
+        doctor_cli._actor_path_access_flags("someactor", Path("/opt/TGW/nope"), ("-r",))
+
+
+def test_probe_access_maps_unverifiable_to_none():
+    def boom(*_a):
+        raise doctor_cli._UnverifiablePrivilege("blind")
+    assert doctor_cli._probe_access(boom) is None
+    assert doctor_cli._probe_access(lambda: True) is True
+    assert doctor_cli._probe_access(lambda: False) is False
+
+
+def test_check_unix_access_reports_unknown_not_fail_when_only_unverified(monkeypatch):
+    paths = doctor_cli.DoctorPaths()
+    monkeypatch.setattr(doctor_cli, "_ordinary_coding_probe_actor", lambda _p: "db")
+    monkeypatch.setattr(
+        doctor_cli.grp, "getgrnam",
+        lambda _n: SimpleNamespace(gr_gid=983, gr_mem=["db", "codex"]),
+    )
+    monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _n: SimpleNamespace(pw_gid=983))
+    monkeypatch.setattr(doctor_cli.os, "getgrouplist", lambda _n, _g: [983])
+    # every path probe: cannot verify
+    monkeypatch.setattr(doctor_cli, "_actor_path_access", lambda *_a: (_ for _ in ()).throw(doctor_cli._UnverifiablePrivilege("blind")))
+    monkeypatch.setattr(doctor_cli, "_actor_path_access_flags", lambda *_a: (_ for _ in ()).throw(doctor_cli._UnverifiablePrivilege("blind")))
+    monkeypatch.setattr(doctor_cli, "_shared_git_directory", lambda p, _g: {"path": str(p), "exact": True})
+    monkeypatch.setattr(doctor_cli, "_inspect_shared_git_trees", lambda *_a, **_k: {"exact": True, "trees": {}})
+    monkeypatch.setattr(doctor_cli, "_coding_support_roots", lambda *_a: {"lifecycle_root": {"path": "/x", "exact": True}})
+    monkeypatch.setattr(doctor_cli, "_active_coding_worktrees", lambda _p: [])
+    r = doctor_cli.check_unix_access(paths)
+    assert r["state"] == "UNKNOWN"
+    assert r["repairable"] is False
+    assert set(r["evidence"]["unverified_actors"]) == {"db", "codex"}
+
+
+def test_check_unix_access_still_fails_on_a_real_defect(monkeypatch):
+    paths = doctor_cli.DoctorPaths()
+    monkeypatch.setattr(doctor_cli, "_ordinary_coding_probe_actor", lambda _p: "db")
+    monkeypatch.setattr(
+        doctor_cli.grp, "getgrnam",
+        lambda _n: SimpleNamespace(gr_gid=983, gr_mem=["db", "codex"]),
+    )
+    monkeypatch.setattr(doctor_cli.pwd, "getpwnam", lambda _n: SimpleNamespace(pw_gid=983))
+    monkeypatch.setattr(doctor_cli.os, "getgrouplist", lambda _n, _g: [983])
+    monkeypatch.setattr(doctor_cli, "_actor_path_access", lambda *_a: False)   # genuinely observed missing
+    monkeypatch.setattr(doctor_cli, "_actor_path_access_flags", lambda *_a: False)
+    monkeypatch.setattr(doctor_cli, "_shared_git_directory", lambda p, _g: {"path": str(p), "exact": True})
+    monkeypatch.setattr(doctor_cli, "_inspect_shared_git_trees", lambda *_a, **_k: {"exact": True, "trees": {}})
+    monkeypatch.setattr(doctor_cli, "_coding_support_roots", lambda *_a: {"lifecycle_root": {"path": "/x", "exact": True}})
+    monkeypatch.setattr(doctor_cli, "_active_coding_worktrees", lambda _p: [])
+    r = doctor_cli.check_unix_access(paths)
+    assert r["state"] == "FAIL"
+    assert r["repairable"] is True

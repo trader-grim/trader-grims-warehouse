@@ -3803,6 +3803,22 @@ def _ordinary_coding_probe_actor(paths: DoctorPaths) -> str:
     return actor
 
 
+class _UnverifiablePrivilege(Exception):
+    """A read-only Doctor probe could not observe a path because the probing
+    process itself lacks the privilege to look — not evidence the surface is
+    wrong (Todo 1945). Callers record the probe as unverified; a check FAILs
+    only on a genuinely observed defect, never on the observer's blindness.
+    """
+
+
+def _probe_access(fn: Callable[..., bool], *args: Any) -> bool | None:
+    """Run an access probe; return None when it could not be verified."""
+    try:
+        return fn(*args)
+    except _UnverifiablePrivilege:
+        return None
+
+
 def _actor_path_access(actor: str, path: Path) -> bool:
     return _actor_path_access_flags(actor, path, ("-r", "-w", "-x"))
 
@@ -3838,6 +3854,11 @@ def _actor_path_access_flags(
         return False
     try:
         observed = path.stat(follow_symlinks=False)
+    except PermissionError as exc:
+        # The probing process (e.g. `db` running auto-repair) cannot traverse
+        # to this path.  That says nothing about whether the tgw-coders actor
+        # can reach it via the group; report unverified, never a defect.
+        raise _UnverifiablePrivilege(f"{path}: {exc}") from exc
     except OSError:
         return False
     if stat.S_ISLNK(observed.st_mode):
@@ -4014,13 +4035,17 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
             memberships = set(os.getgrouplist(name, record.pw_gid))
             member = group.gr_gid in memberships or name in group.gr_mem
             access = {
-                "git_common": _actor_path_access(name, git_common),
-                "worktree_root": _actor_path_access(name, paths.worktrees),
+                "git_common": _probe_access(_actor_path_access, name, git_common),
+                "worktree_root": _probe_access(_actor_path_access, name, paths.worktrees),
             }
             actors[name] = {
                 "member": member,
                 "access": access,
-                "exact": member and all(access.values()),
+                # genuine defect: a member observed without the access, or a
+                # non-member.  None = the probe could not look (Todo 1945).
+                "defect": (not member) or any(v is False for v in access.values()),
+                "unverified": any(v is None for v in access.values()),
+                "exact": member and all(v is True for v in access.values()),
             }
         directories = {
             "repository": _shared_git_directory(paths.repository, group.gr_gid),
@@ -4044,26 +4069,56 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
                     if key == "root_effect_root" and name != "db"
                     else ("-r", "-w", "-x")
                 )
-                support_access[key] = _actor_path_access_flags(
-                    name, Path(row["path"]), flags
+                support_access[key] = _probe_access(
+                    _actor_path_access_flags, name, Path(row["path"]), flags
                 )
             worktree_access = {
-                str(path): _actor_path_access(name, path)
+                str(path): _probe_access(_actor_path_access, name, path)
                 for path in active_worktrees
             }
             actor_row["support_root_access"] = support_access
             actor_row["active_worktree_access"] = worktree_access
+            probes = list(support_access.values()) + list(worktree_access.values())
+            actor_row["defect"] = actor_row["defect"] or any(v is False for v in probes)
+            actor_row["unverified"] = actor_row["unverified"] or any(v is None for v in probes)
             actor_row["exact"] = (
-                actor_row["exact"]
-                and all(support_access.values())
-                and all(worktree_access.values())
+                actor_row["exact"] and all(v is True for v in probes)
             )
-        exact = all(row["exact"] for row in actors.values()) and all(row["exact"] for row in directories.values()) and shared_trees["exact"] and all(row["exact"] for row in protected_roots.values())
+        # A genuinely observed defect anywhere -> FAIL.  Otherwise, if some
+        # probe could not be verified (the check runs as `db`, which cannot
+        # traverse a codex/claude-owned path) -> UNKNOWN, never FAIL (Todo
+        # 1945: FAIL must mean the surface is wrong, not the observer blind).
+        # This is what unblocks the tgw-doctor-auto-repair timer.
+        defect = (
+            any(row["defect"] for row in actors.values())
+            or not all(row["exact"] for row in directories.values())
+            or not shared_trees["exact"]
+            or not all(row["exact"] for row in protected_roots.values())
+        )
+        exact = (
+            not defect
+            and all(row["exact"] for row in actors.values())
+            and not any(row["unverified"] for row in actors.values())
+        )
+        unverified_actors = sorted(
+            name for name, row in actors.items() if row["unverified"] and not row["defect"]
+        )
+        if defect:
+            state, detail = "FAIL", "ordinary Unix tgw-coders access or shared Git directories differ"
+        elif exact:
+            state, detail = "PASS", "ordinary Unix tgw-coders core, support-root, and in-flight worktree access is exact"
+        else:
+            state, detail = "UNKNOWN", (
+                "tgw-coders access surface is not fully verifiable from this "
+                f"observer ({actor}); unverified: {', '.join(unverified_actors) or 'paths'}. "
+                "No defect observed."
+            )
         return _check(
             "access.unix-group",
-            "PASS" if exact else "FAIL",
-            "ordinary Unix tgw-coders core, support-root, and in-flight worktree access is exact" if exact else "ordinary Unix tgw-coders access or shared Git directories differ",
+            state,
+            detail,
             evidence={
+                "unverified_actors": unverified_actors,
                 "actor": actor,
                 "group": "tgw-coders",
                 "group_gid": group.gr_gid,
@@ -4074,7 +4129,11 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
                 "protected_coding_roots": protected_roots,
                 "active_coding_worktrees": [str(path) for path in active_worktrees],
             },
-            repair=None if exact else _privileged_repair_action(paths, "unix-git-access"),
+            repair=(
+                _privileged_repair_action(paths, "unix-git-access")
+                if state == "FAIL"
+                else None
+            ),
         )
     except Exception as exc:
         return _failed(
