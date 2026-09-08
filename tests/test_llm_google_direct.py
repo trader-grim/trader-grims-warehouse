@@ -1,18 +1,19 @@
-"""Tests for the direct-Google (google-genai SDK) call path in apis/llm.py
-(session 41): a synchronous alternative to routing Gemini calls through
-OpenRouter's markup, with automatic fallback to OpenRouter on any failure so
-a Google-side outage/quota/auth error never dead-letters a job.
+"""Tests for the direct-Google (Gemini generateContent REST) call path in
+apis/llm.py: a plain-`requests` call with the Google API key — the same shape
+as every other provider, no google-genai SDK (the SDK is only for the async
+Batch pipeline in tgw.apis.google_genai). A Google failure falls through the
+provider chain; it never dead-letters a job.
 
-All SDK calls are mocked — tests pass completely offline without the
-google-genai package installed.
+All HTTP is mocked — tests pass completely offline.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import json as _json
 from typing import Any, Dict
 
 import pytest
+import requests
 
 import tgw.apis.llm as llm_mod
 
@@ -24,158 +25,168 @@ def _cfg(tmp_path) -> Dict[str, Any]:
     }}
 
 
-class _FakeUsage:
-    def __init__(self, prompt=10, completion=20, total=30):
-        self.prompt_token_count = prompt
-        self.candidates_token_count = completion
-        self.total_token_count = total
+def _ok_body(text='{"ok": true}', *, prompt=10, completion=20, total=30):
+    return {
+        'candidates': [{
+            'content': {'role': 'model', 'parts': [{'text': text}]},
+            'finishReason': 'STOP',
+        }],
+        'usageMetadata': {
+            'promptTokenCount': prompt,
+            'candidatesTokenCount': completion,
+            'totalTokenCount': total,
+        },
+    }
 
 
-class _FakeResponse:
-    def __init__(self, text='{"ok": true}', usage=None):
-        self.text = text
-        self.usage_metadata = usage if usage is not None else _FakeUsage()
+class _FakeHTTPResponse:
+    def __init__(self, *, status=200, body=None, text=None):
+        self.status_code = status
+        self._body = _ok_body() if body is None else body
+        self.text = text if text is not None else _json.dumps(self._body)
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f'{self.status_code}', response=self)
 
 
-class _FakeModels:
-    def __init__(self, response=None, exc=None, calls=None):
-        self._response = response
-        self._exc = exc
-        self._calls = calls if calls is not None else []
+def _patch_google_post(monkeypatch, *responses, capture=None):
+    """Patch llm_mod.requests.post to hand back *responses* in order (the last
+    repeats). *capture* (a list) collects {url, json, headers} per call."""
+    seq = list(responses) or [_FakeHTTPResponse()]
+    calls = capture if capture is not None else []
 
-    def generate_content(self, **kwargs):
-        self._calls.append(kwargs)
-        if self._exc is not None:
-            raise self._exc
-        return self._response
+    def _post(url, headers=None, json=None, timeout=None):
+        calls.append({'url': url, 'json': json, 'headers': headers})
+        return seq[min(len(calls) - 1, len(seq) - 1)]
 
-
-class _FakeClient:
-    def __init__(self, models):
-        self.models = models
-
-
-def _patch_genai(monkeypatch, response=None, exc=None, calls=None):
-    fake_models = _FakeModels(response=response or _FakeResponse(), exc=exc, calls=calls)
-    fake_client = _FakeClient(fake_models)
-    fake_genai_module = SimpleNamespace(
-        Client=lambda api_key, http_options=None: fake_client,
-    )
-
-    monkeypatch.setattr('tgw.apis.google_genai._require_genai', lambda: fake_genai_module)
+    monkeypatch.setattr(llm_mod.requests, 'post', _post)
     monkeypatch.setattr('tgw.apis.google_genai.load_google_key', lambda cfg: 'fake-key')
-    return fake_models
+    return calls
 
 
 class TestCallGoogleDirect:
     def test_returns_text_and_usage(self, monkeypatch, tmp_path):
-        fake = _patch_genai(monkeypatch, response=_FakeResponse(text='hello world'))
-        text, usage = llm_mod._call_google_direct('gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path))
+        calls = _patch_google_post(
+            monkeypatch, _FakeHTTPResponse(body=_ok_body('hello world')))
+        text, usage = llm_mod._call_google_direct(
+            'gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path))
         assert text == 'hello world'
         assert usage == {'prompt_tokens': 10, 'completion_tokens': 20, 'total_tokens': 30}
-        assert len(fake._calls) == 1
+        assert len(calls) == 1
 
-    def test_sends_system_instruction_and_model_ref(self, monkeypatch, tmp_path):
-        fake = _patch_genai(monkeypatch)
-        llm_mod._call_google_direct('gemini-2.5-flash-lite', 'be terse', 'describe this', _cfg(tmp_path))
-        call = fake._calls[0]
-        assert call['model'] == 'models/gemini-2.5-flash-lite'
-        assert call['config']['system_instruction'] == 'be terse'
-        assert call['contents'][0]['parts'][-1] == {'text': 'describe this'}
+    def test_sends_system_instruction_and_model_in_url(self, monkeypatch, tmp_path):
+        calls = _patch_google_post(monkeypatch)
+        llm_mod._call_google_direct(
+            'gemini-2.5-flash-lite', 'be terse', 'describe this', _cfg(tmp_path))
+        c = calls[0]
+        assert c['url'].endswith('/models/gemini-2.5-flash-lite:generateContent')
+        assert c['headers']['x-goog-api-key'] == 'fake-key'
+        assert c['json']['systemInstruction']['parts'][0]['text'] == 'be terse'
+        assert c['json']['contents'][0]['parts'][-1] == {'text': 'describe this'}
 
     def test_sends_multiple_images_as_inline_parts(self, monkeypatch, tmp_path):
-        fake = _patch_genai(monkeypatch)
+        calls = _patch_google_post(monkeypatch)
         llm_mod._call_google_direct(
             'gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path),
-            img_b64_list=['AAA', 'BBB', 'CCC'],
-        )
-        parts = fake._calls[0]['contents'][0]['parts']
-        image_parts = [p for p in parts if 'inline_data' in p]
+            img_b64_list=['AAA', 'BBB', 'CCC'])
+        parts = calls[0]['json']['contents'][0]['parts']
+        image_parts = [p for p in parts if 'inlineData' in p]
         assert len(image_parts) == 3
-        assert image_parts[0]['inline_data']['data'] == 'AAA'
+        assert image_parts[0]['inlineData']['data'] == 'AAA'
+        assert image_parts[0]['inlineData']['mimeType'] == 'image/jpeg'
 
     def test_already_prefixed_model_not_double_prefixed(self, monkeypatch, tmp_path):
-        fake = _patch_genai(monkeypatch)
-        llm_mod._call_google_direct('models/gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path))
-        assert fake._calls[0]['model'] == 'models/gemini-2.5-flash-lite'
+        calls = _patch_google_post(monkeypatch)
+        llm_mod._call_google_direct(
+            'models/gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path))
+        assert calls[0]['url'].endswith('/models/gemini-2.5-flash-lite:generateContent')
+        assert '/models/models/' not in calls[0]['url']
 
-    def test_raises_on_persistent_failure(self, monkeypatch, tmp_path):
-        _patch_genai(monkeypatch, exc=RuntimeError('quota exhausted'))
-        with pytest.raises(RuntimeError, match='quota exhausted'):
-            llm_mod._call_google_direct('gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path), max_retries=1)
+    def test_raises_on_persistent_429(self, monkeypatch, tmp_path):
+        _patch_google_post(monkeypatch, _FakeHTTPResponse(status=429, text='rate limited'))
+        monkeypatch.setattr(llm_mod.time, 'sleep', lambda s: None)
+        with pytest.raises(requests.HTTPError, match='429'):
+            llm_mod._call_google_direct(
+                'gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path), max_retries=1)
+
+    def test_no_candidates_raises(self, monkeypatch, tmp_path):
+        _patch_google_post(monkeypatch, _FakeHTTPResponse(
+            body={'promptFeedback': {'blockReason': 'SAFETY'}}))
+        with pytest.raises(RuntimeError, match='no candidates.*SAFETY'):
+            llm_mod._call_google_direct(
+                'gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path))
 
     def test_retries_on_transient_503_then_succeeds(self, monkeypatch, tmp_path):
         """2026-07-14, Dave: a bare 503 UNAVAILABLE ("high demand... temporary")
-        fell straight through to the OpenRouter fallback with zero retry --
-        unlike 429, which already retried with backoff. 503 should retry too."""
-        calls = []
-
-        class _FlakyModels:
-            def generate_content(self, **kwargs):
-                calls.append(kwargs)
-                if len(calls) < 3:
-                    raise RuntimeError(
-                        "503 UNAVAILABLE. {'error': {'code': 503, "
-                        "'message': 'high demand', 'status': 'UNAVAILABLE'}}"
-                    )
-                return _FakeResponse(text='recovered')
-
-        fake_client = _FakeClient(_FlakyModels())
-        monkeypatch.setattr('tgw.apis.google_genai._require_genai',
-                           lambda: SimpleNamespace(
-                               Client=lambda api_key, http_options=None: fake_client,
-                           ))
-        monkeypatch.setattr('tgw.apis.google_genai.load_google_key', lambda cfg: 'fake-key')
+        fell straight through to the fallback with zero retry -- unlike 429,
+        which already retried with backoff. 503 retries with a short backoff."""
+        _patch_google_post(
+            monkeypatch,
+            _FakeHTTPResponse(status=503, text='high demand'),
+            _FakeHTTPResponse(status=503, text='high demand'),
+            _FakeHTTPResponse(body=_ok_body('recovered')),
+        )
         sleeps = []
         monkeypatch.setattr(llm_mod.time, 'sleep', lambda s: sleeps.append(s))
 
-        text, _ = llm_mod._call_google_direct('gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path))
+        text, _ = llm_mod._call_google_direct(
+            'gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path))
 
         assert text == 'recovered'
-        assert len(calls) == 3
         assert sleeps == [2, 4]  # short backoff, not the 429 15s*attempt cooldown
 
     def test_generation_config_omitted_by_default(self, monkeypatch, tmp_path):
-        """No max_output_tokens/thinking_budget passed -> generate_content's
-        config carries neither key, preserving prior behavior exactly."""
-        fake = _patch_genai(monkeypatch)
-        llm_mod._call_google_direct('gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path))
-        config = fake._calls[0]['config']
-        assert 'max_output_tokens' not in config
-        assert 'thinking_config' not in config
+        calls = _patch_google_post(monkeypatch)
+        llm_mod._call_google_direct(
+            'gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path))
+        assert 'generationConfig' not in calls[0]['json']
 
     def test_max_output_tokens_passed_through(self, monkeypatch, tmp_path):
-        fake = _patch_genai(monkeypatch)
+        calls = _patch_google_post(monkeypatch)
         llm_mod._call_google_direct(
             'gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path),
-            max_output_tokens=2048,
-        )
-        assert fake._calls[0]['config']['max_output_tokens'] == 2048
+            max_output_tokens=2048)
+        assert calls[0]['json']['generationConfig']['maxOutputTokens'] == 2048
 
     def test_thinking_budget_passed_through(self, monkeypatch, tmp_path):
         """thinking_budget=0 (PP-DEADLETTER-001 fix for gemini-2.5-flash-lite
         eating its whole output budget on invisible 'thinking' tokens)."""
-        fake = _patch_genai(monkeypatch)
+        calls = _patch_google_post(monkeypatch)
         llm_mod._call_google_direct(
             'gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path),
-            thinking_budget=0,
-        )
-        assert fake._calls[0]['config']['thinking_config'] == {'thinking_budget': 0}
+            thinking_budget=0)
+        assert calls[0]['json']['generationConfig']['thinkingConfig'] == {'thinkingBudget': 0}
 
     def test_503_does_not_feed_quota_circuit_breaker(self, monkeypatch, tmp_path):
         """A transient 503 is not quota exhaustion -- must not call
-        quota.record_429 (that's reserved for actual 429/RESOURCE_EXHAUSTED),
-        or a demand spike would incorrectly trip the llm_google cooldown."""
-        _patch_genai(monkeypatch, exc=RuntimeError('503 UNAVAILABLE'))
+        quota.record_429 (reserved for actual 429), or a demand spike would
+        wrongly trip the llm_google cooldown."""
+        _patch_google_post(monkeypatch, _FakeHTTPResponse(status=503, text='high demand'))
         recorded_429 = []
         monkeypatch.setattr('tgw.quota.record_429',
                            lambda cfg, key, detail: recorded_429.append((key, detail)))
         monkeypatch.setattr(llm_mod.time, 'sleep', lambda s: None)
 
-        with pytest.raises(RuntimeError, match='503 UNAVAILABLE'):
-            llm_mod._call_google_direct('gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path), max_retries=1)
+        with pytest.raises(requests.HTTPError, match='503'):
+            llm_mod._call_google_direct(
+                'gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path), max_retries=1)
 
         assert recorded_429 == []
+
+    def test_429_does_feed_quota_circuit_breaker(self, monkeypatch, tmp_path):
+        _patch_google_post(monkeypatch, _FakeHTTPResponse(status=429, text='RESOURCE_EXHAUSTED'))
+        recorded_429 = []
+        monkeypatch.setattr('tgw.quota.record_429',
+                           lambda cfg, key, detail: recorded_429.append(key))
+        monkeypatch.setattr(llm_mod.time, 'sleep', lambda s: None)
+        with pytest.raises(requests.HTTPError):
+            llm_mod._call_google_direct(
+                'gemini-2.5-flash-lite', 'sys', 'user', _cfg(tmp_path), max_retries=1)
+        assert recorded_429 == ['llm_google']
 
 
 class TestGetTaskGenerationConfig:

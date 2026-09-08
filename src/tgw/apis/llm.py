@@ -434,90 +434,98 @@ def _call_google_direct(
     max_output_tokens: Optional[int] = None,
     thinking_budget: Optional[int] = None,
 ) -> tuple:
-    """Call Gemini directly via the google-genai SDK — no OpenRouter markup.
+    """Call Gemini's generateContent REST API directly with the Google API key.
+
+    No SDK — the same plain-`requests` shape as every other provider here (the
+    google-genai SDK is now only needed by the async Batch pipeline in
+    tgw.apis.google_genai, which nothing in the per-item hot path calls). This
+    removes the "worker runtime is missing google-genai" failure class that had
+    every google_direct call silently falling through the chain.
 
     *model* is a bare Gemini model id (e.g. 'gemini-2.5-flash-lite'), not the
-    'google/...' OpenRouter form. Raises on any failure (missing SDK, missing
-    key, quota, network) — call_model() catches and falls back to OpenRouter.
-    Returns (text, usage_dict).
+    'google/...' OpenRouter form. img_b64_list sends the full photo set as
+    inlineData parts. Raises on any failure; call_model()'s provider chain
+    moves on. Returns (text, usage_dict).
 
     max_output_tokens/thinking_budget are optional per-task generation knobs
-    (see get_task_generation_config / tgw-models.json's per-task
-    "generation" field) — None means "leave the SDK/model default alone".
-    PP-DEADLETTER-001 (2026-07-17): before this plumbing existed, every
-    google_direct call left Gemini's "thinking" budget unset, which for
-    gemini-2.5-flash-lite can consume the entire output token budget on
-    its internal reasoning before emitting any visible text — producing
-    genuine, silent mid-JSON truncation with no error from the SDK. Setting
-    thinking_budget=0 for tasks that need bare structured-output (no
-    visible reasoning) is a config-only fix once this plumbing exists.
+    (see get_task_generation_config / tgw-models.json's per-task "generation"
+    field) — None means "leave the model default alone". PP-DEADLETTER-001
+    (2026-07-17): gemini-2.5-flash-lite's default "thinking" budget can consume
+    the entire output token budget on invisible reasoning before any visible
+    text — silent mid-JSON truncation. thinking_budget=0 in config is the fix.
     """
-    from tgw.apis.google_genai import _require_genai, load_google_key
+    from tgw.apis.google_genai import load_google_key
 
-    genai = _require_genai()
     api_key = load_google_key(cfg)
-    client = genai.Client(
-        api_key=api_key,
-        http_options={"timeout": _GOOGLE_REQUEST_TIMEOUT_S},
+    model_id = model[len('models/'):] if model.startswith('models/') else model
+    endpoint = (
+        'https://generativelanguage.googleapis.com/v1beta/models/'
+        f'{model_id}:generateContent'
     )
 
     parts: List[Dict[str, Any]] = [
-        {'inline_data': {'mime_type': 'image/jpeg', 'data': b64}}
+        {'inlineData': {'mimeType': 'image/jpeg', 'data': b64}}
         for b64 in (img_b64_list or [])
     ]
     parts.append({'text': user_prompt})
 
-    model_ref = model if model.startswith('models/') else f'models/{model}'
-
-    generation_config: Dict[str, Any] = {'system_instruction': system_prompt}
+    payload: Dict[str, Any] = {'contents': [{'role': 'user', 'parts': parts}]}
+    if system_prompt:
+        payload['systemInstruction'] = {'parts': [{'text': system_prompt}]}
+    generation_config: Dict[str, Any] = {}
     if max_output_tokens is not None:
-        generation_config['max_output_tokens'] = max_output_tokens
+        generation_config['maxOutputTokens'] = max_output_tokens
     if thinking_budget is not None:
-        generation_config['thinking_config'] = {'thinking_budget': thinking_budget}
+        generation_config['thinkingConfig'] = {'thinkingBudget': thinking_budget}
+    if generation_config:
+        payload['generationConfig'] = generation_config
+
+    headers = {'x-goog-api-key': api_key, 'Content-Type': 'application/json'}
 
     from tgw import quota
 
-    last_exc: Optional[Exception] = None
+    resp = None
     for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model=model_ref,
-                contents=[{'role': 'user', 'parts': parts}],
-                config=generation_config,
-            )
-            quota.record(cfg, 'llm_google')
-            break
-        except Exception as exc:
-            last_exc = exc
-            quota.record(cfg, 'llm_google')
-            status = getattr(getattr(exc, 'response', None), 'status_code', None)
-            exc_str = str(exc)
-            is_quota_exhausted = status == 429 or 'RESOURCE_EXHAUSTED' in exc_str
-            # 503/UNAVAILABLE ("high demand... temporary... try again later") is
-            # Google's own transient-overload signal, not quota exhaustion --
-            # don't feed it into the quota circuit breaker (record_429), just
-            # retry with a short backoff (2026-07-14, Dave: saw a bare 503 fall
-            # straight to the OpenRouter fallback with zero retry).
-            is_transient_overload = status == 503 or 'UNAVAILABLE' in exc_str
-            if is_quota_exhausted:
-                quota.record_429(cfg, 'llm_google', f'{model}: {exc_str[:150]}')
+        resp = requests.post(
+            endpoint, headers=headers, json=payload,
+            timeout=_GOOGLE_REQUEST_TIMEOUT_S,
+        )
+        quota.record(cfg, 'llm_google')
+        if resp.status_code == 429:
+            quota.record_429(cfg, 'llm_google', f'{model}: {resp.text[:150]}')
             if attempt < max_retries - 1:
-                if is_quota_exhausted:
-                    time.sleep(15 * (attempt + 1))
-                    continue
-                if is_transient_overload:
-                    time.sleep(2 * (attempt + 1))
-                    continue
-            raise
-    else:
-        raise last_exc  # pragma: no cover — loop always breaks or raises
+                time.sleep(15 * (attempt + 1))
+                continue
+        elif resp.status_code == 503:
+            # Google's own transient-overload signal ("high demand... try again
+            # later"), not quota exhaustion — short backoff, do NOT trip the
+            # llm_google circuit breaker (2026-07-14, Dave: a bare 503 used to
+            # fall straight through with zero retry).
+            if attempt < max_retries - 1:
+                time.sleep(2 * (attempt + 1))
+                continue
+        break
 
-    text = response.text or ''
-    um = getattr(response, 'usage_metadata', None)
+    resp.raise_for_status()
+    body = resp.json()
+
+    candidates = body.get('candidates') or []
+    if not candidates:
+        block = (body.get('promptFeedback') or {}).get('blockReason')
+        raise RuntimeError(
+            f'gemini {model_id}: response has no candidates'
+            + (f' (blocked: {block})' if block else f' — {str(body)[:200]}')
+        )
+    out_parts = ((candidates[0].get('content') or {}).get('parts')) or []
+    text = ''.join(
+        p.get('text', '') for p in out_parts if isinstance(p, dict)
+    )
+
+    um = body.get('usageMetadata') or {}
     usage = {
-        'prompt_tokens':     getattr(um, 'prompt_token_count', None) if um else None,
-        'completion_tokens': getattr(um, 'candidates_token_count', None) if um else None,
-        'total_tokens':      getattr(um, 'total_token_count', None) if um else None,
+        'prompt_tokens':     um.get('promptTokenCount'),
+        'completion_tokens': um.get('candidatesTokenCount'),
+        'total_tokens':      um.get('totalTokenCount'),
     }
     return text, usage
 
