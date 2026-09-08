@@ -139,6 +139,7 @@ def start(
     source_commit: str | None = None,
     message: str | None = None,
     max_rounds: int = harness_orchestrator.DEFAULT_MAX_ROUNDS,
+    executor: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch one existing Todo through the continual-harness orchestrator."""
     if isinstance(todo_id, str) and todo_id == PP_REF:
@@ -168,6 +169,8 @@ def start(
         coder_user=None,
         publisher_user="tgw-harness",
         postgres_dsn=config["postgres_dsn"],
+        executor_preference=(tuple(e.strip() for e in executor.split(",") if e.strip())
+                             if executor else ()),
     )
     outcome = result.get("outcome")
     return {
@@ -343,6 +346,7 @@ def run(args: argparse.Namespace) -> int:
                 config_path=config_path,
                 source_commit=getattr(args, "source_commit", None),
                 message=getattr(args, "message", None),
+                executor=getattr(args, "executor", None),
             )
         elif args.coding_op == "resume":
             result = resume(
@@ -398,6 +402,8 @@ def parser() -> argparse.ArgumentParser:
     start_parser.add_argument("coding_target", metavar="TODO_ID|PP_REF")
     start_parser.add_argument("--source-commit")
     start_parser.add_argument("--message", help="commit subject for the accepted task (default: from the Todo)")
+    start_parser.add_argument("--executor", help="ordered executor preference (e.g. claude,codex or stub); "
+                              "empty = model selector / default chain")
 
     resume_parser = commands.add_parser("resume", help="resume one Todo from its ledger cursor")
     resume_parser.add_argument("coding_target", metavar="TODO_ID")
