@@ -1,0 +1,258 @@
+{
+  "schema": "tgw-plan-provider-catalog/v1",
+  "id": "statemachine-002-providers@1",
+  "plan_id": "PLAN-STATEMACHINE-002",
+  "plan_commit": "0c5844818eb239a790ae03838bba91a67b1a2407",
+  "_note": "Provider state + evidence for plan/execution/STATEMACHINE-002-v1.yaml. tgw-plan/v2 reconciliation pass, session db0f55fc 2026-09-07. WE ARE HERE: A4 shipped (deployed_unverified); A1/A2/A3/A5 designed (unbuilt \u2014 but A1's inputs are already computed and discarded by workflow_evaluate); A6 is outside the solvable target, BLOCKED on offer.canonical-entity@1 / offer.live-revision@1 (PP-OFFER-001 / PP-REVISION-001, missing-doc in concepts/concepts.yaml @ 9239a24 \u2014 recover before replan).",
+  "profiles": {
+    "implementation": {
+      "minimum_state": "admitted"
+    }
+  },
+  "capabilities": [
+    "workflow.entity-position-row@1",
+    "workflow.reconcile-sweep@1",
+    "workflow.held-states@1",
+    "llm.provider-chain@1",
+    "workflow.effect-void-transition@1",
+    "workflow.offer-canonical-state@1",
+    "queue.durable-claims@1",
+    "evidence.immutable-receipts@1",
+    "item.generation-cas@1",
+    "workflow.condition-derived-convergence@1",
+    "offer.canonical-entity@1",
+    "offer.live-revision@1"
+  ],
+  "providers": [
+    {
+      "id": "tgw.queue-substrate",
+      "provides": [
+        "queue.durable-claims@1",
+        "evidence.immutable-receipts@1"
+      ],
+      "requires": [],
+      "implementation_ref": "source:src/tgw/queue",
+      "preference": 100
+    },
+    {
+      "id": "tgw.item-mutation-cas",
+      "provides": [
+        "item.generation-cas@1"
+      ],
+      "requires": [],
+      "implementation_ref": "source:src/tgw/item_mutation.py",
+      "preference": 100
+    },
+    {
+      "id": "tgw.workflow-evaluate-existing",
+      "provides": [
+        "workflow.condition-derived-convergence@1"
+      ],
+      "requires": [
+        "queue.durable-claims@1",
+        "evidence.immutable-receipts@1",
+        "item.generation-cas@1"
+      ],
+      "implementation_ref": "source:src/tgw/workers/workflow_evaluate.py",
+      "preference": 100
+    },
+    {
+      "id": "llm.failover-chain-provider",
+      "provides": [
+        "llm.provider-chain@1"
+      ],
+      "requires": [
+        "evidence.immutable-receipts@1"
+      ],
+      "implementation_ref": "source:src/tgw/apis/llm.py",
+      "preference": 100
+    },
+    {
+      "id": "a1.item-workflow-state-row",
+      "provides": [
+        "workflow.entity-position-row@1"
+      ],
+      "requires": [
+        "queue.durable-claims@1",
+        "evidence.immutable-receipts@1",
+        "item.generation-cas@1",
+        "workflow.condition-derived-convergence@1"
+      ],
+      "implementation_ref": "design:PP-STATEMACHINE-002.md#A1",
+      "preference": 100
+    },
+    {
+      "id": "a2.workflow-reconcile-sweep",
+      "provides": [
+        "workflow.reconcile-sweep@1"
+      ],
+      "requires": [
+        "workflow.entity-position-row@1",
+        "workflow.condition-derived-convergence@1"
+      ],
+      "implementation_ref": "design:PP-STATEMACHINE-002.md#A2",
+      "preference": 100
+    },
+    {
+      "id": "a3.held-states",
+      "provides": [
+        "workflow.held-states@1"
+      ],
+      "requires": [
+        "workflow.entity-position-row@1",
+        "llm.provider-chain@1"
+      ],
+      "implementation_ref": "design:PP-STATEMACHINE-002.md#A3",
+      "preference": 100
+    },
+    {
+      "id": "a5.effect-void-transition",
+      "provides": [
+        "workflow.effect-void-transition@1"
+      ],
+      "requires": [
+        "workflow.entity-position-row@1"
+      ],
+      "implementation_ref": "design:PP-STATEMACHINE-002.md#A5",
+      "preference": 100
+    },
+    {
+      "id": "a6.offer-canonical-state",
+      "provides": [
+        "workflow.offer-canonical-state@1"
+      ],
+      "requires": [
+        "workflow.entity-position-row@1",
+        "item.generation-cas@1",
+        "offer.canonical-entity@1",
+        "offer.live-revision@1"
+      ],
+      "implementation_ref": "design:PP-STATEMACHINE-002.md#A6",
+      "preference": 100
+    },
+    {
+      "id": "a6.offer-editor-lock-provider",
+      "provides": [
+        "workflow.offer-canonical-state@1"
+      ],
+      "requires": [],
+      "status": "rejected",
+      "rejection": "listing path is draft->upload->stage->publish, 4 async jobs / ~3 min, an eBay round-trip each; a short editor lock is a non-starter and a DB lock across those awaits deadlocks the pipeline (Dave 2026-09-07). Replaced by optimistic field-scoped CAS in a6.offer-canonical-state."
+    },
+    {
+      "id": "pp-offer-001.canonical-entity",
+      "provides": [
+        "offer.canonical-entity@1"
+      ],
+      "requires": [],
+      "status": "blocked",
+      "blocked_reason": "PP-OFFER-001 is missing-doc (concepts/concepts.yaml @ 9239a24): referenced by TGW-Master-Plan, no admitting document found anywhere searched. Policy: recover/reconcile before replan. The A6 offer-object model (ebay_offer_entity, draft_listing, draft_category concepts) belongs here."
+    },
+    {
+      "id": "pp-revision-001.live-revision",
+      "provides": [
+        "offer.live-revision@1"
+      ],
+      "requires": [],
+      "status": "blocked",
+      "blocked_reason": "PP-REVISION-001 is missing-doc (concepts/concepts.yaml @ 9239a24). Owns revising a published offer in place (revision.py _SUPPORTED_FIELDS today has no category_id; a live listing's category is not revisable \u2014 see the tgw202505131312585 / tgw202105090934261 evidence in PP-STATEMACHINE-002.md A6)."
+    }
+  ],
+  "observations": [
+    {
+      "capability": "queue.durable-claims@1",
+      "provider": "tgw.queue-substrate",
+      "state": "operationally_verified",
+      "evidence": [
+        "source:src/tgw/queue",
+        "deployment:tgw-prod-queue-live",
+        "plan-ref:PP-STATEMACHINE-001"
+      ]
+    },
+    {
+      "capability": "evidence.immutable-receipts@1",
+      "provider": "tgw.queue-substrate",
+      "state": "operationally_verified",
+      "evidence": [
+        "source:src/tgw/queue/state_machine.py",
+        "deployment:tgw-prod-queue-live"
+      ]
+    },
+    {
+      "capability": "item.generation-cas@1",
+      "provider": "tgw.item-mutation-cas",
+      "state": "deployed_unverified",
+      "evidence": [
+        "source:src/tgw/item_mutation.py",
+        "source:src/tgw/http_server.py#_apply_operator_patch_cas",
+        "deployment:tgw-prod-operator-commands-live"
+      ]
+    },
+    {
+      "capability": "workflow.condition-derived-convergence@1",
+      "provider": "tgw.workflow-evaluate-existing",
+      "state": "deployed_unverified",
+      "evidence": [
+        "source:src/tgw/workers/workflow_evaluate.py",
+        "deployment:tgw-prod-workflow-evaluate-live",
+        "plan-ref:PP-WORKFLOW-001"
+      ],
+      "note": "Already computes every field the A1 item_workflow_state row needs and discards them. A1 = add persistence to an existing computation."
+    },
+    {
+      "capability": "llm.provider-chain@1",
+      "provider": "llm.failover-chain-provider",
+      "state": "deployed_unverified",
+      "evidence": [
+        "deployment-generation:llm-failover-3885e635f-20260907",
+        "source-commit:c05db07856851f4faf2352342b2c9e25d25f6b53",
+        "test:tests/test_llm_failover_chain.py"
+      ],
+      "note": "Shipped as a Todo-root bounded fix (AMENDMENT-20260907-STATEMACHINE-002-A4-OPENROUTER-DEMOTED). Workers restarted 2026-09-07; one ebay_draft cycle observed walking the chain, zero FALLING BACK TO OPENROUTER, zero new dead-letters. Not a representative multi-item proof."
+    },
+    {
+      "capability": "workflow.entity-position-row@1",
+      "provider": "a1.item-workflow-state-row",
+      "state": "designed",
+      "evidence": [
+        "plan-ref:PP-STATEMACHINE-002.md#A1",
+        "concept:concepts/concepts.yaml#status"
+      ]
+    },
+    {
+      "capability": "workflow.reconcile-sweep@1",
+      "provider": "a2.workflow-reconcile-sweep",
+      "state": "designed",
+      "evidence": [
+        "plan-ref:PP-STATEMACHINE-002.md#A2",
+        "todo:1265"
+      ]
+    },
+    {
+      "capability": "workflow.held-states@1",
+      "provider": "a3.held-states",
+      "state": "designed",
+      "evidence": [
+        "plan-ref:PP-STATEMACHINE-002.md#A3"
+      ]
+    },
+    {
+      "capability": "workflow.effect-void-transition@1",
+      "provider": "a5.effect-void-transition",
+      "state": "designed",
+      "evidence": [
+        "plan-ref:PP-STATEMACHINE-002.md#A5"
+      ]
+    },
+    {
+      "capability": "workflow.offer-canonical-state@1",
+      "provider": "a6.offer-canonical-state",
+      "state": "contradictory",
+      "evidence": [
+        "item:tgw202505131312585",
+        "item:tgw202105090934261"
+      ],
+      "note": "Two prod items 2026-09-07: ebay_draft category-resolution produces category_id != aspects_category_id != eBay-live categoryId; operator category edit does not persist and revision.py cannot push it; a stale condition_enum blocks every save. Design exists (A6) but is blocked on PP-OFFER-001 / PP-REVISION-001 recovery."
+    }
+  ]
+}
