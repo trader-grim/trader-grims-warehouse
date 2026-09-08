@@ -105,6 +105,63 @@ def _task_body(target: str, override: str | None, dsn: str) -> tuple[str, str]:
     raise SystemExit("a non-numeric task id requires --body")
 
 
+_DEFAULT_PYTHON = "/opt/TGW/.venvs/controller/bin/python3"
+_DEFAULT_TRAILERS = (
+    "Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+)
+
+
+def dispatch(
+    target: str,
+    *,
+    message: str,
+    body: str | None = None,
+    repository: str | Path = _REPOSITORY,
+    worktree_root: str | Path = _WORKTREE_ROOT,
+    max_rounds: int = harness_orchestrator.DEFAULT_MAX_ROUNDS,
+    self_publish: bool = False,
+    publisher_user: str = "tgw-harness",
+    coder_user: str | None = "tgw-coder",
+    executor_preference: tuple[str, ...] = (),
+    python: str = _DEFAULT_PYTHON,
+    claude_bin: str | None = None,
+    codex_bin: str | None = None,
+    postgres_dsn: str | None = None,
+    trailer_lines: tuple[str, ...] = _DEFAULT_TRAILERS,
+) -> dict[str, Any]:
+    """Drive one task through ``harness_orchestrator.run_task`` and return its
+    result dict. The single entry point shared by ``tgw-harness-run`` and the
+    ``tgw coding`` operator CLI — the orchestrator loop, the ledger, and the
+    fast-forward land onto main are the whole tgw-lib development loop
+    (LEAF-11-1 / AMENDMENT-20260905 section A)."""
+    dsn = _state_dsn(postgres_dsn)
+    harness_ledger.init(dsn)
+
+    repo = Path(repository).resolve(strict=True)
+    task_id, task_body = _task_body(target, body, dsn)
+
+    pref = tuple(e.strip() for e in executor_preference if e and e.strip())
+    executor_bin = _resolve_executor_bins({"claude": claude_bin, "codex": codex_bin})
+    runners = harness_runners.build_runners(
+        repo, worktree_root, task_body=task_body, python=python,
+        coder_user=coder_user,
+        executor_preference=(pref or None),
+        executor_bin=(executor_bin or None),
+    )
+    ref_publisher = (
+        None if self_publish else _sudo_ref_publisher(repo, publisher_user)
+    )
+    return harness_orchestrator.run_task(
+        task_id,
+        repository=repo,
+        runners=runners,
+        commit_message=message,
+        max_rounds=max_rounds,
+        ref_publisher=ref_publisher,
+        trailer_lines=trailer_lines,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="tgw-harness-run")
     parser.add_argument("target", help="Todo id (numeric) or task id (with --body)")
@@ -122,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--executor-preference", default="",
                         help="ordered executor list to try, comma-separated (e.g. claude,codex); "
                              "empty = model selector / default chain")
-    parser.add_argument("--python", default="/opt/TGW/.venvs/controller/bin/python3")
+    parser.add_argument("--python", default=_DEFAULT_PYTHON)
     parser.add_argument("--claude-bin", default=None,
                         help="absolute path to the claude executable for the coder session "
                              "(default: PATH, then known locations)")
@@ -134,42 +191,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="emit the result as JSON")
     args = parser.parse_args(argv)
 
-    dsn = _state_dsn(args.postgres_dsn)
-    harness_ledger.init(dsn)
-
-    repository = Path(args.repository).resolve(strict=True)
-    task_id, body = _task_body(args.target, args.body, dsn)
-
     pref = tuple(e.strip() for e in args.executor_preference.split(",") if e.strip())
-    executor_bin = _resolve_executor_bins({"claude": args.claude_bin, "codex": args.codex_bin})
-    runners = harness_runners.build_runners(
-        repository, args.worktree_root, task_body=body, python=args.python,
-        coder_user=(args.coder_user or None),
-        executor_preference=(pref or None),
-        executor_bin=(executor_bin or None),
-    )
-    ref_publisher = (
-        None if args.self_publish
-        else _sudo_ref_publisher(repository, args.publisher_user)
-    )
-
-    result: dict[str, Any] = harness_orchestrator.run_task(
-        task_id,
-        repository=repository,
-        runners=runners,
-        commit_message=args.message,
+    result: dict[str, Any] = dispatch(
+        args.target,
+        message=args.message,
+        body=args.body,
+        repository=args.repository,
+        worktree_root=args.worktree_root,
         max_rounds=args.max_rounds,
-        ref_publisher=ref_publisher,
-        trailer_lines=(
-            "Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
-        ),
+        self_publish=args.self_publish,
+        publisher_user=args.publisher_user,
+        coder_user=(args.coder_user or None),
+        executor_preference=pref,
+        python=args.python,
+        claude_bin=args.claude_bin,
+        codex_bin=args.codex_bin,
+        postgres_dsn=args.postgres_dsn,
     )
 
     if args.json:
         print(json.dumps(result, sort_keys=True, indent=2))
     else:
         outcome = result.get("outcome")
-        print(f"{task_id}: {outcome}")
+        print(f"{result.get('task_id', args.target)}: {outcome}")
         if outcome == "landed":
             print(f"  commit {result['commit']} on {result.get('base_ref')} after {result['rounds']} round(s)")
         elif outcome == "blocked":

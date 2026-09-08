@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import contextlib
 import inspect
 import io
 import json
@@ -19,8 +18,6 @@ from fastapi.testclient import TestClient
 
 from tgw import api, coding_cli, coding_execution, coding_provision, coding_provision_worker, http_server
 from tgw.development.coding_snapshot import serialize_snapshot
-from tgw.development.foreman import TickResult
-from tgw.development.plan_binding import execution_root_hash
 from tgw.development.treatments import CODING_TREATMENTS
 from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
@@ -1747,55 +1744,38 @@ def test_coding_cli_access_status_reads_only_the_local_workflow(
     assert json.loads(capsys.readouterr().out)["dependencies"]["tgw_prod"] is False
 
 
-def test_coding_cli_access_status_compacts_jobs_unless_explicitly_requested(
-    monkeypatch,
-):
-    jobs = [
-        {"job_id": "1", "state": "succeeded", "payload_json": {"large": "x" * 1000}},
-        {"job_id": "2", "state": "dead_letter", "payload_json": {"large": "y" * 1000}},
-        {"job_id": "3", "state": "succeeded", "payload_json": {"large": "z" * 1000}},
-    ]
-    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {})
-    monkeypatch.setattr(
-        coding_cli,
-        "status_command",
-        lambda _args: {
-            "ok": True,
-            "actor": "codex",
-            "group": "tgw-coders",
-            "dependencies": {"tgw_prod": False},
-        },
-    )
-    monkeypatch.setattr(
-        coding_cli,
-        "_job_state_counts",
-        lambda todo_id: {"dead_letter": 1, "succeeded": 2},
-    )
-    observed_limits = []
-    monkeypatch.setattr(
-        coding_cli,
-        "_jobs",
-        lambda todo_id, *, limit: observed_limits.append((todo_id, limit)) or jobs,
-    )
+def test_coding_cli_access_status_summarises_the_ledger_task_unless_full(monkeypatch):
+    history = [{"seq": 1, "kind": "attempt", "body": {"round": 1}}]
+    task = {
+        "task_id": "todo-1915", "status": "open", "cursor": {"round": 2},
+        "generation": 5, "owner": "harness", "lease_expires_at": None,
+        "updated_at": None,
+    }
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {
+        "postgres_dsn": "dbname=x",
+        "coding": {"repository_root": "/r", "worktree_root": "/w"},
+    })
+    monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
+    monkeypatch.setattr(coding_cli.harness_ledger, "read_task", lambda tid: dict(task))
+    seen = []
+    monkeypatch.setattr(coding_cli.harness_ledger, "history",
+                        lambda tid: seen.append(tid) or history)
 
     compact = coding_cli.access_status(1915, config_path="disposable")
-    assert compact["schema"] == "tgw-local-coding-access-status/v1"
-    assert compact["job_count"] == 3
-    assert compact["job_state_counts"] == {"dead_letter": 1, "succeeded": 2}
+    assert compact["schema"] == "tgw-local-coding-access-status/v2"
+    assert compact["actor"] == "codex" and compact["group"] == "tgw-coders"
+    assert compact["todo_id"] == 1915
+    assert compact["task"]["status"] == "open"
     assert compact["jobs_included"] is False
-    assert "jobs" not in compact
-    assert observed_limits == []
+    assert "history" not in compact
+    assert seen == []
 
-    full = coding_cli.access_status(
-        1915, config_path="disposable", full_jobs=True
-    )
+    full = coding_cli.access_status(1915, config_path="disposable", full_jobs=True)
     assert full["jobs_included"] is True
-    assert full["jobs"] == jobs
-    assert observed_limits == [(1915, 3)]
+    assert full["history"] == history
+    assert seen == ["todo-1915"]
 
-    parsed = coding_cli.parser().parse_args(
-        ["access-status", "1915", "--full-jobs"]
-    )
+    parsed = coding_cli.parser().parse_args(["access-status", "1915", "--full-jobs"])
     assert parsed.full_jobs is True
 
 
@@ -2010,339 +1990,67 @@ def test_coding_cli_entrypoint_accepts_positional_todo_id(monkeypatch):
     assert seen["object_generation"] is None
 
 
-def test_local_coding_start_binds_and_ticks_only_the_selected_todo(monkeypatch):
+def test_local_coding_start_dispatches_the_todo_through_the_orchestrator(monkeypatch):
     observed = {}
-    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {}})
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {
+        "postgres_dsn": "dbname=x",
+        "coding": {"repository_root": "/repo", "worktree_root": "/wt"},
+    })
     monkeypatch.setattr(coding_cli.todo, "todo_get", lambda todo_id: {
-        "id": todo_id,
-        "body": "build the operator CLI",
-        "priority": 3,
-        "done_at": None,
+        "id": todo_id, "body": "build the operator CLI", "priority": 3, "done_at": None,
     })
     monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
-    monkeypatch.setattr(
-        coding_cli,
-        "bind_command",
-        lambda args: {
-            "binding": {
-                "worktree": "/opt/TGW/var/worktrees/todo-1732-plan-test",
-                "worktree_identity": {"branch": "coding/codex/todo-1732-plan-test"},
-                "source_commit": "a" * 40,
-                "plan_commit": "b" * 40,
-                "solution_hash": "sha256:" + "c" * 64,
-            }
-        },
-    )
 
-    def local_tick(_config, *, todo_ids):
-        observed["todo_ids"] = todo_ids
-        return TickResult(dispatched=1)
+    def fake_dispatch(task_id, **kwargs):
+        observed.update(task_id=task_id, **kwargs)
+        return {"outcome": "landed", "task_id": task_id, "commit": "c" * 40, "rounds": 1}
 
-    monkeypatch.setattr(coding_cli, "tick", local_tick)
-    monkeypatch.setattr(coding_cli, "_jobs", lambda todo_id, *, limit: [{"todo_id": todo_id}])
-    monkeypatch.setattr(
-        coding_cli,
-        "source_tree",
-        lambda path, commit: observed.update(source_tree=(path, commit)) or "d" * 40,
-    )
-    monkeypatch.setattr(
-        coding_cli,
-        "exclusive_worktree_lease",
-        lambda path: observed.update(lease=path) or contextlib.nullcontext(),
-    )
-    classifications = []
-    monkeypatch.setattr(
-        coding_cli,
-        "classify",
-        lambda path, expected: classifications.append((path, expected))
-        or {"state": "ABANDONED_CLEAN"},
-    )
+    monkeypatch.setattr(coding_cli.harness_cli, "dispatch", fake_dispatch)
 
     result = coding_cli.start(1732, config_path=Path("/tmp/coding.json"))
 
     assert result["ok"] is True
-    assert result["worktree"] == "/opt/TGW/var/worktrees/todo-1732-plan-test"
-    assert result["session"]["codex"] == ["codex", "-C", result["worktree"]]
+    assert result["todo_id"] == 1732
+    assert result["task_id"] == "todo-1732"
+    assert result["outcome"] == "landed"
     assert result["dependencies"] == {
-        "tgw_prod": False,
-        "ssh": False,
-        "sudo": False,
-        "remote_provision_api": False,
-        "approval_card": False,
+        "tgw_prod": False, "ssh": False, "sudo": False,
+        "remote_provision_api": False, "approval_card": False,
     }
-    assert observed["todo_ids"] == {1732}
-    worktree = Path(result["worktree"])
-    assert observed["source_tree"] == (worktree, "a" * 40)
-    assert observed["lease"] == worktree
-    assert [path for path, _expected in classifications] == [worktree, worktree]
-    assert all(expected["source_tree"] == "d" * 40 for _path, expected in classifications)
+    assert observed["task_id"] == "todo-1732"
+    assert observed["body"] == "build the operator CLI"
+    assert observed["message"].startswith("Todo 1732:")
+    assert observed["repository"] == "/repo"
+    assert observed["coder_user"] is None  # supervised CLI runs as the invoking coder
 
 
-def test_completed_todo_coding_start_allocates_no_work(monkeypatch):
+def test_completed_todo_coding_start_dispatches_nothing(monkeypatch):
     monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {}})
     monkeypatch.setattr(coding_cli.todo, "todo_get", lambda todo_id: {
         "id": todo_id, "body": "already shipped", "priority": 3,
         "done_at": "2026-08-26T00:00:00Z",
     })
-    monkeypatch.setattr(coding_cli, "bind_command", lambda _args: pytest.fail("allocated work"))
-    monkeypatch.setattr(coding_cli, "tick", lambda *_args, **_kwargs: pytest.fail("dispatched work"))
+    monkeypatch.setattr(coding_cli.harness_cli, "dispatch",
+                        lambda *_a, **_k: pytest.fail("dispatched a completed Todo"))
 
     with pytest.raises(coding_cli.CodingCLIError, match="already complete"):
         coding_cli.start(1829, config_path=Path("/tmp/coding.json"))
 
 
-def test_1747_resume_validates_before_cas_preserves_bytes_and_repeat_dispatches_zero(
-    tmp_path, monkeypatch,
-):
-    worktree = tmp_path / "todo-1747-plan-historical"
-    worktree.mkdir()
-    original = worktree / "src/tgw/coding_cli.py"
-    original.parent.mkdir(parents=True)
-    original.write_bytes(b"historical partial bytes\n")
-    historical = {
-        "worktree": str(worktree),
-        "worktree_identity": {"branch": "coding/codex/todo-1747-plan-historical"},
-        "source_commit": "a" * 40, "plan_commit": "b" * 40,
-        "solution_hash": "sha256:" + "c" * 64,
-    }
-    accidental = {
-        **historical, "worktree": str(tmp_path / "todo-1747-plan-accidental"),
-        "worktree_identity": {"created": True, "head": coding_cli._ACCIDENTAL_1747_SOURCE,
-                              "actor": "codex"},
-        "source_commit": coding_cli._ACCIDENTAL_1747_SOURCE,
-    }
-    row = {"id": 1747, "agent": "codex", "body": "resume", "priority": 1,
-           "done_at": None, "status_note": json.dumps(accidental)}
-    jobs = [{"payload": {"plan_binding": historical}} for _ in range(2)]
-    events = []
-    monkeypatch.setattr(coding_cli, "LEGACY_1747", worktree)
-    monkeypatch.setattr(coding_cli, "_ACCIDENTAL_1747_WORKTREE", Path(accidental["worktree"]))
-    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {}})
-    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda _todo_id: dict(row))
-    monkeypatch.setattr(coding_cli, "_legacy_1747_jobs", lambda: jobs)
-    monkeypatch.setattr(coding_cli, "validate_plan_binding", lambda value, **_kwargs: dict(value))
-    monkeypatch.setattr(coding_cli, "parse_plan_binding", lambda value, **_kwargs: json.loads(value))
-    monkeypatch.setattr(coding_cli, "bind_command", lambda *_args: pytest.fail("generic bind ran"))
-    monkeypatch.setattr(coding_cli, "source_tree", lambda *_args: "d" * 40)
-    monkeypatch.setattr(coding_cli, "exclusive_worktree_lease", lambda _path: contextlib.nullcontext())
-
-    def migrate(path, binding, durable):
-        assert original.read_bytes() == b"historical partial bytes\n"
-        if not events:
-            assert row["status_note"] == json.dumps(accidental)
-        assert durable is jobs and binding["worktree"] == str(worktree)
-        events.append("migrate")
-        return path / ".tgw-coding-preservation/todo-1747-migration.json"
-
-    def cas(_todo_id, expected, restored, **_kwargs):
-        assert events == ["migrate"] and expected == row["status_note"]
-        row["status_note"] = restored
-        events.append("cas")
-        return {"ok": True}
-
-    monkeypatch.setattr(coding_cli, "migrate_todo_1747", migrate)
-    monkeypatch.setattr(coding_cli.todo, "todo_compare_and_set_status_note", cas)
-    classifications = iter((
-        {"state": "RESUMABLE_PARTIAL", "resume_of": "sha256:attempt", "fingerprint": "sha256:fingerprint"},
-        {"state": "RESUMABLE_PARTIAL", "resume_of": "sha256:attempt", "fingerprint": "sha256:fingerprint"},
-        {"state": "CLOSED_CANDIDATE"},
-        {"state": "CLOSED_CANDIDATE"},
-    ))
-    monkeypatch.setattr(coding_cli, "classify", lambda *_args: next(classifications))
-    tick_calls = []
-    monkeypatch.setattr(coding_cli, "tick", lambda *_args, **_kwargs: tick_calls.append(True) or TickResult(dispatched=1))
-    monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
-    first = coding_cli.resume(1747, config_path=tmp_path / "config.json")
-    second = coding_cli.resume(1747, config_path=tmp_path / "config.json")
-    assert first["foreman"]["dispatched"] == 1 and second["foreman"]["dispatched"] == 0
-    assert tick_calls == [True]
-    assert events == ["migrate", "cas", "migrate"]
-    assert original.read_bytes() == b"historical partial bytes\n"
-    assert first["dependencies"] == {"tgw_prod": False, "ssh": False, "sudo": False,
-                                     "remote_provision_api": False, "approval_card": False}
-
-
-def test_1747_resume_refuses_other_status_binding_before_any_effect(tmp_path, monkeypatch):
-    historical = {"worktree": str(tmp_path / "historical")}
-    item = {"id": 1747, "agent": "codex", "status_note": json.dumps({
-        "worktree": str(tmp_path / "other"), "worktree_identity": {"created": True},
-        "source_commit": "e" * 40,
-    })}
-    jobs = [{"payload": {"plan_binding": historical}} for _ in range(2)]
-    monkeypatch.setattr(coding_cli, "LEGACY_1747", Path(historical["worktree"]))
-    monkeypatch.setattr(coding_cli, "validate_plan_binding", lambda value, **_kwargs: dict(value))
-    monkeypatch.setattr(coding_cli, "parse_plan_binding", lambda value, **_kwargs: json.loads(value))
-    with pytest.raises(coding_cli.CodingCLIError, match="not the observed accidental"):
-        coding_cli._legacy_1747_binding(item, jobs)
-
-
-def test_1792_resume_reuses_106388_attempt_after_canonical_source_advanced(
-    tmp_path, monkeypatch,
-):
-    worktree = tmp_path / "todo-1792-plan-original-106388"
-    worktree.mkdir()
-    root = {"schema": "tgw-execution-root/v1", "kind": "todo", "todo_id": 1792}
-    root["identity_hash"] = execution_root_hash(root)
-    binding = {
-        "schema": "tgw-plan-coding-todo/v1", "todo_id": 1792,
-        "plan_commit": "b" * 40, "solution_hash": "sha256:" + "c" * 64,
-        "closure_hash": "sha256:" + "e" * 64, "capability": "stop",
-        "treatment_id": "establish:stop", "idempotency_key": "todo-1792",
-        "source_commit": "106388656233d4273be3d052725e8f97cb00d203",
-        "worktree": str(worktree), "execution_root": root,
-        "worktree_identity": {
-            "branch": "coding/codex/todo-1792-plan-original",
-            "created": True, "head": "106388656233d4273be3d052725e8f97cb00d203",
-            "actor": "codex",
-        },
-    }
-    item = {"id": 1792, "agent": "codex", "body": "Stop", "priority": 1,
-            "done_at": None, "status_note": json.dumps(binding)}
-    job = {"payload_json": {"todo_id": 1792, "plan_binding": binding}}
-    effects = []
-    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {}})
-    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda _todo_id: item)
-    monkeypatch.setattr(coding_cli, "_jobs", lambda *_a, **_k: [job])
-    monkeypatch.setattr(coding_cli, "source_tree", lambda *_a: "d" * 40)
-    monkeypatch.setattr(
-        coding_cli, "exclusive_worktree_lease", lambda _path: contextlib.nullcontext(),
-    )
-    monkeypatch.setattr(coding_cli, "classify", lambda *_a: {
-        "state": "RESUMABLE_PARTIAL", "resume_of": "sha256:attempt",
-        "fingerprint": "sha256:fingerprint",
+def test_coding_resume_is_start_on_the_same_ledger_task(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {
+        "postgres_dsn": "dbname=x", "coding": {"repository_root": "/r", "worktree_root": "/w"},
     })
-    monkeypatch.setattr(
-        coding_cli, "bind_command",
-        lambda *_a, **_k: pytest.fail("current ebc source was bound"),
-    )
-    monkeypatch.setattr(coding_cli, "tick", lambda config, **_kwargs: (
-        effects.append(config.resume_bindings), TickResult(dispatched=1)
-    )[1])
-    monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
-
-    result = coding_cli.resume(1792, config_path=tmp_path / "config.json")
-
-    assert result["worktree"] == str(worktree)
-    assert result["source_commit"] == binding["source_commit"]
-    assert effects == [{1792: {
-        "resume_of": "sha256:attempt", "resume_fingerprint": "sha256:fingerprint",
-    }}]
-
-
-@pytest.mark.parametrize("state", ["CLOSED_CANDIDATE", "UNSAFE_DIRTY"])
-def test_general_resume_refuses_non_resumable_history_before_bind_or_dispatch(
-    tmp_path, monkeypatch, state,
-):
-    worktree = tmp_path / "historical"
-    worktree.mkdir()
-    root = {"schema": "tgw-execution-root/v1", "kind": "todo", "todo_id": 1792}
-    root["identity_hash"] = execution_root_hash(root)
-    binding = {
-        "schema": "tgw-plan-coding-todo/v1", "todo_id": 1792,
-        "plan_commit": "b" * 40, "solution_hash": "sha256:" + "c" * 64,
-        "closure_hash": "sha256:" + "e" * 64, "capability": "stop",
-        "treatment_id": "establish:stop", "idempotency_key": "todo-1792",
-        "source_commit": "a" * 40, "worktree": str(worktree), "execution_root": root,
-        "worktree_identity": {"branch": "coding/codex/historical"},
-    }
-    item = {"id": 1792, "agent": "codex", "body": "Stop", "priority": 1,
-            "done_at": None, "status_note": json.dumps(binding)}
-    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {}})
-    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda _todo_id: item)
-    monkeypatch.setattr(coding_cli, "_jobs", lambda *_a, **_k: [
-        {"payload_json": {"plan_binding": binding}}
-    ])
-    monkeypatch.setattr(coding_cli, "source_tree", lambda *_a: "d" * 40)
-    monkeypatch.setattr(coding_cli, "classify", lambda *_a: {"state": state})
-    monkeypatch.setattr(coding_cli, "bind_command", lambda *_a, **_k: effects.append("bind"))
-    monkeypatch.setattr(coding_cli, "tick", lambda *_a, **_k: effects.append("dispatch"))
-    effects = []
-
-    with pytest.raises(coding_cli.CodingCLIError, match="zero effects"):
-        coding_cli.resume(1792, config_path=tmp_path / "config.json")
-    assert effects == []
-
-
-def test_local_coding_start_projects_missing_todo_from_standalone_plan(monkeypatch):
-    projected = {
-        "id": 1732,
-        "agent": "claude",
-        "priority": 3,
-        "body": "build the operator CLI",
-        "source": "standalone-plan-taskboard@" + "a" * 40,
-        "pp_ref": "PP-WORKFLOW-001",
-        "depends_on": [],
-        "plan_anchor": None,
-        "reasoning": "normal",
-        "plan_repository": "/opt/TGW/library/plans",
-        "plan_evidence_commit": "a" * 40,
-        "taskboard_path": "plan/TGW-Taskboard.md",
-        "taskboard_blob": "b" * 40,
-    }
-    observed = {}
-    rows = iter([None, projected])
-    monkeypatch.setattr(
-        coding_cli,
-        "_initialize",
-        lambda _path: {"coding": {}, "plan_repository_root": "/opt/TGW/library/plans"},
-    )
-    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda _todo_id: next(rows))
-    monkeypatch.setattr(
-        "tgw.development.local_workflow.load_solution",
-        lambda _path: {"plan_commit": "c" * 40},
-    )
-    monkeypatch.setattr(
-        coding_cli,
-        "resolve_plan_todo",
-        lambda todo_id, **kwargs: observed.update(todo_id=todo_id, **kwargs) or projected,
-    )
-    monkeypatch.setattr(
-        coding_cli.todo,
-        "todo_import_projection",
-        lambda item: observed.update(imported=item) or {"ok": True},
-    )
-    monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
-    monkeypatch.setattr(coding_cli, "bind_command", lambda _args: {
-        "binding": {
-            "worktree": "/opt/TGW/var/worktrees/todo-1732-plan-test",
-            "worktree_identity": {"branch": "coding/codex/todo-1732-plan-test"},
-            "source_commit": "d" * 40,
-            "plan_commit": "c" * 40,
-            "solution_hash": "sha256:" + "e" * 64,
-        }
+    monkeypatch.setattr(coding_cli.todo, "todo_get", lambda todo_id: {
+        "id": todo_id, "body": "keep going", "done_at": None,
     })
-    monkeypatch.setattr(coding_cli, "tick", lambda *_args, **_kwargs: TickResult(dispatched=1))
-    monkeypatch.setattr(coding_cli, "_jobs", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        coding_cli,
-        "source_tree",
-        lambda path, commit: observed.update(source_tree=(path, commit)) or "f" * 40,
-    )
-    monkeypatch.setattr(
-        coding_cli,
-        "exclusive_worktree_lease",
-        lambda path: observed.update(lease=path) or contextlib.nullcontext(),
-    )
-    classifications = []
-    monkeypatch.setattr(
-        coding_cli,
-        "classify",
-        lambda path, expected: classifications.append((path, expected))
-        or {"state": "ABANDONED_CLEAN"},
-    )
+    monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
+    monkeypatch.setattr(coding_cli.harness_cli, "dispatch",
+                        lambda task_id, **kw: seen.update(task_id=task_id) or {"outcome": "landed", "task_id": task_id})
 
-    result = coding_cli.start(1732, config_path=Path("/tmp/coding.json"))
-
-    assert observed["todo_id"] == 1732
-    assert observed["approved_commit"] == "c" * 40
-    assert observed["imported"] == projected
-    assert result["todo_projection"]["taskboard_blob"] == "b" * 40
-    worktree = Path(result["worktree"])
-    assert observed["source_tree"] == (worktree, "d" * 40)
-    assert observed["lease"] == worktree
-    assert [path for path, _expected in classifications] == [worktree, worktree]
-    assert all(expected["source_tree"] == "f" * 40 for _path, expected in classifications)
+    coding_cli.resume(1792, config_path=Path("/tmp/c.json"))
+    assert seen["task_id"] == "todo-1792"
 
 
 def test_execution_boundary_accepts_only_local_allowed_argv_runner(tmp_path):

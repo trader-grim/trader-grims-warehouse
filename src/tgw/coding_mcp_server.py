@@ -37,7 +37,6 @@ def _result(operation: str, function: Any, *args: Any, **kwargs: Any) -> str:
         coding_cli.CodingCLIError,
         coding_cli.LocalCodingWorkflowError,
         coding_cli.PlanTodoSourceError,
-        coding_cli.coding_lifecycle.LifecycleError,
         OSError,
         ValueError,
     ) as exc:
@@ -59,24 +58,17 @@ mcp = FastMCP(
         "dispatch through tgw-prod, coding-provision, or an approval service."
     ),
 )
-_LEGACY_START = coding_cli.start
-_LEGACY_STATUS = coding_cli.status
-
-
 @mcp.tool()
 def tgw_coding_start(todo_id: int | str, source_commit: str = "") -> str:
-    """Create/reuse one durable Plan-bound coding lifecycle.
+    """Dispatch one Todo through the continual-harness orchestrator.
 
-    The call returns after the root is durable; the continuously managed local
-    supervisor owns subsequent stage and host-restart recovery.
+    Returns the orchestrator outcome: ``landed`` (one squashed fast-forward
+    commit on main), ``already_satisfied``, ``blocked`` (supervisor handoff),
+    or ``rebind_required``.
     """
     return _result(
         "start",
-        (
-            coding_cli.start
-            if coding_cli.start is not _LEGACY_START
-            else coding_cli.lifecycle_start
-        ),
+        coding_cli.start,
         todo_id,
         config_path=_config_path(),
         source_commit=source_commit or None,
@@ -85,7 +77,7 @@ def tgw_coding_start(todo_id: int | str, source_commit: str = "") -> str:
 
 @mcp.tool()
 def tgw_coding_resume(todo_id: int, source_commit: str = "") -> str:
-    """Reopen the same exact RESUMABLE_PARTIAL lifecycle and implementation."""
+    """Resume one Todo from its durable ledger cursor."""
 
     return _result(
         "resume",
@@ -104,14 +96,10 @@ def tgw_coding_reconcile(pp_ref: str = coding_cli.PP_REF) -> str:
 
 @mcp.tool()
 def tgw_coding_status(todo_id: int | str | None = None) -> str:
-    """Return local worktree, access, Foreman, and coding-job status."""
+    """Return the local binding plus coding tasks from the harness ledger."""
     return _result(
         "status",
-        (
-            coding_cli.status
-            if coding_cli.status is not _LEGACY_STATUS
-            else coding_cli.consolidated_status
-        ),
+        coding_cli.status,
         todo_id,
         config_path=_config_path(),
     )

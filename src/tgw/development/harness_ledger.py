@@ -238,6 +238,32 @@ def read_task(task_id: str) -> dict[str, Any] | None:
             return _task_row(cur.fetchone())
 
 
+def list_tasks(
+    *,
+    statuses: Iterable[str] | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return known tasks, most recently updated first — a read-only projection
+    for the operator ``tgw coding status`` surface. Takes no lease."""
+    _ensure_schema()
+    where = ""
+    params: list[Any] = []
+    if statuses is not None:
+        status_list = list(statuses)
+        if status_list:
+            where = "WHERE status = ANY(%s)"
+            params.append(status_list)
+    params.append(max(1, limit))
+    with _conn() as con:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"SELECT {_TASK_SELECT} FROM harness_ledger_task "
+                f"{where} ORDER BY updated_at DESC LIMIT %s",
+                params,
+            )
+            return [_task_row(row) for row in cur.fetchall()]
+
+
 # --------------------------------------------------------------------------- #
 # cursor ownership: acquire, renew, release, write
 # --------------------------------------------------------------------------- #

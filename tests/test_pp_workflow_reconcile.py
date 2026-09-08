@@ -8,7 +8,6 @@ import pytest
 
 from tgw import coding_cli, coding_mcp_server
 from tgw import pp_workflow_reconcile as workflow_reconcile
-from tgw.development.foreman import TickResult
 from tgw.pp_workflow_reconcile import (
     CATALOG,
     PP_REF,
@@ -293,76 +292,21 @@ def test_catalog_receipt_can_never_source_authenticate_admission(tmp_path, monke
                   runtime_verifier=lambda **kwargs: {"verified": True, **kwargs})
 
 
-def test_fully_satisfied_pp_start_has_no_materialization(monkeypatch):
+def test_pp_start_is_read_only_reconcile_with_no_materialization(monkeypatch, tmp_path):
+    """`tgw coding start PP-WORKFLOW-001` is a pure read-only reconcile now:
+    genuinely unmet PP work goes through the tgw-plan skill, not an auto-bridge
+    (LEAF-11-1 / AMENDMENT-20260905 — no Foreman, no lifecycle store)."""
+    projection = {"ok": True, "unmet_capabilities": [], "solution": {}}
     monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": {
-        "repository_root": str(CATALOG.parents[2]), "worktree_root": str(CATALOG.parents[2]),
+        "repository_root": str(tmp_path), "worktree_root": str(tmp_path),
     }})
-    monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
     monkeypatch.setattr(coding_cli.todo, "todo_list", lambda **_kwargs: [])
-    monkeypatch.setattr(coding_cli, "reconcile_pp_workflow", lambda **_kwargs: {
-        "ok": True, "unmet_capabilities": [], "solution": {},
-    })
+    monkeypatch.setattr(coding_cli, "_pp_runtime_binding", lambda _config: {"binding": "exact"})
+    monkeypatch.setattr(coding_cli, "reconcile_pp_workflow", lambda **_kwargs: dict(projection))
     first = coding_cli.start(PP_REF)
     second = coding_cli.start(PP_REF)
-    assert first == second
-    assert first["materialized"] == []
+    assert first == second == projection
     assert coding_cli._todo_id("1740") == 1740
-
-
-def test_incomplete_pp_start_calls_explicit_bridge_only_for_unmet_work(monkeypatch, tmp_path):
-    coding = {"repository_root": str(tmp_path), "worktree_root": str(tmp_path)}
-    monkeypatch.setattr(coding_cli, "_initialize", lambda _path: {"coding": coding})
-    monkeypatch.setattr(coding_cli, "require_coder_account", lambda: "codex")
-    monkeypatch.setattr(coding_cli.todo, "todo_list", lambda **_kwargs: [])
-    solution = {
-        "plan_commit": "0" * 40, "closure_hash": "sha256:" + "1" * 64,
-        "work_units": [{"id": "establish:missing@1", "capability": "missing@1"}],
-    }
-    monkeypatch.setattr(coding_cli, "reconcile_pp_workflow", lambda **_kwargs: {
-        "ok": False, "unmet_capabilities": ["missing@1"], "solution": solution,
-    })
-    monkeypatch.setattr(coding_cli, "compile_solution_runtime", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(coding_cli, "_pp_runtime_binding", lambda _config, _source=None: {
-        "repository": tmp_path, "source_root": tmp_path, "selected_commit": "a" * 40,
-        "selected_tree": "b" * 40, "runtime_mode": "source-worktree",
-    })
-    monkeypatch.setattr(
-        __import__("tgw.development.local_workflow", fromlist=["_git"]), "_git",
-        lambda _repository, *_args: "b" * 40,
-    )
-    calls = []
-
-    def bridge(*_args, **kwargs):
-        calls.append(kwargs)
-        return {"todo_id": 42, "created": len(calls) == 1}
-
-    monkeypatch.setattr(coding_cli, "bind_leaf", bridge)
-    ticks = []
-    def tick(*_args, **kwargs):
-        ticks.append(kwargs)
-        return TickResult(dispatched=1)
-    monkeypatch.setattr(coding_cli, "tick", tick)
-    value = coding_cli.start(PP_REF, source_commit="a" * 40)
-    assert len(calls) == 1
-    assert calls[0]["execution_root"]["kind"] == "pp"
-    assert calls[0]["execution_root"]["pp_ref"] == PP_REF
-    assert calls[0]["treatment_id"] == "establish:missing@1"
-    assert calls[0]["worktree_identity"] == "unix:codex"
-    assert ticks == [{"todo_ids": {42}}]
-    assert value["ok"] and not value["reconciliation_complete"]
-    assert value["reconciliation"]["dimensions"] == {
-        "reconciliation_complete": False,
-        "operation_success": True,
-        "materialization_attempted": True,
-    }
-    assert value["materialized"] == [{"todo_id": 42, "created": True}]
-
-    monkeypatch.setattr(coding_cli, "tick", lambda *_args, **_kwargs: TickResult(errors=1))
-    failed = coding_cli.start(PP_REF, source_commit="a" * 40)
-    assert failed["materialized"] == [{"todo_id": 42, "created": False}]
-    assert not failed["ok"]
-    assert not failed["reconciliation"]["dimensions"]["operation_success"]
-    assert failed["reconciliation"]["foreman"]["errors"] == 1
 
 
 def test_cli_and_mcp_reconcile_share_configured_path(monkeypatch, tmp_path):
