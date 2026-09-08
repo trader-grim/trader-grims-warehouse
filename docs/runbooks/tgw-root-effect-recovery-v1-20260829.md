@@ -100,7 +100,7 @@ sudo /usr/local/sbin/tgw-root-effect restore-from-receipt /opt/TGW/tgw-lib/docto
 ### 3. A service is stuck
 
 ```bash
-sudo /usr/local/sbin/tgw-root-effect service-restart tgw-codex-implement-worker.service
+sudo /usr/local/sbin/tgw-root-effect service-restart tgw-plan-render-local.service
 ```
 
 Only whitelisted units are accepted.

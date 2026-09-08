@@ -91,46 +91,19 @@ _FORBIDDEN_CODING_DEPENDENCIES = (
     "execution_card",
     "actor_fleet",
 )
-_ACTIVE_CODING_UNITS = (
-    "tgw-codex-implement-worker.service",
-    "tgw-claude-review-worker.service",
-    "tgw-controller-verify-worker.service",
-    "tgw-coding-lifecycle-supervisor.service",
-    "tgw-coding-root-effect.service",
-    "tgw-coding-runtime-restart.path",
+# The coding-lifecycle apparatus units (implement/review/verify workers, the
+# orchestrator supervisor, the root-effect surface, the foreman, the
+# runtime-restart) were removed with the modules they ran
+# (LEAF-11-1.DELETE-APPARATUS C4). What remains under Doctor's eye is the Context
+# projection promotion and the auto-repair timer — infrastructure, not coding.
+_ACTIVE_MANAGED_UNITS = (
     "tgw-context-snapshot-promote.path",
-    "tgw-coding-local-foreman.timer",
     "tgw-doctor-auto-repair.timer",
 )
-_CODING_UNITS = (
-    *_ACTIVE_CODING_UNITS,
-    "tgw-coding-local-foreman.service",
-    "tgw-coding-runtime-restart.service",
+_MANAGED_UNITS = (
+    *_ACTIVE_MANAGED_UNITS,
     "tgw-context-snapshot-promote.service",
     "tgw-doctor-auto-repair.service",
-)
-# The continual-harness coding lifecycle apparatus: implement / review / verify
-# workers, the orchestrator supervisor, the root-effect surface, the foreman,
-# and the runtime-restart path.  The operator runs the coding workflow WITHOUT
-# this apparatus (PP-ROLES-001 / two-gates directive), so these units are torn
-# down on purpose.  When ONLY apparatus units are down, services.local-coding is
-# a WARN operator-notice, never a FAIL -- a FAIL here would land in
-# auto_repair_decision's operator_notices and block repair_allowed, stopping
-# tgw-doctor-auto-repair from keeping the Context snapshot, generation/launcher,
-# runtime, and database current on every main advance.  The Context and
-# plan-render units are deliberately NOT in this set: they must stay active.
-_APPARATUS_CODING_UNITS = frozenset(
-    {
-        "tgw-codex-implement-worker.service",
-        "tgw-claude-review-worker.service",
-        "tgw-controller-verify-worker.service",
-        "tgw-coding-lifecycle-supervisor.service",
-        "tgw-coding-root-effect.service",
-        "tgw-coding-runtime-restart.path",
-        "tgw-coding-runtime-restart.service",
-        "tgw-coding-local-foreman.timer",
-        "tgw-coding-local-foreman.service",
-    }
 )
 _PLAN_RENDER_UNIT = "tgw-plan-render-local.service"
 _PLAN_RENDER_DIRECTORY_MODE = 0o2770
@@ -161,56 +134,15 @@ _ARCHIVE_DISCOVERY_PRUNE = {
     "node_modules",
     "proc",
 }
-_LOCAL_WORKFLOW_ARGV = (
-    "/opt/TGW/.venvs/controller/bin/python3",
-    "-m",
-    "tgw.development.local_workflow",
-    "--config",
-    "/opt/TGW/tgw-lib/config/tgw-coding-local.json",
-)
 _UNIT_ARGV = {
-    "tgw-codex-implement-worker.service": (
-        *_LOCAL_WORKFLOW_ARGV,
-        "worker",
-        "--queue",
-        "codex-implement",
-    ),
-    "tgw-controller-verify-worker.service": (
-        *_LOCAL_WORKFLOW_ARGV,
-        "worker",
-        "--queue",
-        "controller-verify",
-    ),
-    "tgw-claude-review-worker.service": (
-        *_LOCAL_WORKFLOW_ARGV,
-        "worker",
-        "--queue",
-        "claude-review",
-    ),
-    "tgw-coding-lifecycle-supervisor.service": (
+    _PLAN_RENDER_UNIT: (
         "/opt/TGW/.venvs/controller/bin/python3",
         "-m",
-        "tgw.development.coding_lifecycle",
+        "tgw.workers.plan_render",
         "--config",
-        "/opt/TGW/tgw-lib/config/tgw-coding-local.json",
-        "--managed",
+        "/opt/TGW/tgw-lib/config/tgw-plan-render-local.json",
     ),
-    "tgw-coding-root-effect.service": (
-        "/opt/TGW/.venvs/controller/bin/python3",
-        "-m",
-        "tgw.development.coding_root_effect",
-        "--config",
-        "/opt/TGW/tgw-lib/config/tgw-coding-local.json",
-    ),
-    "tgw-coding-local-foreman.service": (*_LOCAL_WORKFLOW_ARGV, "foreman"),
 }
-_UNIT_ARGV[_PLAN_RENDER_UNIT] = (
-    "/opt/TGW/.venvs/controller/bin/python3",
-    "-m",
-    "tgw.workers.plan_render",
-    "--config",
-    "/opt/TGW/tgw-lib/config/tgw-plan-render-local.json",
-)
 
 
 class DoctorError(RuntimeError):
@@ -5267,7 +5199,7 @@ def _unit_definition(
             if loaded_exec_path != expected_argv[0] or loaded_exec_argv != expected_argv:
                 reasons.append("loaded ExecStart differs")
     process_argv: list[str] | None = None
-    if (unit in _ACTIVE_CODING_UNITS or unit == _PLAN_RENDER_UNIT) and unit.endswith(".service"):
+    if (unit in _ACTIVE_MANAGED_UNITS or unit == _PLAN_RENDER_UNIT) and unit.endswith(".service"):
         try:
             pid = int(state.get("MainPID", "0"))
         except ValueError:
@@ -5492,10 +5424,9 @@ def check_units(
     desired_commit: str | None = None,
     observe_restart_obligations: bool = True,
 ) -> dict[str, Any]:
-    repair = _privileged_repair_action(paths, "workers")
     try:
         observed = {}
-        for unit in _CODING_UNITS:
+        for unit in _MANAGED_UNITS:
             state = _unit_state(unit)
             state["restart_obligation"] = _restart_obligation_presence(
                 paths, unit
@@ -5503,12 +5434,6 @@ def check_units(
             state["definition"] = _unit_definition(
                 paths, unit, state, desired_commit=desired_commit
             )
-            if unit in _ACTIVE_CODING_UNITS and unit.endswith(".service"):
-                desired = state["definition"]["desired_commit"]
-                release = paths.runtime_root / "releases" / desired
-                state["process_runtime"] = _service_process_runtime_identity(
-                    state, release
-                )
             observed[unit] = state
         unhealthy = [
             unit
@@ -5516,75 +5441,31 @@ def check_units(
             if state.get("LoadState") != "loaded"
             or not state["definition"]["exact"]
             or (
-                unit in _ACTIVE_CODING_UNITS
+                unit in _ACTIVE_MANAGED_UNITS
                 and state.get("ActiveState") != "active"
             )
-            or not state.get("process_runtime", {"exact": True})["exact"]
             or (
                 observe_restart_obligations
                 and state["restart_obligation"]["status"] != "ABSENT"
             )
         ]
-        # An apparatus unit that is simply not running is the operator's
-        # deliberate teardown (WARN).  An apparatus unit that IS active but
-        # broken -- wrong load state, stale runtime, pending restart -- is a
-        # genuine fault (FAIL): if it runs at all it must run exactly.
-        def _apparatus_deliberately_down(unit: str, state: Mapping[str, Any]) -> bool:
-            if unit not in _APPARATUS_CODING_UNITS:
-                return False
-            if state.get("ActiveState") == "active":
-                return False
-            if state.get("LoadState") not in {"loaded", "not-found", "masked", None, ""}:
-                return False
-            if (
-                observe_restart_obligations
-                and state["restart_obligation"]["status"] != "ABSENT"
-            ):
-                return False
-            return True
-
-        apparatus_down = [
-            unit
-            for unit in unhealthy
-            if _apparatus_deliberately_down(unit, observed[unit])
-        ]
-        genuine = [unit for unit in unhealthy if unit not in apparatus_down]
-        if genuine:
-            state, detail, repair_action = (
-                "FAIL",
-                "inactive or missing units: " + ", ".join(genuine),
-                repair,
-            )
-        elif apparatus_down:
-            # Only the deliberately-torn-down continual-harness apparatus is
-            # down.  Report it as an operator notice so repair_allowed stays
-            # true and tgw-doctor-auto-repair keeps the Context / runtime /
-            # launcher / database current (91802dca: same rationale that
-            # dropped services.local-coding from the auto-repairable set).
-            state, detail, repair_action = (
+        # Diagnostic only — Doctor gates no coding task (LEAF-11-1). The
+        # coding-lifecycle apparatus units were removed with their modules (C4);
+        # what remains is the Context projection promotion and the auto-repair
+        # timer, and they are simply expected to be exact and loaded.
+        if unhealthy:
+            state, detail = (
                 "WARN",
-                "coding lifecycle apparatus deliberately disabled "
-                "(PP-ROLES-001 / two-gates directive): "
-                + ", ".join(apparatus_down)
-                + " -- operator notice, not a repair trigger",
-                None,
+                "Context / auto-repair units need attention: " + ", ".join(unhealthy),
             )
         else:
-            state, detail, repair_action = (
-                "PASS",
-                "all local coding definitions are exact and required units are active",
-                None,
-            )
+            state, detail = ("PASS", "Context and auto-repair unit definitions are exact")
         return _check(
             "services.local-coding",
             state,
             detail,
-            evidence={
-                "units": observed,
-                "apparatus_deliberately_disabled": apparatus_down,
-                "genuine_unhealthy": genuine,
-            },
-            repair=repair_action,
+            evidence={"units": observed, "unhealthy": unhealthy},
+            repair=None,
         )
     except Exception as exc:
         return _check(
@@ -6255,97 +6136,69 @@ def _operator_launcher_identity(paths: DoctorPaths, source: Path) -> dict[str, A
 
 
 def check_runtime(paths: DoctorPaths) -> dict[str, Any]:
-    repair = _privileged_repair_action(paths, "runtime")
+    """Diagnostic only (LEAF-11-1): the operator launchers run the live editable
+    source now, not a materialized release tree. Verify the launcher wiring and
+    the fixed root boundaries; report — never gate — the optional coding-runtime
+    release tree if one is still present."""
     try:
-        desired, release, _task = _desired_runtime(paths)
-        current_link = paths.runtime_root / "current"
-        current = current_link.resolve(strict=True)
         head, _tree, _status = _source_identity(paths)
+        repo_bin = paths.repository / "bin"
+        expected_links = {
+            paths.local_bin / "tgw-todo": repo_bin / "tgw-todo-local-operator",
+            paths.local_bin / "tgw-coding": repo_bin / "tgw-coding-local-operator",
+            paths.local_bin / "tgw-coding-mcp": repo_bin / "tgw-coding-mcp",
+            paths.local_bin / "tgw-doctor": repo_bin / "tgw-doctor",
+        }
         mismatches: list[str] = []
-        expected_selector = str(Path("releases") / desired)
-        installed_selector = os.readlink(current_link) if current_link.is_symlink() else None
-        if installed_selector != expected_selector:
-            mismatches.append("current selector trust")
-        if current != release.resolve():
-            mismatches.append("current runtime selector")
-        if desired != head:
-            mismatches.append("task/runtime versus canonical source")
-        release_tree = _verify_release_tree(paths, desired, release)
-        launchers = _launcher_links(paths)
-        hashes: dict[str, Any] = {}
-        launcher_surface_drift = False
-        for destination, target in launchers.items():
-            destination_text = str(destination)
-            source = release / "bin" / target.name
-            if not source.is_file():
-                mismatches.append(f"release source missing: {source.name}")
-                launcher_surface_drift = True
-                continue
-            source_hash = _file_hash(source)
-            destination_hash = _file_hash(destination) if destination.is_file() else None
-            hashes[destination_text] = {
-                "source": str(source),
-                "source_sha256": source_hash,
-                "installed_sha256": destination_hash,
-                "expected_link": str(target),
-                "installed_link": os.readlink(destination) if destination.is_symlink() else None,
-            }
-            if not destination.is_symlink() or os.readlink(destination) != str(target):
-                mismatches.append(str(destination))
-                launcher_surface_drift = True
-            elif destination_hash != source_hash:
-                mismatches.append(f"{destination} via current selector")
-        operator_source = release / "bin/tgw-operator"
-        operator = _operator_launcher_identity(paths, operator_source)
-        hashes[str(paths.operator_cli)] = operator
+        link_state: dict[str, Any] = {}
+        for destination, target in expected_links.items():
+            installed = os.readlink(destination) if destination.is_symlink() else None
+            link_state[str(destination)] = {"installed": installed, "expected": str(target)}
+            if installed != str(target):
+                mismatches.append(f"{destination} -> {installed!r} (want {target})")
+            elif not target.is_file():
+                mismatches.append(f"{target} is missing")
+        operator = _operator_launcher_identity(paths, repo_bin / "tgw-operator")
         if not operator["exact"]:
             mismatches.append(f"{paths.operator_cli} fixed privileged boundary")
-            launcher_surface_drift = True
-        bootstrap_source = release / "bin/tgw-coding-bootstrap"
         bootstrap = _fixed_root_launcher_identity(
-            paths, paths.coding_bootstrap, bootstrap_source
+            paths, paths.coding_bootstrap, repo_bin / "tgw-coding-bootstrap"
         )
-        hashes[str(paths.coding_bootstrap)] = bootstrap
         if not bootstrap["exact"]:
             mismatches.append(f"{paths.coding_bootstrap} fixed privileged boundary")
-            launcher_surface_drift = True
         config_text = paths.coding_config.read_text(encoding="utf-8").lower()
         forbidden = [item for item in _FORBIDDEN_CODING_DEPENDENCIES if item in config_text]
         if forbidden:
-            mismatches.append("forbidden dependencies: " + ", ".join(forbidden))
+            mismatches.append("forbidden coding config dependencies: " + ", ".join(forbidden))
+        # The coding-runtime release tree is optional infra now; note its state,
+        # do not fail on staleness.
+        current_link = paths.runtime_root / "current"
+        release_note = None
+        if current_link.is_symlink():
+            release_note = {
+                "selector": os.readlink(current_link),
+                "tracks_head": current_link.name == "current"
+                and str(head) in os.readlink(current_link),
+            }
+        state = "PASS" if not mismatches else "WARN"
         return _check(
             "runtime.local-coding",
-            "PASS" if not mismatches else "FAIL",
-            f"runtime {desired[:12]} and local launchers are exact" if not mismatches else "runtime drift: " + "; ".join(mismatches),
+            state,
+            "operator launchers run the live editable source; fixed boundaries exact"
+            if not mismatches
+            else "launcher / boundary drift: " + "; ".join(mismatches),
             evidence={
-                "desired_commit": desired,
                 "canonical_commit": head,
-                "release": str(release),
-                "current": str(current),
-                "expected_selector": expected_selector,
-                "installed_selector": installed_selector,
-                "launcher_hashes": hashes,
-                "release_tree": release_tree,
+                "operator_launchers": link_state,
+                "operator_cli": operator,
+                "coding_bootstrap": bootstrap,
+                "coding_runtime_release": release_note,
                 "forbidden_dependencies": forbidden,
             },
-            repair=None if not mismatches else ("install the exact fixed launcher links during a bounded local bootstrap" if launcher_surface_drift else repair),
+            repair=None,
         )
     except Exception as exc:
-        message = str(exc)
-        bootstrap = any(
-            fragment in message
-            for fragment in (
-                "release root ownership",
-                "release path escapes",
-                "release tree differs",
-                "declared immutable coding release is absent",
-            )
-        )
-        return _failed(
-            "runtime.local-coding",
-            exc,
-            repair=("materialize the exact root-protected release during bounded local bootstrap" if bootstrap else repair),
-        )
+        return _failed("runtime.local-coding", exc, repair=None)
 
 
 _OBSOLETE_FILE_HASHES = {
@@ -10482,7 +10335,7 @@ def _assert_quiescence_units_safe(states: Mapping[str, Mapping[str, str]]) -> No
     preexisting_masks = [unit for unit, state in states.items() if state.get("LoadState") == "masked"]
     if preexisting_masks:
         raise DoctorError("refusing to alter pre-existing coding unit masks: " + ", ".join(preexisting_masks))
-    transient_active = [unit for unit, state in states.items() if unit not in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active"]
+    transient_active = [unit for unit, state in states.items() if unit not in _ACTIVE_MANAGED_UNITS and state.get("ActiveState") == "active"]
     if transient_active:
         raise DoctorError("local coding one-shot is active; retry after it exits: " + ", ".join(transient_active))
 
@@ -10629,7 +10482,7 @@ def _read_quiescence_state(
         or any(not isinstance(unit, str) for unit in active)
         or len(active) != len(set(active))
         or any(
-            unit not in _ACTIVE_CODING_UNITS
+            unit not in _ACTIVE_MANAGED_UNITS
             and unit != "tgw-coding-local-foreman.service"
             for unit in active
         )
@@ -10684,17 +10537,13 @@ def _activate_quiescence(
     loaded = _run(["systemctl", "daemon-reload"], timeout=30)
     if loaded.returncode:
         raise DoctorError(loaded.stderr.strip() or "cannot load local coding quiescence guards")
-    timer = "tgw-coding-local-foreman.timer"
-    stopped = _run(["systemctl", "stop", timer], timeout=30)
+    # The coding-lifecycle apparatus (foreman timer + workers) that this step
+    # used to stop first is gone (LEAF-11-1.DELETE-APPARATUS C4). The remaining
+    # guarded units (Context promotion, auto-repair) do not write the source
+    # tree; the drop-in guard still holds them inert for the repair window.
+    stopped = _run(["systemctl", "stop", *units], timeout=30)
     if stopped.returncode:
-        raise DoctorError(stopped.stderr.strip() or "cannot stop local coding Foreman timer")
-    timer_state = _unit_state(timer)
-    if timer_state.get("ActiveState") != "inactive":
-        raise DoctorError("local coding Foreman timer did not reach guarded/inactive state")
-    remaining = [unit for unit in units if unit != timer]
-    stopped = _run(["systemctl", "stop", *remaining], timeout=30)
-    if stopped.returncode:
-        raise DoctorError(stopped.stderr.strip() or "cannot stop remaining local coding units")
+        raise DoctorError(stopped.stderr.strip() or "cannot stop the guarded local units")
     stopped_states = _prove_guarded_stopped_units(
         units, marker=marker, dropins=dropins, dropin_value=dropin_value,
         uid=uid, gid=gid, allow_failed=True,
@@ -10808,7 +10657,7 @@ def _release_quiescence(
     final_states = {unit: _unit_state(unit).get("ActiveState") for unit in units}
     wrong = []
     for unit in units:
-        expected = "active" if unit in initially_active and unit in _ACTIVE_CODING_UNITS else "inactive"
+        expected = "active" if unit in initially_active and unit in _ACTIVE_MANAGED_UNITS else "inactive"
         accepted = {expected}
         if unit == foreman and timer_restored:
             accepted.add("activating")
@@ -10950,7 +10799,7 @@ def _coding_quiescence(paths: DoctorPaths):
     that condition, then removes only its exact guards and restores the initial
     active set.
     """
-    units = list(_CODING_UNITS)
+    units = list(_MANAGED_UNITS)
     uid = paths.systemd_unit_uid
     gid = paths.systemd_unit_gid
     state_path, marker, dropins, dropin_value = _quiescence_layout(paths, units)
@@ -10966,7 +10815,7 @@ def _coding_quiescence(paths: DoctorPaths):
     _assert_quiescence_units_safe(initial_states)
     initially_active = [
         unit for unit, state in initial_states.items()
-        if (unit in _ACTIVE_CODING_UNITS and state.get("ActiveState") == "active")
+        if (unit in _ACTIVE_MANAGED_UNITS and state.get("ActiveState") == "active")
         or (unit == "tgw-coding-local-foreman.service" and state.get("ActiveState") == "activating")
     ]
     _secure_runtime_directory(paths.quiescence_root, uid=uid, gid=gid)
@@ -11255,7 +11104,7 @@ def _restart_obligation_root(paths: DoctorPaths) -> Path:
 
 
 def _restart_obligation_path(paths: DoctorPaths, unit: str) -> Path:
-    if unit not in {*_CODING_UNITS, _PLAN_RENDER_UNIT}:
+    if unit not in {*_MANAGED_UNITS, _PLAN_RENDER_UNIT}:
         raise DoctorError(f"restart obligation unit is not declared: {unit}")
     return _restart_obligation_root(paths) / f"{unit}.json"
 

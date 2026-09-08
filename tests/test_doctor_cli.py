@@ -94,26 +94,8 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
         "config/environment/postgresql/pg_hba.conf": (
             ROOT / "config/environment/postgresql/pg_hba.conf"
         ).read_text(encoding="utf-8"),
-        "systemd/tgw-codex-implement-worker.service": "[Service]\nExecStart=/bin/true\n",
-        "systemd/tgw-claude-review-worker.service": "[Service]\nExecStart=/bin/true\n",
-        "systemd/tgw-controller-verify-worker.service": "[Service]\nExecStart=/bin/true\n",
-        "systemd/tgw-coding-lifecycle-supervisor.service": "[Service]\nExecStart=/bin/true\n",
-        "systemd/tgw-coding-root-effect.service": "[Service]\nExecStart=/bin/true\n",
-        "systemd/tgw-coding-runtime-restart.path": "[Path]\nPathChanged=/tmp/restart-request\n",
-        "systemd/tgw-coding-runtime-restart.service": (
-            "[Service]\nType=oneshot\n"
-            "ExecStart=/bin/systemctl restart "
-            "tgw-codex-implement-worker.service "
-            "tgw-claude-review-worker.service "
-            "tgw-controller-verify-worker.service "
-            "tgw-coding-lifecycle-supervisor.service "
-            "tgw-plan-render-local.service\n"
-            "ExecStart=/bin/systemctl restart tgw-coding-root-effect.service\n"
-        ),
         "systemd/tgw-context-snapshot-promote.path": "[Path]\nPathChanged=/tmp/context-pending\n",
         "systemd/tgw-context-snapshot-promote.service": "[Service]\nType=oneshot\nExecStart=/bin/true\n",
-        "systemd/tgw-coding-local-foreman.timer": "[Timer]\nOnBootSec=1s\n",
-        "systemd/tgw-coding-local-foreman.service": "[Service]\nType=oneshot\nExecStart=/bin/true\n",
         "scripts/tgw_context_debian_stdio.py": (f"#!/bin/sh\n# runtime snapshot: {snapshot_fixture_path}\nexit 0\n"),
         "scripts/tgw_context_publish.py": (ROOT / "scripts/tgw_context_publish.py").read_text(),
         "src/tgw/context_mcp_server.py": "# context server fixture\n",
@@ -164,10 +146,11 @@ def _fixture(tmp_path: Path) -> tuple[doctor_cli.DoctorPaths, str, str]:
     runtime_root.mkdir(parents=True, exist_ok=True)
     (runtime_root / "current").symlink_to(Path("releases") / head)
     local_bin.mkdir(parents=True, exist_ok=True)
-    (local_bin / "tgw-coding").symlink_to(runtime_root / "current/bin/tgw-coding-local-operator")
-    (local_bin / "tgw-todo").symlink_to(runtime_root / "current/bin/tgw-todo-local-operator")
-    (local_bin / "tgw-coding-mcp").symlink_to(runtime_root / "current/bin/tgw-coding-mcp")
-    (local_bin / "tgw-doctor").symlink_to(runtime_root / "current/bin/tgw-doctor")
+    # the operator launchers run the live editable source (LEAF-11-1 C4)
+    (local_bin / "tgw-coding").symlink_to(repository / "bin/tgw-coding-local-operator")
+    (local_bin / "tgw-todo").symlink_to(repository / "bin/tgw-todo-local-operator")
+    (local_bin / "tgw-coding-mcp").symlink_to(repository / "bin/tgw-coding-mcp")
+    (local_bin / "tgw-doctor").symlink_to(repository / "bin/tgw-doctor")
     shutil.copyfile(release / "bin/tgw-operator", operator_cli)
     operator_cli.chmod(0o555)
     shutil.copyfile(release / "bin/tgw-coding-bootstrap", coding_bootstrap)
@@ -5035,7 +5018,7 @@ def test_coding_quiescence_guards_and_verifies_every_local_unit(
             reload_count += 1
             if reload_count == 1:
                 assert (quiescence_root / doctor_cli._QUIESCENCE_MARKER).is_file()
-                assert all((runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN).is_file() for unit in doctor_cli._CODING_UNITS)
+                assert all((runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN).is_file() for unit in doctor_cli._MANAGED_UNITS)
         elif command[1] == "stop":
             active.clear()
         elif command[1] == "start":
@@ -5062,7 +5045,7 @@ def test_coding_quiescence_guards_and_verifies_every_local_unit(
     with doctor_cli._coding_quiescence(paths):
         assert not active
         assert (quiescence_root / doctor_cli._QUIESCENCE_MARKER).is_file()
-        assert all((runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN).is_file() for unit in doctor_cli._CODING_UNITS)
+        assert all((runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN).is_file() for unit in doctor_cli._MANAGED_UNITS)
 
     assert commands[0] == ["systemctl", "daemon-reload"]
     assert commands[1] == [
@@ -5075,7 +5058,7 @@ def test_coding_quiescence_guards_and_verifies_every_local_unit(
         "stop",
         *(
             unit
-            for unit in doctor_cli._CODING_UNITS
+            for unit in doctor_cli._MANAGED_UNITS
             if unit != "tgw-coding-local-foreman.timer"
         ),
     ]
@@ -5144,7 +5127,7 @@ def test_coding_quiescence_rejects_timer_triggered_failed_foreman_and_retains_st
 ) -> None:
     foreman = "tgw-coding-local-foreman.service"
     timer = "tgw-coding-local-foreman.timer"
-    states = {unit: "inactive" for unit in doctor_cli._CODING_UNITS}
+    states = {unit: "inactive" for unit in doctor_cli._MANAGED_UNITS}
     states[timer] = "active"
     commands = []
     runtime_root = tmp_path / "systemd"
@@ -5196,7 +5179,7 @@ def test_coding_quiescence_stops_timer_before_timer_triggered_activating_one_sho
     commands = []
     states = {
         unit: ("active" if unit == "tgw-coding-local-foreman.timer" else "inactive")
-        for unit in doctor_cli._CODING_UNITS
+        for unit in doctor_cli._MANAGED_UNITS
     }
     runtime_root = tmp_path / "systemd"
     runtime_root.mkdir(mode=0o755)
@@ -5247,7 +5230,7 @@ def test_coding_quiescence_proves_guards_then_recovers_failed_transient_foreman(
     state_reads = []
     foreman = "tgw-coding-local-foreman.service"
     timer = "tgw-coding-local-foreman.timer"
-    states = {unit: "inactive" for unit in doctor_cli._CODING_UNITS}
+    states = {unit: "inactive" for unit in doctor_cli._MANAGED_UNITS}
     states[foreman] = "activating"
     states[timer] = "active"
     runtime_root = tmp_path / "systemd"
@@ -5268,27 +5251,27 @@ def test_coding_quiescence_proves_guards_then_recovers_failed_transient_foreman(
                 states[unit] = "failed" if unit == foreman else "inactive"
         elif command[1] == "reset-failed":
             assert command == ["systemctl", "reset-failed", foreman]
-            assert state_reads[-len(doctor_cli._CODING_UNITS):] == list(
-                doctor_cli._CODING_UNITS
+            assert state_reads[-len(doctor_cli._MANAGED_UNITS):] == list(
+                doctor_cli._MANAGED_UNITS
             )
             assert all(state in {"inactive", "failed"} for state in states.values())
             assert all(
                 (runtime_root / f"{unit}.d" / doctor_cli._QUIESCENCE_DROPIN).is_file()
-                for unit in doctor_cli._CODING_UNITS
+                for unit in doctor_cli._MANAGED_UNITS
             )
             states[foreman] = "inactive"
         elif command[1:] == ["start", foreman]:
             # A oneshot systemctl start is blocking; success returns it to inactive.
-            assert state_reads[-len(doctor_cli._CODING_UNITS):] == list(
-                doctor_cli._CODING_UNITS
+            assert state_reads[-len(doctor_cli._MANAGED_UNITS):] == list(
+                doctor_cli._MANAGED_UNITS
             )
             assert states[timer] == "inactive"
             assert all(states[unit] == "inactive" for unit in states if unit != timer)
             states[foreman] = "inactive"
         elif command[1:] == ["start", timer]:
             assert command == ["systemctl", "start", timer]
-            assert state_reads[-len(doctor_cli._CODING_UNITS):] == list(
-                doctor_cli._CODING_UNITS
+            assert state_reads[-len(doctor_cli._MANAGED_UNITS):] == list(
+                doctor_cli._MANAGED_UNITS
             )
             assert states[timer] == "inactive"
             assert all(states[unit] == "inactive" for unit in states if unit != timer)
@@ -5321,7 +5304,7 @@ def test_coding_quiescence_does_not_restore_initially_inactive_timer(
     commands = []
     foreman = "tgw-coding-local-foreman.service"
     timer = "tgw-coding-local-foreman.timer"
-    states = {unit: "inactive" for unit in doctor_cli._CODING_UNITS}
+    states = {unit: "inactive" for unit in doctor_cli._MANAGED_UNITS}
     states[foreman] = "activating"
     runtime_root = tmp_path / "systemd"
     runtime_root.mkdir(mode=0o755)
@@ -5363,7 +5346,7 @@ def test_coding_quiescence_reset_failure_retains_recovery_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     failed = "tgw-controller-verify-worker.service"
-    states = {unit: "inactive" for unit in doctor_cli._CODING_UNITS}
+    states = {unit: "inactive" for unit in doctor_cli._MANAGED_UNITS}
     states[failed] = "failed"
     state_reads = []
     commands = []
@@ -5380,8 +5363,8 @@ def test_coding_quiescence_reset_failure_retains_recovery_state(
     def run(command, **_kwargs):
         commands.append(command)
         if command[1] == "reset-failed":
-            assert state_reads[-len(doctor_cli._CODING_UNITS):] == list(
-                doctor_cli._CODING_UNITS
+            assert state_reads[-len(doctor_cli._MANAGED_UNITS):] == list(
+                doctor_cli._MANAGED_UNITS
             )
             return subprocess.CompletedProcess(command, 1, "", "injected reset failure")
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -5398,7 +5381,7 @@ def test_coding_quiescence_reset_failure_retains_recovery_state(
         with doctor_cli._coding_quiescence(paths):
             pass
 
-    units = list(doctor_cli._CODING_UNITS)
+    units = list(doctor_cli._MANAGED_UNITS)
     state_path, marker, dropins, dropin_value = doctor_cli._quiescence_layout(
         paths, units
     )
@@ -5440,7 +5423,7 @@ def test_coding_quiescence_fails_closed_when_activating_one_shot_cleanup_cannot_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    states = {unit: "inactive" for unit in doctor_cli._CODING_UNITS}
+    states = {unit: "inactive" for unit in doctor_cli._MANAGED_UNITS}
     states["tgw-coding-local-foreman.timer"] = "active"
     runtime_root = tmp_path / "systemd"
     runtime_root.mkdir(mode=0o755)
@@ -5481,30 +5464,6 @@ def test_coding_quiescence_fails_closed_when_activating_one_shot_cleanup_cannot_
 
     assert states["tgw-coding-local-foreman.service"] == "activating"
     assert (quiescence_root / doctor_cli._QUIESCENCE_STATE).is_file()
-
-
-def test_coding_quiescence_refuses_preexisting_runtime_mask(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        doctor_cli,
-        "_unit_state",
-        lambda unit: {
-            "LoadState": ("masked" if unit == "tgw-controller-verify-worker.service" else "loaded"),
-            "ActiveState": "inactive",
-        },
-    )
-    monkeypatch.setattr(
-        doctor_cli,
-        "_run",
-        lambda *_args, **_kwargs: pytest.fail("systemctl must not be called"),
-    )
-
-    with pytest.raises(doctor_cli.DoctorError, match="pre-existing coding unit masks"):
-        with doctor_cli._coding_quiescence(doctor_cli.DoctorPaths()):
-            pass
-
-
 def test_coding_quiescence_refuses_preexisting_guard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5600,7 +5559,7 @@ def test_coding_quiescence_restores_through_diagnostic_release_errors(
     worker = "tgw-controller-verify-worker.service"
     foreman = "tgw-coding-local-foreman.service"
     timer = "tgw-coding-local-foreman.timer"
-    states = {unit: "inactive" for unit in doctor_cli._CODING_UNITS}
+    states = {unit: "inactive" for unit in doctor_cli._MANAGED_UNITS}
     states.update({worker: "active", foreman: "activating", timer: "active"})
     commands = []
     reload_count = 0
@@ -5688,7 +5647,7 @@ def test_coding_quiescence_recovers_exact_stale_failed_transient_state(
         systemd_unit_uid=os.getuid(),
         systemd_unit_gid=os.getgid(),
     )
-    units = list(doctor_cli._CODING_UNITS)
+    units = list(doctor_cli._MANAGED_UNITS)
     state_path, marker, dropins, dropin_value = doctor_cli._quiescence_layout(paths, units)
     state = {
         "schema": doctor_cli._QUIESCENCE_SCHEMA,
@@ -5764,67 +5723,6 @@ def test_coding_quiescence_recovers_exact_stale_failed_transient_state(
     assert states[foreman] == "inactive"
     assert not quiescence_root.exists()
     assert not any(runtime_root.iterdir())
-
-
-def test_coding_quiescence_refuses_stale_recovery_while_foreman_is_active(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime_root = tmp_path / "systemd"
-    runtime_root.mkdir(mode=0o755)
-    quiescence_root = tmp_path / "tgw-doctor"
-    quiescence_root.mkdir(mode=0o755)
-    paths = doctor_cli.DoctorPaths(
-        systemd_runtime_root=runtime_root,
-        quiescence_root=quiescence_root,
-        systemd_unit_uid=os.getuid(),
-        systemd_unit_gid=os.getgid(),
-    )
-    units = list(doctor_cli._CODING_UNITS)
-    state_path, marker, dropins, _dropin_value = doctor_cli._quiescence_layout(paths, units)
-    state = {
-        "schema": doctor_cli._QUIESCENCE_SCHEMA,
-        "boot_id": doctor_cli._boot_id(),
-        "owner_pid": 999999999,
-        "owner_start_ticks": "1",
-        "units": units,
-        "initially_active": ["tgw-coding-local-foreman.timer"],
-        "state_path": str(state_path),
-        "marker": str(marker),
-        "dropins": {unit: str(dropins[unit]) for unit in units},
-    }
-    state_raw = doctor_cli._canonical(state) + b"\n"
-    doctor_cli._create_quiescence_file(
-        state_path,
-        state_raw,
-        mode=0o400,
-        uid=os.getuid(),
-        gid=os.getgid(),
-    )
-
-    monkeypatch.setattr(
-        doctor_cli,
-        "_unit_state",
-        lambda unit: {
-            "LoadState": "loaded",
-            "ActiveState": ("active" if unit == "tgw-coding-local-foreman.service" else "inactive"),
-        },
-    )
-    monkeypatch.setattr(
-        doctor_cli,
-        "_run",
-        lambda *_args, **_kwargs: pytest.fail("systemctl must not be called"),
-    )
-
-    with pytest.raises(doctor_cli.DoctorError, match="one-shot is active"):
-        with doctor_cli._coding_quiescence(paths):
-            pass
-
-    assert state_path.read_bytes() == state_raw
-    assert not marker.exists()
-    assert not any(runtime_root.iterdir())
-
-
 @pytest.mark.parametrize("extra_location", ["state-root", "drop-in-root"])
 def test_coding_quiescence_retains_state_for_unexpected_runtime_remnant(
     tmp_path: Path,
@@ -5840,7 +5738,7 @@ def test_coding_quiescence_retains_state_for_unexpected_runtime_remnant(
         systemd_unit_uid=os.getuid(),
         systemd_unit_gid=os.getgid(),
     )
-    units = list(doctor_cli._CODING_UNITS)
+    units = list(doctor_cli._MANAGED_UNITS)
     state_path, _marker, dropins, _dropin_value = doctor_cli._quiescence_layout(paths, units)
 
     def unit_state(unit):
@@ -7133,24 +7031,14 @@ def test_context_repair_never_overwrites_concurrent_cursor_during_rollback(tmp_p
     assert json.loads(paths.context_snapshot.read_text()) == concurrent_snapshot
 
 
-def test_runtime_check_requires_exact_release_selector_and_launchers(tmp_path: Path) -> None:
+def test_runtime_check_passes_when_launchers_run_the_live_source(tmp_path: Path) -> None:
     paths, head, _tree = _fixture(tmp_path)
 
     result = doctor_cli.check_runtime(paths)
 
-    assert result["state"] == "PASS"
-    assert result["evidence"]["desired_commit"] == head
+    assert result["state"] == "PASS", result["detail"]
+    assert result["evidence"]["canonical_commit"] == head
     assert result["evidence"]["forbidden_dependencies"] == []
-
-
-def test_runtime_check_rejects_mutated_immutable_release(tmp_path: Path) -> None:
-    paths, _head, _tree = _fixture(tmp_path)
-    (paths.runtime_root / "current/README").write_text("mutated\n", encoding="utf-8")
-
-    result = doctor_cli.check_runtime(paths)
-
-    assert result["state"] == "FAIL"
-    assert "release tree differs from Git" in result["detail"]
 
 
 def test_fixed_operator_launcher_survives_mutable_runtime_selector_swap(
@@ -7211,8 +7099,8 @@ def test_doctor_effective_root_source_status_is_demoted_to_ordinary_db(
 def test_unit_definition_requires_exact_fragment_and_no_dropins(tmp_path: Path) -> None:
     paths, head, _tree = _fixture(tmp_path)
     paths = replace(paths, systemd_unit_uid=os.getuid(), systemd_unit_gid=os.getgid())
-    unit = "tgw-codex-implement-worker.service"
-    source = paths.runtime_root / "releases" / head / "systemd" / unit
+    unit = doctor_cli._PLAN_RENDER_UNIT
+    source = ROOT / "systemd" / unit
     fragment = tmp_path / "installed.service"
     shutil.copyfile(source, fragment)
     fragment.chmod(0o444)
@@ -7238,8 +7126,8 @@ def test_unit_definition_rejects_loaded_exec_start_with_extra_argument(
 ) -> None:
     paths, head, _tree = _fixture(tmp_path)
     paths = replace(paths, systemd_unit_uid=os.getuid(), systemd_unit_gid=os.getgid())
-    unit = "tgw-codex-implement-worker.service"
-    source = paths.runtime_root / "releases" / head / "systemd" / unit
+    unit = doctor_cli._PLAN_RENDER_UNIT
+    source = ROOT / "systemd" / unit
     fragment = tmp_path / "installed.service"
     shutil.copyfile(source, fragment)
     fragment.chmod(0o444)
@@ -7262,8 +7150,8 @@ def test_unit_definition_rejects_loaded_exec_start_with_extra_argument(
 def test_unit_definition_rejects_active_process_with_different_argv(tmp_path: Path) -> None:
     paths, head, _tree = _fixture(tmp_path)
     paths = replace(paths, systemd_unit_uid=os.getuid(), systemd_unit_gid=os.getgid())
-    unit = "tgw-codex-implement-worker.service"
-    source = paths.runtime_root / "releases" / head / "systemd" / unit
+    unit = doctor_cli._PLAN_RENDER_UNIT
+    source = ROOT / "systemd" / unit
     fragment = tmp_path / "installed.service"
     shutil.copyfile(source, fragment)
     fragment.chmod(0o444)
@@ -7335,7 +7223,7 @@ def test_service_process_runtime_identity_retries_changed_systemd_invocation(
         process = proc / pid
         process.mkdir(parents=True)
         (process / "cwd").symlink_to(cwd)
-    unit = "tgw-codex-implement-worker.service"
+    unit = doctor_cli._PLAN_RENDER_UNIT
     first = {
         "Unit": unit,
         "MainPID": "101",
@@ -7374,7 +7262,7 @@ def test_service_process_runtime_identity_reports_exhausted_replacement_race(
         process = proc / pid
         process.mkdir(parents=True)
         (process / "cwd").symlink_to(release)
-    unit = "tgw-codex-implement-worker.service"
+    unit = doctor_cli._PLAN_RENDER_UNIT
 
     def state(pid: str, generation: str, started: str) -> dict[str, str]:
         return {
@@ -7427,57 +7315,10 @@ def test_service_process_runtime_identity_classifies_stable_unreadable(
     assert result["status"] == "UNREADABLE"
     assert result["restart_safe"] is False
     assert result["exact"] is False
-
-
-def test_check_units_rejects_active_service_from_stale_release(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    commit = "a" * 40
-    paths = replace(
-        doctor_cli.DoctorPaths(), runtime_root=tmp_path / "runtime"
-    )
-    (paths.runtime_root / "releases" / commit).mkdir(parents=True)
-    stale_unit = "tgw-codex-implement-worker.service"
-
-    monkeypatch.setattr(
-        doctor_cli,
-        "_unit_state",
-        lambda unit: {
-            "Unit": unit,
-            "LoadState": "loaded",
-            "ActiveState": "active" if unit in doctor_cli._ACTIVE_CODING_UNITS else "inactive",
-        },
-    )
-    monkeypatch.setattr(
-        doctor_cli,
-        "_unit_definition",
-        lambda *_args, **_kwargs: {
-            "exact": True,
-            "desired_commit": commit,
-            "reasons": [],
-        },
-    )
-    monkeypatch.setattr(
-        doctor_cli,
-        "_service_process_runtime_identity",
-        lambda state, _release: {
-            "exact": state["Unit"] != stale_unit,
-            "reason": "loaded process predates selected immutable runtime",
-        },
-    )
-
-    result = doctor_cli.check_units(paths, desired_commit=commit)
-
-    assert result["state"] == "FAIL"
-    assert stale_unit in result["detail"]
-    assert result["evidence"]["units"][stale_unit]["process_runtime"]["exact"] is False
-
-
-def _stub_units_all_down_except_active(
+def _stub_units_all_healthy(
     monkeypatch: pytest.MonkeyPatch, commit: str
 ) -> None:
-    """Every apparatus unit inactive; the keep-on Context/timer units active."""
-    monkeypatch.setattr(doctor_cli, "_privileged_repair_action", lambda *_a: "repair")
+    """Every managed unit loaded, exact, and (for the active ones) active."""
     monkeypatch.setattr(
         doctor_cli,
         "_restart_obligation_presence",
@@ -7490,9 +7331,7 @@ def _stub_units_all_down_except_active(
             "Unit": unit,
             "LoadState": "loaded",
             "ActiveState": (
-                "inactive"
-                if unit in doctor_cli._APPARATUS_CODING_UNITS
-                else "active"
+                "active" if unit in doctor_cli._ACTIVE_MANAGED_UNITS else "inactive"
             ),
         },
     )
@@ -7501,52 +7340,17 @@ def _stub_units_all_down_except_active(
         "_unit_definition",
         lambda *_a, **_k: {"exact": True, "desired_commit": commit, "reasons": []},
     )
-    monkeypatch.setattr(
-        doctor_cli,
-        "_service_process_runtime_identity",
-        lambda *_a, **_k: {"exact": True, "status": "EXACT"},
-    )
 
 
-def test_check_units_warns_not_fails_when_only_apparatus_is_torn_down(
+def test_check_units_warns_when_a_managed_unit_is_down(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The operator runs the coding workflow without the continual-harness
-    apparatus (PP-ROLES-001 / two-gates).  services.local-coding must then be a
-    WARN operator-notice, not a FAIL that gates repair_allowed."""
+    """A managed unit (the Context snapshot-promote path) being inactive is a
+    WARN — Doctor is diagnostic only now, it gates nothing (LEAF-11-1)."""
     commit = "a" * 40
     paths = replace(doctor_cli.DoctorPaths(), runtime_root=tmp_path / "runtime")
     (paths.runtime_root / "releases" / commit).mkdir(parents=True)
-    _stub_units_all_down_except_active(monkeypatch, commit)
-
-    result = doctor_cli.check_units(paths, desired_commit=commit)
-
-    assert result["state"] == "WARN"
-    assert result["repairable"] is False
-    assert "operator_action" not in result
-    # Only the apparatus units that are *expected active* show up as
-    # deliberately-down; the transiently-run .service units are never "active".
-    expected_down = doctor_cli._APPARATUS_CODING_UNITS & set(
-        doctor_cli._ACTIVE_CODING_UNITS
-    )
-    assert set(result["evidence"]["apparatus_deliberately_disabled"]) == expected_down
-    assert result["evidence"]["genuine_unhealthy"] == []
-    # This WARN must not gate auto-repair.
-    decision = doctor_cli.auto_repair_decision(
-        [result, doctor_cli._check("context.snapshot", "FAIL", "stale")]
-    )
-    assert decision["repair_allowed"] is True
-
-
-def test_check_units_still_fails_when_a_required_unit_is_down(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A non-apparatus unit (the Context snapshot-promote path) being inactive
-    is a genuine FAIL, even while the apparatus is deliberately torn down."""
-    commit = "a" * 40
-    paths = replace(doctor_cli.DoctorPaths(), runtime_root=tmp_path / "runtime")
-    (paths.runtime_root / "releases" / commit).mkdir(parents=True)
-    _stub_units_all_down_except_active(monkeypatch, commit)
+    _stub_units_all_healthy(monkeypatch, commit)
     required_down = "tgw-context-snapshot-promote.path"
     monkeypatch.setattr(
         doctor_cli,
@@ -7556,53 +7360,18 @@ def test_check_units_still_fails_when_a_required_unit_is_down(
             "LoadState": "loaded",
             "ActiveState": (
                 "inactive"
-                if unit in doctor_cli._APPARATUS_CODING_UNITS or unit == required_down
-                else "active"
+                if unit == required_down
+                else ("active" if unit in doctor_cli._ACTIVE_MANAGED_UNITS else "inactive")
             ),
         },
     )
 
     result = doctor_cli.check_units(paths, desired_commit=commit)
 
-    assert result["state"] == "FAIL"
+    assert result["state"] == "WARN"
     assert required_down in result["detail"]
-    assert result["evidence"]["genuine_unhealthy"] == [required_down]
-    assert result["repairable"] is True
-
-
-def test_check_units_fails_when_an_apparatus_unit_runs_but_is_stale(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A torn-down apparatus unit is a WARN, but one that is somehow ACTIVE on a
-    stale runtime is a genuine FAIL: if it runs at all it must run exactly."""
-    commit = "a" * 40
-    paths = replace(doctor_cli.DoctorPaths(), runtime_root=tmp_path / "runtime")
-    (paths.runtime_root / "releases" / commit).mkdir(parents=True)
-    _stub_units_all_down_except_active(monkeypatch, commit)
-    rogue = "tgw-codex-implement-worker.service"
-    monkeypatch.setattr(
-        doctor_cli,
-        "_unit_state",
-        lambda unit: {
-            "Unit": unit,
-            "LoadState": "loaded",
-            "ActiveState": (
-                "active"
-                if unit not in doctor_cli._APPARATUS_CODING_UNITS or unit == rogue
-                else "inactive"
-            ),
-        },
-    )
-    monkeypatch.setattr(
-        doctor_cli,
-        "_service_process_runtime_identity",
-        lambda state, _r: {"exact": state["Unit"] != rogue, "status": "STALE"},
-    )
-
-    result = doctor_cli.check_units(paths, desired_commit=commit)
-
-    assert result["state"] == "FAIL"
-    assert rogue in result["evidence"]["genuine_unhealthy"]
+    assert result["evidence"]["unhealthy"] == [required_down]
+    assert result["repairable"] is False
 
 
 def _stub_worker_repair(
@@ -7631,9 +7400,9 @@ def _stub_worker_repair(
     stale_unit = "tgw-codex-implement-worker.service"
     runtime_status = {
         unit: initial_status if unit == stale_unit else "EXACT"
-        for unit in doctor_cli._ACTIVE_CODING_UNITS
+        for unit in doctor_cli._ACTIVE_MANAGED_UNITS
     }
-    generations = {unit: 1 for unit in doctor_cli._ACTIVE_CODING_UNITS}
+    generations = {unit: 1 for unit in doctor_cli._ACTIVE_MANAGED_UNITS}
     commands: list[list[str]] = []
 
     monkeypatch.setattr(doctor_cli, "_require_root", lambda: None)
@@ -7655,8 +7424,8 @@ def _stub_worker_repair(
         return {
             "Unit": unit,
             "LoadState": "loaded",
-            "ActiveState": "active" if unit in doctor_cli._ACTIVE_CODING_UNITS else "inactive",
-            "SubState": "running" if unit in doctor_cli._ACTIVE_CODING_UNITS else "dead",
+            "ActiveState": "active" if unit in doctor_cli._ACTIVE_MANAGED_UNITS else "inactive",
+            "SubState": "running" if unit in doctor_cli._ACTIVE_MANAGED_UNITS else "dead",
             "MainPID": str(1000 + generation) if unit.endswith(".service") else "0",
             "InvocationID": f"{generation:032x}" if generation else "",
             "ExecMainStartTimestampMonotonic": (
@@ -7704,19 +7473,6 @@ def _stub_worker_repair(
 
     monkeypatch.setattr(doctor_cli, "_run", run)
     return paths, commit, stale_unit, commands
-def test_active_coding_service_units_bind_selected_immutable_runtime() -> None:
-    for unit in doctor_cli._ACTIVE_CODING_UNITS:
-        if not unit.endswith(".service"):
-            continue
-        text = (ROOT / "systemd" / unit).read_text(encoding="utf-8")
-        assert "WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current" in text
-        assert "Environment=PYTHONPATH=src" in text
-        assert (
-            "Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src"
-            not in text
-        )
-
-
 def test_restart_obligation_is_root_bound_canonical_and_single_generation(
     tmp_path: Path,
 ) -> None:
@@ -7727,7 +7483,7 @@ def test_restart_obligation_is_root_bound_canonical_and_single_generation(
         systemd_unit_gid=os.getgid(),
     )
     paths.receipts.mkdir()
-    unit = "tgw-codex-implement-worker.service"
+    unit = doctor_cli._PLAN_RENDER_UNIT
     commit = "a" * 40
     tree = "b" * 40
 
@@ -7769,7 +7525,7 @@ def test_restart_obligation_carries_debt_across_candidate_generations(
         systemd_unit_gid=os.getgid(),
     )
     paths.receipts.mkdir()
-    unit = "tgw-codex-implement-worker.service"
+    unit = doctor_cli._PLAN_RENDER_UNIT
     first = doctor_cli._write_restart_obligation(
         paths,
         unit,
@@ -7817,7 +7573,7 @@ def test_doctor_reports_root_owned_restart_obligation_to_ordinary_actor(
     )
     paths.receipts.mkdir()
     desired = "a" * 40
-    unit = "tgw-codex-implement-worker.service"
+    unit = "tgw-context-snapshot-promote.service"  # a managed unit check_units iterates
     doctor_cli._write_restart_obligation(
         paths,
         unit,
@@ -7834,7 +7590,7 @@ def test_doctor_reports_root_owned_restart_obligation_to_ordinary_actor(
             "Unit": observed_unit,
             "LoadState": "loaded",
             "ActiveState": "active"
-            if observed_unit in doctor_cli._ACTIVE_CODING_UNITS
+            if observed_unit in doctor_cli._ACTIVE_MANAGED_UNITS
             else "inactive",
         },
     )
@@ -7855,8 +7611,12 @@ def test_doctor_reports_root_owned_restart_obligation_to_ordinary_actor(
 
     result = doctor_cli.check_units(paths, desired_commit=desired)
 
-    assert result["state"] == "FAIL"
+    # Doctor is diagnostic only now (LEAF-11-1) — a pending restart obligation is
+    # a WARN, not a FAIL, and it is surfaced in the evidence.
+    assert result["state"] == "WARN"
     assert result["evidence"]["units"][unit]["restart_obligation"]["status"] == "PRESENT"
+
+
 def test_restart_obligation_unsafe_metadata_fails_closed(tmp_path: Path) -> None:
     paths = replace(
         doctor_cli.DoctorPaths(),
@@ -7865,7 +7625,7 @@ def test_restart_obligation_unsafe_metadata_fails_closed(tmp_path: Path) -> None
         systemd_unit_gid=os.getgid(),
     )
     paths.receipts.mkdir()
-    unit = "tgw-codex-implement-worker.service"
+    unit = doctor_cli._PLAN_RENDER_UNIT
     commit = "a" * 40
     tree = "b" * 40
     doctor_cli._write_restart_obligation(
@@ -8023,8 +7783,8 @@ def test_runtime_check_rejects_remote_or_authority_dependency(tmp_path: Path) ->
 
     result = doctor_cli.check_runtime(paths)
 
-    assert result["state"] == "FAIL"
-    assert "forbidden dependencies" in result["detail"]
+    assert result["state"] == "WARN"
+    assert "forbidden coding config dependencies" in result["detail"]
 
 
 def test_repairs_require_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -8487,7 +8247,7 @@ def test_doctor_launcher_is_local_and_provider_independent() -> None:
     root = Path(__file__).resolve().parents[1]
     launcher = (root / "bin/tgw-doctor").read_text(encoding="utf-8")
 
-    assert "/opt/TGW/tgw-lib/coding-runtime/current" in launcher
+    assert "coding-runtime" not in launcher  # runs the live editable source (LEAF-11-1)
     assert "tgw.doctor_cli" in launcher
     assert "tgw-prod" not in launcher
     assert "ssh" not in launcher.lower()
@@ -9259,7 +9019,7 @@ def test_coding_quiescence_latches_nonzero_start_before_downstream_units(
     worker = "tgw-codex-implement-worker.service"
     foreman = "tgw-coding-local-foreman.service"
     timer = "tgw-coding-local-foreman.timer"
-    states = {unit: "inactive" for unit in doctor_cli._CODING_UNITS}
+    states = {unit: "inactive" for unit in doctor_cli._MANAGED_UNITS}
     states.update({worker: "active", foreman: "activating", timer: "active"})
     starts = []
     runtime_root = tmp_path / "systemd"
@@ -9317,7 +9077,7 @@ def test_coding_quiescence_latches_undesired_stop_failure_before_all_starts(
 ) -> None:
     worker = "tgw-codex-implement-worker.service"
     undesired = "tgw-controller-verify-worker.service"
-    states = {unit: "inactive" for unit in doctor_cli._CODING_UNITS}
+    states = {unit: "inactive" for unit in doctor_cli._MANAGED_UNITS}
     states[worker] = "active"
     commands = []
     runtime_root = tmp_path / "systemd"
@@ -9369,7 +9129,7 @@ def test_coding_quiescence_reset_uses_exact_pre_reset_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     failed = "tgw-controller-verify-worker.service"
-    states = {unit: "inactive" for unit in doctor_cli._CODING_UNITS}
+    states = {unit: "inactive" for unit in doctor_cli._MANAGED_UNITS}
     states[failed] = "failed"
     reads = []
     exact_proofs = []
@@ -9384,9 +9144,9 @@ def test_coding_quiescence_reset_uses_exact_pre_reset_proof(
     def run(command, **_kwargs):
         if command[1] == "reset-failed":
             assert command == ["systemctl", "reset-failed", failed]
-            assert reads[-len(doctor_cli._CODING_UNITS):] == list(doctor_cli._CODING_UNITS)
+            assert reads[-len(doctor_cli._MANAGED_UNITS):] == list(doctor_cli._MANAGED_UNITS)
             assert states[failed] == "failed"
-            units = list(doctor_cli._CODING_UNITS)
+            units = list(doctor_cli._MANAGED_UNITS)
             _state_path, marker, dropins, dropin_value = doctor_cli._quiescence_layout(
                 paths, units
             )
@@ -9443,7 +9203,7 @@ def test_coding_quiescence_rejects_unknown_stale_initially_active_unit(
         systemd_unit_uid=os.getuid(),
         systemd_unit_gid=os.getgid(),
     )
-    units = list(doctor_cli._CODING_UNITS)
+    units = list(doctor_cli._MANAGED_UNITS)
     state_path, marker, dropins, _dropin_value = doctor_cli._quiescence_layout(
         paths, units
     )

@@ -149,7 +149,8 @@ def test_launcher_is_local_and_has_no_obsolete_backend():
     ).read_text(encoding="utf-8")
     source = Path(coding_mcp_server.__file__).read_text(encoding="utf-8")
 
-    assert "/opt/TGW/tgw-lib/coding-runtime/current" in launcher
+    assert "-m tgw.coding_mcp_server" in launcher
+    assert "coding-runtime" not in launcher  # runs the live editable source, not a materialized release
     assert "TGW_CODING_CONFIG=/opt/TGW/tgw-lib/config/tgw-coding-local.json" in launcher
     assert "tgw.coding_mcp_server" in launcher
     assert "coding_cli.start" in source

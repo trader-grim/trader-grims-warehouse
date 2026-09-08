@@ -7,8 +7,12 @@ import tgw.api as api
 from tgw.queue import WORKER_QUEUES
 
 
-def test_autonomous_coding_queues_use_the_canonical_worker_registry():
-    assert {"codex-implement", "claude-review", "controller-verify", "hermes-stitch"}.issubset(WORKER_QUEUES)
+def test_the_dead_coding_lanes_are_not_in_the_worker_registry():
+    # The codex-implement / claude-review / controller-verify / hermes-stitch
+    # queue lanes retired with the coding-lifecycle apparatus
+    # (LEAF-11-1.DELETE-APPARATUS). The tgw-lib coding loop is the orchestrator.
+    for dead in ("codex-implement", "claude-review", "controller-verify", "hermes-stitch"):
+        assert dead not in WORKER_QUEUES
     assert "operator-admit" not in WORKER_QUEUES
 
 

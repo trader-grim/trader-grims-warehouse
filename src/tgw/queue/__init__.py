@@ -21,12 +21,6 @@ WORKER_QUEUES: tuple[str, ...] = (
     'multi_intake',
     'ai_identify',
     'catalog_rebuild',
-    # Autonomous coding lanes use the ordinary tgw-worker@<queue> operational
-    # path.  operator-admit is intentionally absent: it is a human gate.
-    'codex-implement',
-    'claude-review',
-    'controller-verify',
-    'hermes-stitch',
     'plan_render',
     'thumbnail_gen',
     'normalize_condition',
