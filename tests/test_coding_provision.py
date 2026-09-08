@@ -17,12 +17,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tgw import api, coding_cli, coding_execution, coding_provision, coding_provision_worker, http_server
-from tgw.development.coding_snapshot import serialize_snapshot
+from tgw.coding_snapshot import serialize_snapshot
 from tgw.development.treatments import CODING_TREATMENTS
 from tgw.errors import TreatmentFailure
 from tgw.queue.worker_base import HardFailure
-from tgw.workers import coding as coding_worker
-from tgw.workers.coding import CodingWorker
 from tgw.workflow_kernel.contracts import EvidenceAssertion, FingerprintResult, ObjectSnapshot
 
 
@@ -30,7 +28,6 @@ def test_coding_defaults_use_shared_development_repository() -> None:
     expected = Path("/opt/TGW/tgw-lib/src/trader-grims-warehouse")
 
     assert coding_execution.DEFAULT_REPOSITORY_ROOT == expected
-    assert coding_worker.DEFAULT_REPOSITORY_ROOT == expected
 
 
 def test_deployed_wrapper_and_candidate_parser_expose_coding_resume() -> None:
@@ -63,10 +60,7 @@ def test_deployed_wrapper_and_candidate_parser_expose_coding_resume() -> None:
     assert candidate.returncode == 0, candidate.stderr
     assert "usage: tgw coding resume" in candidate.stdout
     assert "TODO_ID" in candidate.stdout
-    assert "/opt/TGW/src/trader-grims-warehouse" not in {
-        str(coding_execution.DEFAULT_REPOSITORY_ROOT),
-        str(coding_worker.DEFAULT_REPOSITORY_ROOT),
-    }
+    assert str(coding_execution.DEFAULT_REPOSITORY_ROOT) != "/opt/TGW/src/trader-grims-warehouse"
 
 
 class NativeQueue:
@@ -263,7 +257,7 @@ def _execution_envelope() -> dict:
         "treatment_version": treatment.version,
         "graph_id": "graph-1738",
         "object_generation": "gen-a",
-        "evaluator_version": "foreman/v1",
+        "evaluator_version": "coding-provision/v1",
         "evidence_set_hash": "evidence-1738",
         "treatment_registry_hash": "registry-1738",
         "task_spec": task_spec,
@@ -1057,7 +1051,7 @@ location = {
 }
 execution = {
     "todo_id": 1738, "treatment_id": "claude-review", "treatment_version": "1",
-    "graph_id": "graph", "object_generation": "generation", "evaluator_version": "foreman/v1",
+    "graph_id": "graph", "object_generation": "generation", "evaluator_version": "coding-provision/v1",
     "evidence_set_hash": "evidence", "treatment_registry_hash": "registry",
     "task_spec": {"schema": "coding-task/v1", "todo_id": 1738, "agent": "codex", "body": "coding todo"},
     "task_spec_hash": "task-hash",
@@ -1303,7 +1297,7 @@ def test_canonical_claim_looks_up_todo_and_derives_contract_bound_envelope(tmp_p
     assert execution["treatment_id"] == "claude-review"
     assert execution["treatment_version"] == "1"
     assert execution["graph_id"]
-    assert execution["evaluator_version"] == "foreman/v1"
+    assert execution["evaluator_version"] == "coding-provision/v1"
     assert execution["evidence_set_hash"]
     assert execution["treatment_registry_hash"]
     assert execution["task_spec"] == {
@@ -2053,17 +2047,3 @@ def test_coding_resume_is_start_on_the_same_ledger_task(monkeypatch):
     assert seen["task_id"] == "todo-1792"
 
 
-def test_execution_boundary_accepts_only_local_allowed_argv_runner(tmp_path):
-    worker = CodingWorker(
-        "claude-review",
-        {
-            "coding": {
-                "commands": {"claude-review": ["local-runner", "review"]},
-                "allowed_runners": ["local-runner"],
-            }
-        },
-    )
-    assert worker._configured_command("claude-review") == ["local-runner", "review"]
-    worker.config["coding"]["commands"]["claude-review"] = ["ssh", "host", "run"]
-    with pytest.raises(HardFailure, match="local argv protocol"):
-        worker._configured_command("claude-review")

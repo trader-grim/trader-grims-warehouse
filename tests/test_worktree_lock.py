@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tgw.development import worktree_lease
+from tgw import worktree_lock as worktree_lease
 from tgw.errors import HardFailure
 
 

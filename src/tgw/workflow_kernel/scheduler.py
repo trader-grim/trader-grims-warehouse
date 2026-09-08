@@ -364,7 +364,7 @@ def build_and_dispatch(
     evaluator_version: str = EVALUATOR_VERSION,
 ) -> Optional[str]:
     """Convenience wrapper: build a coding snapshot, evaluate, then dispatch."""
-    from tgw.development.coding_snapshot import build_coding_snapshot
+    from tgw.coding_snapshot import build_coding_snapshot
     from tgw.workflow_kernel.evaluator import evaluate
 
     snapshot = build_coding_snapshot(worktree_path, goal_profile)

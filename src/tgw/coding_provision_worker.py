@@ -20,16 +20,16 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from tgw.coding_execution import DEFAULT_REPOSITORY_ROOT, execute_authorized_treatment, execution_envelope, validated_coding_worktree
+from tgw.coding_snapshot import build_coding_snapshot, serialize_snapshot
 from tgw.config import (
     DEFAULT_CONFIG,
     load_coding_worker_config,
     validate_worker_endpoint,
     validate_worker_execution_config,
 )
-from tgw.errors import HardFailure, TreatmentFailure
-from tgw.development.coding_snapshot import build_coding_snapshot, serialize_snapshot
 from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw.development.treatments import CODING_TREATMENTS
+from tgw.errors import HardFailure, TreatmentFailure
 
 
 def _coding(config: dict[str, Any]) -> dict[str, Any]:

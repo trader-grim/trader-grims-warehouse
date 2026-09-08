@@ -13,7 +13,7 @@ import pytest
 # Ensure src/ is on the path so we can import tgw.workflow
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from tgw.development.coding_snapshot import (  # noqa: E402
+from tgw.coding_snapshot import (  # noqa: E402
     _CHECKERS,
     CONTROLLER_PYTHON,
     _check_admitted,
@@ -26,7 +26,6 @@ from tgw.development.coding_snapshot import (  # noqa: E402
     _git_rev_parse,
     build_coding_snapshot,
 )
-from tgw.development.partial_resume import preservation_manifest, source_tree  # noqa: E402
 from tgw.workflow import (  # noqa: E402
     EvidenceReference,
     FingerprintResult,
@@ -38,7 +37,7 @@ from tgw.workflow import (  # noqa: E402
 def test_test_and_lint_checks_use_controller_python(tmp_path):
     """Coding snapshots use controller Python without mutating cache state."""
     completed = subprocess.CompletedProcess([], 0, "", "")
-    with patch("tgw.development.coding_snapshot.subprocess.run", return_value=completed) as run:
+    with patch("tgw.coding_snapshot.subprocess.run", return_value=completed) as run:
         _CHECKERS["tested"](tmp_path)
         _CHECKERS["linted"](tmp_path)
 
@@ -77,23 +76,6 @@ def _git_init(path: Path) -> None:
         cwd=str(path),
         check=True,
     )
-
-
-def _preservation(path: Path) -> Path:
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=path, check=True,
-        capture_output=True, text=True,
-    ).stdout.strip()
-    binding = {
-        "todo_id": 1792, "plan_commit": "b" * 40,
-        "solution_hash": "sha256:" + "c" * 64, "source_commit": head,
-        "source_tree": source_tree(path, head), "actor": "codex",
-        "worktree": str(path.resolve()), "treatment_id": "codex-implement",
-        "treatment_version": "1",
-    }
-    return preservation_manifest(path, {"state": "UNSAFE_DIRTY"}, binding)
-
-
 def _git_commit(path: Path, message: str, *, allow_empty: bool = False) -> str:
     """Make a commit and return its SHA."""
     subprocess.run(["git", "add", "-A"], cwd=str(path), check=True)
@@ -135,7 +117,7 @@ class TestGitHelpers:
             [], 0, "a" * 40 + "\n", "",
         )
         with patch(
-            "tgw.development.coding_snapshot.subprocess.run",
+            "tgw.coding_snapshot.subprocess.run",
             return_value=completed,
         ) as run:
             assert _git_rev_parse(tmp_path, "HEAD") == "a" * 40
@@ -193,62 +175,6 @@ class TestGitHelpers:
         (tmp_path / "ignored").mkdir()
         (tmp_path / "ignored/value").write_text("mutable")
         assert _git_is_clean(tmp_path) is False
-
-    def test_only_content_addressed_binding_matching_preservation_is_evidence(self, tmp_path):
-        _git_init(tmp_path)
-        _git_commit(tmp_path, "initial", allow_empty=True)
-        manifest = _preservation(tmp_path)
-        assert _git_is_clean(tmp_path) is True
-
-        original = manifest.read_bytes()
-        manifest.chmod(0o640)
-        manifest.write_text("{}\n")
-        assert _git_is_clean(tmp_path) is False
-        manifest.write_bytes(original)
-        manifest.rename(manifest.with_name("lookalike.json"))
-        assert _git_is_clean(tmp_path) is False
-
-    def test_preservation_directories_symlinks_staged_ignored_and_renames_are_dirty(self, tmp_path):
-        _git_init(tmp_path)
-        _git_commit(tmp_path, "initial", allow_empty=True)
-        root = tmp_path / ".tgw-coding-preservation"
-        root.mkdir()
-        (root / ("a" * 64 + ".json")).mkdir()
-        assert _git_is_clean(tmp_path) is False
-        (root / ("a" * 64 + ".json")).rmdir()
-        (root / ("a" * 64 + ".json")).symlink_to("../escape")
-        assert _git_is_clean(tmp_path) is False
-        (root / ("a" * 64 + ".json")).unlink()
-
-        manifest = _preservation(tmp_path)
-        subprocess.run(["git", "add", "-f", str(manifest)], cwd=tmp_path, check=True)
-        assert _git_is_clean(tmp_path) is False
-        subprocess.run(["git", "reset", "HEAD", "--", str(manifest)], cwd=tmp_path, check=True)
-        moved = manifest.with_name("b" * 64 + ".json")
-        manifest.rename(moved)
-        assert _git_is_clean(tmp_path) is False
-
-    def test_ignored_or_late_mutated_preservation_cannot_hide_source_state(self, tmp_path):
-        _git_init(tmp_path)
-        (tmp_path / ".gitignore").write_text(".tgw-coding-preservation/\n")
-        subprocess.run(["git", "add", ".gitignore"], cwd=tmp_path, check=True)
-        subprocess.run(["git", "commit", "-m", "ignore"], cwd=tmp_path, check=True,
-                       capture_output=True)
-        manifest = _preservation(tmp_path)
-        assert _git_is_clean(tmp_path) is False
-
-        subprocess.run(["git", "rm", ".gitignore"], cwd=tmp_path, check=True,
-                       capture_output=True)
-        subprocess.run(["git", "commit", "-m", "unignore"], cwd=tmp_path, check=True,
-                       capture_output=True)
-        manifest.chmod(0o640)
-        manifest.unlink()
-        manifest = _preservation(tmp_path)
-        assert _git_is_clean(tmp_path) is True
-        manifest.chmod(0o640)
-        manifest.write_bytes(manifest.read_bytes() + b" ")
-        assert _git_is_clean(tmp_path) is False
-
     def test_find_canonical_main(self, tmp_path):
         _git_init(tmp_path)
         _git_commit(tmp_path, "initial", allow_empty=True)
@@ -348,7 +274,10 @@ class TestCheckImplemented:
         assert "still matches" in reasons[0]
         assert evidence[0].supersession_identity == baseline
 
-    def test_source_bound_clean_successor_without_receipt_lineage_is_not_implemented(self, tmp_path):
+    def test_source_bound_clean_successor_is_implemented(self, tmp_path):
+        # The .tgw-coding-history implementation-lineage fence retired with the
+        # coding-lifecycle apparatus (LEAF-11-1.DELETE-APPARATUS): a clean
+        # committed successor of the baseline on a real branch is sufficient.
         _git_init(tmp_path)
         baseline = _git_commit(tmp_path, "bootstrap", allow_empty=True)
         _git_write_file(tmp_path, "implementation.py", "implemented = True\n")
@@ -356,8 +285,8 @@ class TestCheckImplemented:
 
         result, reasons, _ = _check_implemented(tmp_path, baseline)
 
-        assert result is FingerprintResult.FALSE
-        assert "lineage" in reasons[0]
+        assert result is FingerprintResult.TRUE
+        assert "clean committed successor" in reasons[0]
 
     def test_source_bound_empty_successor_is_not_implemented(self, tmp_path):
         _git_init(tmp_path)

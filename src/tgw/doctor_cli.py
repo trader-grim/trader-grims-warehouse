@@ -4445,382 +4445,6 @@ def check_harness_executors(paths: DoctorPaths) -> dict[str, Any]:
         return _failed(identity, exc)
 
 
-_TODO_BINDINGS_SQL = """
-SELECT COALESCE(
-    json_agg(json_build_object('id', id, 'agent', agent, 'status_note', status_note)),
-    '[]'::json
-)::text
-FROM public.todo_items
-WHERE status_note IS NOT NULL
-"""
-
-
-def _todo_binding_rows(paths: DoctorPaths) -> list[dict[str, Any]]:
-    config = _coding_config(paths)
-    actor = _ordinary_coding_probe_actor(paths)
-    current = pwd.getpwuid(os.geteuid()).pw_name
-    if actor != current:
-        result = _run(
-            [
-                "sudo",
-                "-n",
-                "-u",
-                actor,
-                "/usr/bin/psql",
-                f"--dbname={config['postgres_dsn']}",
-                "--no-align",
-                "--tuples-only",
-                "--command",
-                _TODO_BINDINGS_SQL,
-            ],
-            timeout=30,
-        )
-        if result.returncode:
-            raise DoctorError(result.stderr.strip() or "cannot read Todo Plan bindings")
-        raw = result.stdout.strip()
-    else:
-        psycopg2, _extras = _postgres_driver()
-        with psycopg2.connect(config["postgres_dsn"]) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(_TODO_BINDINGS_SQL)
-                raw = cursor.fetchone()[0]
-    rows = json.loads(raw) if isinstance(raw, str) else raw
-    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-        raise DoctorError("Todo Plan binding query returned malformed data")
-    return rows
-
-
-def _bound_coding_states(paths: DoctorPaths, locations: Sequence[Path]) -> dict[str, dict[str, Any]]:
-    from tgw.development.partial_resume import classify as classify_coding
-    from tgw.development.partial_resume import source_tree
-    from tgw.development.plan_binding import parse_plan_binding
-
-    requested = {
-        location.resolve() for location in locations if location.is_dir() and paths.worktrees.resolve() in location.resolve().parents and re.fullmatch(r"todo-[0-9]+-plan-[0-9a-f]+", location.name)
-    }
-    if not requested:
-        return {}
-    expected_by_path: dict[Path, dict[str, Any]] = {}
-    for row in _todo_binding_rows(paths):
-        todo_id = row.get("id")
-        if not isinstance(todo_id, int):
-            continue
-        try:
-            binding = parse_plan_binding(row.get("status_note"), todo_id=todo_id)
-        except ValueError:
-            continue
-        if binding is None:
-            continue
-        location = Path(binding["worktree"]).resolve()
-        if location not in requested:
-            continue
-        expected_by_path[location] = {
-            "todo_id": todo_id,
-            "plan_commit": binding["plan_commit"],
-            "solution_hash": binding["solution_hash"],
-            "source_commit": binding["source_commit"],
-            "source_tree": source_tree(location, binding["source_commit"]),
-            "actor": row.get("agent") or "codex",
-            "worktree": str(location),
-            "treatment_id": "codex-implement",
-            "treatment_version": "1",
-        }
-    states = {}
-    for location in sorted(requested):
-        expected = expected_by_path.get(location)
-        legacy = None
-        descriptor = -1
-        try:
-            if expected is not None and expected.get("todo_id") in _PRE_LEDGER_PRESERVATION:
-                descriptor = _open_direct_directory(location)
-                legacy = _authenticate_pre_ledger_preservation(location, descriptor, grp.getgrnam("tgw-coders").gr_gid)
-                fixture = _PRE_LEDGER_PRESERVATION[expected["todo_id"]]
-                if legacy is not None and any(
-                    (
-                        expected.get("plan_commit") != _PRE_LEDGER_PLAN_COMMIT,
-                        expected.get("solution_hash") != _PRE_LEDGER_SOLUTION_HASH,
-                        expected.get("source_commit") != fixture["source_commit"],
-                        expected.get("source_tree") != fixture["source_tree"],
-                        expected.get("actor") != "codex",
-                        expected.get("worktree") != str(location),
-                    )
-                ):
-                    os.close(legacy["descriptor"])
-                    os.close(legacy["preservation_descriptor"])
-                    legacy = None
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-        if legacy is not None:
-            os.close(legacy["descriptor"])
-            os.close(legacy["preservation_descriptor"])
-            fixture = _PRE_LEDGER_PRESERVATION[expected["todo_id"]]
-            classified = {
-                "state": "CLOSED_CANDIDATE",
-                "resumable": False,
-                "history": [],
-                "source": {"head": fixture["candidate_commit"], "tree": fixture["candidate_tree"], "changed_paths": []},
-                "legacy_pre_ledger": True,
-            }
-        elif expected is not None:
-            classified = classify_coding(location, expected)
-        else:
-            classified = {
-                "state": "STALE_RECEIPT",
-                "resumable": False,
-                "error": "worktree has no exact current Todo Plan binding",
-                "history": [],
-            }
-        source = classified.get("source")
-        history_rows = classified.get("history")
-        states[str(location)] = {
-            "state": classified.get("state"),
-            "resumable": classified.get("resumable", False),
-            "attempts": len(history_rows) if isinstance(history_rows, list) else 0,
-            "resume_of": classified.get("resume_of"),
-            "predecessor": classified.get("predecessor"),
-            "fingerprint": classified.get("fingerprint"),
-            "source_head": source.get("head") if isinstance(source, dict) else None,
-            "source_tree": source.get("tree") if isinstance(source, dict) else None,
-            "changed_paths": source.get("changed_paths") if isinstance(source, dict) else None,
-            "error": classified.get("error"),
-            "legacy_pre_ledger": classified.get("legacy_pre_ledger", False),
-        }
-    return states
-
-
-def _publish_reconciled_implementation(
-    worktree: Path,
-    attempt: Mapping[str, Any],
-    receipt_path: Path,
-    receipt: Mapping[str, Any],
-    *,
-    mode: int,
-) -> Path:
-    """Durably append canonical history before refreshing its projection."""
-    from tgw.development.partial_resume import append_attempt
-
-    history_path = append_attempt(worktree, attempt)
-    _atomic_json(receipt_path, receipt, mode=mode)
-    return history_path
-
-
-def reconcile_implementation_receipt(todo_id: int, paths: DoctorPaths | None = None) -> dict[str, Any]:
-    """Append exact evidence for an older runner's already-closed successor."""
-    from tgw.development.partial_resume import (
-        candidate_changed_paths,
-        history,
-        make_attempt,
-        source_fingerprint,
-        source_tree,
-        validate_closed_candidate,
-        validate_implementation_lineage,
-    )
-    from tgw.development.plan_binding import parse_plan_binding
-    from tgw.development.worktree_lease import exclusive_worktree_lease
-
-    paths = paths or DoctorPaths()
-    # This first lookup locates the lock only.  It grants no reconciliation
-    # authority; every byte is reread after the canonical lease is held.
-    matches = [row for row in _todo_binding_rows(paths) if row.get("id") == todo_id]
-    if len(matches) != 1:
-        raise DoctorError("Todo reconciliation requires one exact durable Plan binding")
-    row = matches[0]
-    try:
-        plan = parse_plan_binding(row.get("status_note"), todo_id=todo_id)
-    except ValueError as exc:
-        raise DoctorError("Todo reconciliation Plan binding is malformed") from exc
-    if plan is None:
-        raise DoctorError("Todo reconciliation Plan binding is absent")
-    worktree = Path(plan["worktree"]).resolve(strict=True)
-    if paths.worktrees.resolve() not in worktree.parents:
-        raise DoctorError("Todo reconciliation worktree is outside the managed root")
-    with exclusive_worktree_lease(worktree):
-        locked_matches = [item for item in _todo_binding_rows(paths) if item.get("id") == todo_id]
-        if len(locked_matches) != 1:
-            raise DoctorError("Todo binding changed while acquiring its worktree lease")
-        locked_row = locked_matches[0]
-        try:
-            locked_plan = parse_plan_binding(locked_row.get("status_note"), todo_id=todo_id)
-        except ValueError as exc:
-            raise DoctorError("Todo reconciliation Plan binding changed or is malformed") from exc
-        if locked_plan != plan or Path(locked_plan["worktree"]).resolve(strict=True) != worktree:
-            raise DoctorError("Todo binding changed while acquiring its worktree lease")
-        attempts = history(worktree)
-        if not attempts:
-            raise DoctorError("Todo reconciliation has no durable implementation attempt")
-        latest = attempts[-1]
-        required = {
-            "todo_id": todo_id,
-            "plan_commit": plan["plan_commit"],
-            "solution_hash": plan["solution_hash"],
-            "source_commit": plan["source_commit"],
-            "source_tree": source_tree(worktree, plan["source_commit"]),
-            "actor": locked_row.get("agent") or "codex",
-            "worktree": str(worktree),
-            "treatment_id": "codex-implement",
-            "treatment_version": "1",
-        }
-        if any(latest.get(key) != value for key, value in required.items()):
-            raise DoctorError("implementation attempt contradicts the current Todo binding")
-        if latest.get("outcome") != "satisfied":
-            raise DoctorError("implementation reconciliation refuses a non-satisfied latest attempt")
-        current = source_fingerprint(worktree)
-        if current["changed_paths"] or current["head"] == required["source_commit"] or latest.get("head") != current["head"] or latest.get("tree") != current["tree"]:
-            raise DoctorError("implementation reconciliation requires the attempt's exact clean closed successor")
-        prior_closed = [item for item in latest.get("artifacts", []) if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"]
-        already_reconciled = False
-        legacy_closed = (
-            len(prior_closed) == 1 and set(prior_closed[0]) == {"kind", "commit", "tree"} and prior_closed[0].get("commit") == current["head"] and prior_closed[0].get("tree") == current["tree"]
-        )
-        if not legacy_closed:
-            try:
-                if len(prior_closed) == 1:
-                    validate_closed_candidate(worktree, prior_closed[0], base_commit=required["source_commit"], candidate_commit=current["head"], candidate_tree=current["tree"])
-                    already_reconciled = True
-            except ValueError:
-                pass
-            if not already_reconciled:
-                raise DoctorError("implementation reconciliation requires exactly one permissible legacy closed candidate")
-        closed = (
-            dict(prior_closed[0])
-            if already_reconciled
-            else {
-                **dict(prior_closed[0]),
-                "base_commit": required["source_commit"],
-                "changed_paths": candidate_changed_paths(
-                    worktree,
-                    required["source_commit"],
-                    current["head"],
-                ),
-            }
-        )
-        validate_closed_candidate(worktree, closed, base_commit=required["source_commit"], candidate_commit=current["head"], candidate_tree=current["tree"])
-        implementation_receipt = worktree / "implementation-receipt.json"
-        try:
-            prior_receipt_bytes = implementation_receipt.read_bytes()
-            prior_receipt = json.loads(prior_receipt_bytes)
-        except (OSError, json.JSONDecodeError) as exc:
-            raise DoctorError("durable implementation receipt is absent or unreadable") from exc
-        prior_receipt_sha256 = "sha256:" + hashlib.sha256(prior_receipt_bytes).hexdigest()
-        config = _coding_config(paths)
-        psycopg2, _extras = _postgres_driver()
-        with psycopg2.connect(config["postgres_dsn"]) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """SELECT job_id::text, state::text, attempt_count, queue_name, payload_json
-                       FROM queue_jobs WHERE job_id = %s::uuid OR payload_json->>'worktree' = %s
-                         OR payload_json#>>'{task_spec,worktree}' = %s FOR SHARE""",
-                    (latest.get("job_id"), str(worktree), str(worktree)),
-                )
-                jobs = cursor.fetchall()
-                if any(job[1] not in {"succeeded", "failed", "dead_letter", "cancelled"} for job in jobs):
-                    raise DoctorError("implementation reconciliation refuses active work")
-                exact = [job for job in jobs if job[0] == latest.get("job_id")]
-                if len(exact) != 1 or exact[0][1] != "succeeded" or exact[0][2] != latest.get("attempt_count") or exact[0][3] != "codex-implement":
-                    raise DoctorError("implementation reconciliation requires one exact succeeded implementation job")
-                payload = exact[0][4]
-                result = payload.get("result") if isinstance(payload, Mapping) else None
-                result_matches_receipt = result == prior_receipt
-                if already_reconciled and isinstance(result, Mapping):
-                    result_closed = [item for item in result.get("artifacts", []) if isinstance(item, Mapping) and item.get("kind") == "closed_candidate"]
-                    result_matches_receipt = (
-                        len(result_closed) == 1
-                        and set(result_closed[0]) == {"kind", "commit", "tree"}
-                        and result_closed[0].get("commit") == current["head"]
-                        and result_closed[0].get("tree") == current["tree"]
-                    )
-                if not isinstance(result, Mapping) or not result_matches_receipt or result.get("outcome") != "satisfied" or result.get("status") != "PASS":
-                    raise DoctorError("implementation reconciliation requires the exact durable succeeded job result")
-                if payload.get("todo_id") != todo_id or payload.get("worktree") != str(worktree) or payload.get("plan_binding") != prior_receipt.get("plan_binding"):
-                    raise DoctorError("implementation job/result binding contradicts Todo or Plan")
-                durable_prior_receipt_sha256 = (
-                    "sha256:"
-                    + hashlib.sha256(
-                        (json.dumps(result, sort_keys=True) + "\n").encode(),
-                    ).hexdigest()
-                )
-                # Revalidate every mutable input immediately before the append
-                # while both the worktree lease and durable job row lock remain held.
-                if history(worktree)[-1]["attempt_hash"] != latest["attempt_hash"] or source_fingerprint(worktree) != current or implementation_receipt.read_bytes() != prior_receipt_bytes:
-                    raise DoctorError("implementation source, history, or receipt changed before append")
-                if already_reconciled:
-                    reconciliation_items = [item for item in latest.get("artifacts", []) if isinstance(item, Mapping) and item.get("kind") == "implementation_reconciliation"]
-                    if (
-                        len(reconciliation_items) != 1
-                        or reconciliation_items[0].get("prior_receipt_sha256") != durable_prior_receipt_sha256
-                        or reconciliation_items[0].get("prior_attempt_hash") != latest.get("predecessor")
-                    ):
-                        raise DoctorError("existing reconciliation receipt-byte or attempt lineage is invalid")
-                    recovered_receipt = {**prior_receipt, "artifacts": list(latest["artifacts"])}
-                    expected_bytes = (json.dumps(recovered_receipt, indent=2, sort_keys=True) + "\n").encode()
-                    changed = prior_receipt_bytes != expected_bytes
-                    if changed:
-                        _atomic_json(implementation_receipt, recovered_receipt, mode=stat.S_IMODE(implementation_receipt.stat().st_mode))
-                    validate_implementation_lineage(
-                        worktree,
-                        base_commit=required["source_commit"],
-                        candidate_commit=current["head"],
-                        candidate_tree=current["tree"],
-                        receipt=recovered_receipt,
-                        expected=required,
-                    )
-                    return {
-                        "schema": "tgw-implementation-reconciliation/v1",
-                        "ok": True,
-                        "changed": changed,
-                        "todo_id": todo_id,
-                        "job_id": latest["job_id"],
-                        "prior_attempt_hash": latest.get("predecessor"),
-                        "prior_receipt_sha256": durable_prior_receipt_sha256,
-                        "attempt_hash": latest["attempt_hash"],
-                        "worktree": str(worktree),
-                    }
-                reconciliation = {
-                    "kind": "implementation_reconciliation",
-                    "schema": "tgw-implementation-reconciliation/v1",
-                    "prior_attempt_hash": latest["attempt_hash"],
-                    "prior_receipt_sha256": prior_receipt_sha256,
-                    "prior_receipt_b64": base64.b64encode(prior_receipt_bytes).decode("ascii"),
-                    "job_id": latest["job_id"],
-                    "todo_id": todo_id,
-                    "plan_commit": required["plan_commit"],
-                }
-                keys = ("job_id", "attempt_count", "todo_id", "plan_commit", "solution_hash", "source_commit", "source_tree", "actor", "worktree", "treatment_id", "treatment_version")
-                reconciled = make_attempt({key: latest[key] for key in keys}, worktree, outcome="satisfied", predecessor=latest["attempt_hash"], artifacts=[closed, reconciliation])
-                recovered_receipt = {**prior_receipt, "artifacts": [closed, reconciliation]}
-                # History is canonical and durable first.  A crash or receipt
-                # publication failure leaves a deterministically recoverable
-                # append-only successor, never a top-level-first window.
-                receipt_path = _publish_reconciled_implementation(
-                    worktree,
-                    reconciled,
-                    implementation_receipt,
-                    recovered_receipt,
-                    mode=stat.S_IMODE(implementation_receipt.stat().st_mode),
-                )
-                validate_implementation_lineage(
-                    worktree,
-                    base_commit=required["source_commit"],
-                    candidate_commit=current["head"],
-                    candidate_tree=current["tree"],
-                    receipt=recovered_receipt,
-                    expected=required,
-                )
-        return {
-            "schema": "tgw-implementation-reconciliation/v1",
-            "ok": True,
-            "changed": True,
-            "todo_id": todo_id,
-            "job_id": latest["job_id"],
-            "prior_attempt_hash": latest["attempt_hash"],
-            "prior_receipt_sha256": prior_receipt_sha256,
-            "attempt_hash": reconciled["attempt_hash"],
-            "worktree": str(worktree),
-            "receipt": str(receipt_path),
-        }
-
-
 def check_worktrees(paths: DoctorPaths) -> dict[str, Any]:
     try:
         raw = _git(paths.repository, "worktree", "list", "--porcelain")
@@ -4844,25 +4468,18 @@ def check_worktrees(paths: DoctorPaths) -> dict[str, Any]:
                 outside.append(str(location))
             if "prunable" in row:
                 prunable.append(str(location))
-        locations = [Path(str(row.get("worktree", ""))).resolve() for row in rows]
-        coding_states = _bound_coding_states(paths, locations)
-        coding_counts = {
-            name: sum(item.get("state") == name for item in coding_states.values())
-            for name in (
-                "ABANDONED_CLEAN",
-                "RESUMABLE_PARTIAL",
-                "CLOSED_CANDIDATE",
-                "UNSAFE_DIRTY",
-                "STALE_RECEIPT",
-            )
-        }
+        # Coding worktrees are ephemeral now (the orchestrator creates one per
+        # task and deletes it on land/abandon — LEAF-11-1.DELETE-APPARATUS), so
+        # this check is pure git hygiene: orphans, prunables, and the
+        # same-filesystem requirement the squash-and-fast-forward needs.
         same_filesystem = paths.repository.stat().st_dev == paths.worktrees.stat().st_dev
-        attention = coding_counts["RESUMABLE_PARTIAL"] + coding_counts["UNSAFE_DIRTY"] + coding_counts["STALE_RECEIPT"]
+        attention = 0
         state = "PASS" if not outside and not prunable and same_filesystem and not attention else "WARN"
         return _check(
             "git.worktrees",
             state,
-            f"{len(rows)} linked worktree(s); {'same' if same_filesystem else 'different'} filesystem; {len(outside)} outside root; {len(prunable)} prunable; coding states {coding_counts}",
+            f"{len(rows)} linked worktree(s); {'same' if same_filesystem else 'different'} filesystem; "
+            f"{len(outside)} outside root; {len(prunable)} prunable",
             evidence={
                 "repository": str(repository),
                 "worktree_root": str(root),
@@ -4870,8 +4487,6 @@ def check_worktrees(paths: DoctorPaths) -> dict[str, Any]:
                 "count": len(rows),
                 "outside_root": outside,
                 "prunable": prunable,
-                "coding_states": coding_states,
-                "coding_state_counts": coding_counts,
             },
         )
     except Exception as exc:
@@ -4896,8 +4511,6 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
     repository = paths.repository.resolve()
     root = paths.worktrees.resolve()
     worktrees: list[dict[str, Any]] = []
-    locations = [Path(str(row.get("worktree", ""))).resolve() for row in rows]
-    coding_states = _bound_coding_states(paths, locations)
     for row in rows:
         location = Path(str(row.get("worktree", ""))).resolve()
         head = str(row.get("HEAD", ""))
@@ -4965,7 +4578,6 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
                 "merged_into_canonical": merged_into_canonical,
                 "preservation_required": preservation_required,
                 "errors": errors,
-                "coding_state": coding_states.get(str(location)),
             }
         )
 
@@ -5125,16 +4737,6 @@ def inventory(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
             "archive_roots": sum(row["exists"] is True for row in archives),
             "catalog_actors": len(catalog_actors),
             "unix_coding_actors": len(unix_actors),
-            "coding_states": {
-                name: sum(item.get("state") == name for item in coding_states.values())
-                for name in (
-                    "ABANDONED_CLEAN",
-                    "RESUMABLE_PARTIAL",
-                    "CLOSED_CANDIDATE",
-                    "UNSAFE_DIRTY",
-                    "STALE_RECEIPT",
-                )
-            },
         },
         "cleanup_boundary": (
             "inventory is read-only; archive dirty or unique work before unlinking any "
@@ -9348,181 +8950,6 @@ def _replace_link(path: Path, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def repair_runtime(
-    paths: DoctorPaths, *, desired_commit: str | None = None
-) -> dict[str, Any]:
-    _require_root()
-    if desired_commit is None:
-        desired, release, _task = _desired_runtime(paths)
-    else:
-        if _COMMIT.fullmatch(desired_commit) is None:
-            raise DoctorError("runtime repair commit is invalid")
-        desired = desired_commit
-        release = paths.runtime_root / "releases" / desired
-    head, _tree, status = _source_identity(paths)
-    if status or head != desired:
-        raise DoctorError("runtime repair requires clean canonical source at the declared commit")
-    release_tree = _verify_release_tree(paths, desired, release)
-    current_link = paths.runtime_root / "current"
-    if current_link.exists() and not current_link.is_symlink():
-        raise DoctorError("runtime selector is not a symlink; automatic replacement is unsafe")
-    launcher_links = _launcher_links(paths)
-    for destination, target in launcher_links.items():
-        source = release / "bin" / target.name
-        if not source.is_file():
-            raise DoctorError(f"declared release lacks launcher {source}")
-        if not destination.is_symlink() or os.readlink(destination) != str(target):
-            raise DoctorError(f"fixed launcher drift requires bounded bootstrap repair: {destination}")
-    operator_source = release / "bin/tgw-operator"
-    operator_before = _operator_launcher_identity(paths, operator_source)
-    if not operator_before["exact"]:
-        raise DoctorError(
-            f"fixed launcher drift requires bounded bootstrap repair: {paths.operator_cli}"
-        )
-    bootstrap_source = release / "bin/tgw-coding-bootstrap"
-    bootstrap_before = _fixed_root_launcher_identity(
-        paths, paths.coding_bootstrap, bootstrap_source
-    )
-    if not bootstrap_before["exact"]:
-        raise DoctorError(
-            f"fixed launcher drift requires bounded bootstrap repair: {paths.coding_bootstrap}"
-        )
-    previous_selector = os.readlink(current_link) if current_link.is_symlink() else None
-    before = {
-        "current_link": previous_selector,
-        "current": str(current_link.resolve(strict=False)),
-        "launchers": {
-            str(path): {
-                "kind": "symlink",
-                "target": os.readlink(path),
-                "sha256": _file_hash(path) if path.is_file() else None,
-            }
-            for path in launcher_links
-        },
-        "operator_launcher": operator_before,
-        "bootstrap_launcher": bootstrap_before,
-    }
-    changed = current_link.resolve(strict=False) != release.resolve()
-    try:
-        if changed:
-            _replace_link(current_link, Path("releases") / desired)
-        _verify_release_tree(paths, desired, release)
-    except Exception as exc:
-        rollback_errors = []
-        installed_selector = str(Path("releases") / desired)
-        selector_still_ours = (
-            current_link.is_symlink()
-            and os.readlink(current_link) == installed_selector
-        )
-        if not changed:
-            rollback_errors.append(
-                "selector was not changed by this repair; no rollback attempted"
-            )
-        elif not selector_still_ours:
-            rollback_errors.append(
-                "concurrent selector change preserved; automatic rollback refused"
-            )
-        elif previous_selector is not None:
-            try:
-                _replace_link(current_link, Path(previous_selector))
-            except Exception as rollback_exc:
-                rollback_errors.append(str(rollback_exc))
-        elif current_link.is_symlink():
-            try:
-                current_link.unlink()
-            except Exception as rollback_exc:
-                rollback_errors.append(str(rollback_exc))
-        suffix = "; rollback errors: " + "; ".join(rollback_errors) if rollback_errors else "; original selector restored"
-        raise DoctorError(f"runtime commit failed: {exc}{suffix}") from exc
-    if (
-        not current_link.is_symlink()
-        or os.readlink(current_link) != str(Path("releases") / desired)
-        or current_link.resolve(strict=True) != release.resolve(strict=True)
-    ):
-        raise DoctorError("runtime selector changed before repair completion")
-    after = {
-        "current_link": os.readlink(current_link),
-        "current": str(current_link.resolve(strict=True)),
-        "launchers": {str(path): {"target": os.readlink(path), "sha256": _file_hash(path)} for path in launcher_links},
-        "operator_launcher": _operator_launcher_identity(paths, operator_source),
-        "bootstrap_launcher": _fixed_root_launcher_identity(
-            paths, paths.coding_bootstrap, bootstrap_source
-        ),
-        "release_tree": release_tree,
-    }
-    receipt = _receipt(paths, "runtime", before, after)
-    return {"ok": True, "operation": "runtime", "changed": changed, "receipt": receipt}
-
-
-def repair_release_ownership(
-    paths: DoctorPaths, *, desired_commit: str | None = None
-) -> dict[str, Any]:
-    """Promote a materialized-but-unpromoted selected release to root:root.
-
-    An unprivileged lifecycle materialization lands the immutable release owned
-    by ``db:tgw-coders``; the exact-tree and manifest invariants already hold,
-    but the cold Context launcher's root:root check rejects it and the operator
-    would otherwise have to re-run bootstrap.  This bounded repair re-verifies
-    the exact Git tree, re-owns every inode to
-    ``context_install_uid:context_install_gid`` without widening any mode, and
-    re-verifies — it never bypasses the immutability check.
-    """
-    _require_root()
-    if desired_commit is None:
-        desired, release, _task = _desired_runtime(paths)
-    else:
-        if _COMMIT.fullmatch(desired_commit) is None:
-            raise DoctorError("release ownership repair commit is invalid")
-        desired = desired_commit
-        release = paths.runtime_root / "releases" / desired
-    head, _tree, status = _source_identity(paths)
-    if status or head != desired:
-        raise DoctorError(
-            "release ownership repair requires clean canonical source at the declared commit"
-        )
-    before = _verify_release_tree(paths, desired, release)
-    already_owned = all(
-        not path.is_symlink()
-        and (state := path.stat(follow_symlinks=False)).st_uid
-        == paths.context_install_uid
-        and state.st_gid == paths.context_install_gid
-        for path in (release, *release.rglob("*"))
-    )
-    if not already_owned:
-        # The ordinary db:tgw-coders materializer cannot mint root-owned bytes.
-        # Root re-verifies the exact Git tree, performs the same narrow
-        # descriptor-bound ownership promotion the bootstrap uses, then
-        # re-verifies — the root:root immutability check is never bypassed.
-        _promote_bootstrap_release_ownership(
-            release,
-            uid=paths.context_install_uid,
-            gid=paths.context_install_gid,
-        )
-    after = _verify_release_tree(paths, desired, release)
-    for runtime_path in (release, *release.rglob("*")):
-        observed = runtime_path.stat(follow_symlinks=False)
-        if runtime_path.is_symlink():
-            raise DoctorError("promoted release contains a symlink")
-        if (
-            observed.st_uid != paths.context_install_uid
-            or observed.st_gid != paths.context_install_gid
-            or observed.st_mode & 0o022
-        ):
-            raise DoctorError("release ownership promotion did not reach root:root immutable")
-    receipt = _receipt(
-        paths,
-        "release-ownership",
-        {"release_tree": before, "already_owned": already_owned},
-        {"release_tree": after},
-    )
-    return {
-        "ok": True,
-        "operation": "release-ownership",
-        "changed": not already_owned,
-        "receipt": receipt,
-    }
-
-
 def repair_database(
     paths: DoctorPaths, *, desired_commit: str | None = None
 ) -> dict[str, Any]:
@@ -11591,7 +11018,7 @@ def _coding_quiescence(paths: DoctorPaths):
 
 def repair_unix_git_access(paths: DoctorPaths) -> dict[str, Any]:
     """Restore only the shared local Git directories to tgw-coders access."""
-    from tgw.development.worktree_lease import exclusive_worktree_lease
+    from tgw.worktree_lock import exclusive_worktree_lease
 
     _require_root()
     group_gid = grp.getgrnam("tgw-coders").gr_gid
@@ -12217,178 +11644,6 @@ def _clear_restart_obligation(
         if descriptor >= 0:
             os.close(descriptor)
         os.close(directory)
-
-
-def repair_workers(
-    paths: DoctorPaths, *, desired_commit: str | None = None
-) -> dict[str, Any]:
-    _require_root()
-    if desired_commit is None:
-        desired, release, _task = _desired_runtime(paths)
-    else:
-        if _COMMIT.fullmatch(desired_commit) is None:
-            raise DoctorError("lifecycle worker repair commit is invalid")
-        desired = desired_commit
-        release = paths.runtime_root / "releases" / desired
-        head, tree, status = _source_identity(paths)
-        if status or head != desired or tree != _git(
-            paths.repository, "rev-parse", f"{desired}^{{tree}}"
-        ):
-            raise DoctorError(
-                "lifecycle worker repair requires the exact clean canonical candidate"
-            )
-    verification = _verify_release_tree(paths, desired, release)
-    tree = str(verification.get("tree", ""))
-    if _COMMIT.fullmatch(tree) is None:
-        raise DoctorError("verified coding release has no exact Git tree identity")
-    before = check_units(paths, desired_commit=desired)
-    candidate_units: dict[str, bytes] = {}
-    installed: list[str] = []
-    for unit in _CODING_UNITS:
-        destination = paths.systemd_install_root / unit
-        try:
-            source_mode, source_bytes = read_exact_tree_file(
-                paths.repository,
-                commit=desired,
-                tree=tree,
-                path=f"systemd/{unit}",
-            )
-        except ValueError as exc:
-            raise DoctorError(f"exact candidate lacks coding unit: {unit}") from exc
-        if source_mode != 0o644:
-            raise DoctorError(f"exact candidate coding unit mode differs: {unit}")
-        candidate_units[unit] = source_bytes
-        if destination.is_symlink() or (destination.exists() and not destination.is_file()):
-            raise DoctorError(f"refusing unsafe coding unit destination: {destination}")
-        if not _unit_destination_bytes_exact(paths, destination, source_bytes):
-            installed.append(unit)
-    obligations: dict[str, dict[str, Any]] = {}
-    for unit in _CODING_UNITS:
-        existing = _read_restart_obligation(
-            paths,
-            unit,
-            commit=desired,
-            tree=tree,
-            allow_predecessor=True,
-        )
-        if existing is not None:
-            obligations[unit] = _write_restart_obligation(
-                paths,
-                unit,
-                commit=desired,
-                tree=tree,
-                reasons=existing["reasons"],
-                state=_unit_state(unit),
-            )
-    for unit in installed:
-        obligations[unit] = _write_restart_obligation(
-            paths,
-            unit,
-            commit=desired,
-            tree=tree,
-            reasons=["unit-definition-change"],
-            state=_unit_state(unit),
-        )
-    for unit in installed:
-        destination = paths.systemd_install_root / unit
-        source_bytes = candidate_units[unit]
-        if not _unit_destination_bytes_exact(paths, destination, source_bytes):
-            _atomic_bytes(
-                destination,
-                source_bytes,
-                mode=paths.systemd_unit_mode,
-                uid=paths.systemd_unit_uid,
-                gid=paths.systemd_unit_gid,
-            )
-    if installed or obligations:
-        result = _run(["systemctl", "daemon-reload"], timeout=30)
-        if result.returncode:
-            raise DoctorError(result.stderr.strip() or "systemd daemon reload failed")
-    actions: list[str] = []
-    action_states: dict[str, dict[str, Any]] = {}
-    for unit in _ACTIVE_CODING_UNITS:
-        state = _unit_state(unit)
-        definition = _unit_definition(
-            paths, unit, state, desired_commit=desired
-        )
-        if not definition["exact"]:
-            raise DoctorError(f"installed coding unit is not exact: {unit}")
-        active = state.get("ActiveState") == "active"
-        if unit in obligations:
-            operation = "restart" if active else "start"
-        elif unit.endswith(".service") and active:
-            process_runtime = _service_process_runtime_identity(state, release)
-            status = process_runtime["status"]
-            if status == "EXACT":
-                continue
-            if status == "STALE" and process_runtime["restart_safe"] is True:
-                operation = "restart"
-            else:
-                raise DoctorError(
-                    f"refusing to restart {unit}: process runtime is {status.lower()}"
-                )
-        elif active:
-            continue
-        else:
-            operation = "start"
-        result = _run(["systemctl", "enable", unit], timeout=30)
-        if result.returncode:
-            raise DoctorError(result.stderr.strip() or f"failed to enable {unit}")
-        if unit in obligations:
-            action_state = _unit_state(unit)
-            action_states[unit] = dict(action_state)
-            operation = _restart_obligation_operation(
-                unit, action_state
-            )
-        result = _run(["systemctl", operation, unit], timeout=30)
-        if result.returncode:
-            raise DoctorError(result.stderr.strip() or f"failed to {operation} {unit}")
-        actions.append(f"{operation}:{unit}")
-    after = check_units(
-        paths,
-        desired_commit=desired,
-        observe_restart_obligations=False,
-    )
-    if after["state"] != "PASS":
-        raise DoctorError("local coding units remain unhealthy after repair")
-    transitions: dict[str, dict[str, Any]] = {}
-    for unit, obligation in sorted(obligations.items()):
-        state = _unit_state(unit)
-        if unit in _ACTIVE_CODING_UNITS:
-            transition = _restart_obligation_transition(
-                unit,
-                obligation,
-                action_states[unit],
-                state,
-            )
-            transitions[unit] = transition
-            if not transition["exact"]:
-                raise DoctorError(
-                    f"{unit} did not load a new invocation after restart"
-                )
-        elif state.get("ActiveState") not in {"inactive", "failed"}:
-            raise DoctorError(
-                f"transient coding unit remains active after reload: {unit}"
-            )
-    for unit in sorted(obligations):
-        _clear_restart_obligation(
-            paths, unit, commit=desired, tree=tree
-        )
-    if obligations:
-        after = check_units(paths, desired_commit=desired)
-        if after["state"] != "PASS":
-            raise DoctorError("local coding restart obligations did not clear")
-    receipt = _receipt(paths, "workers", before, after)
-    return {
-        "ok": True,
-        "operation": "workers",
-        "changed": bool(installed or actions),
-        "installed": installed,
-        "restart_obligations": sorted(obligations),
-        "restart_transitions": transitions,
-        "service_actions": actions,
-        "receipt": receipt,
-    }
 
 
 def _repair_managed_directory(path: Path, *, uid: int, gid: int, mode: int) -> bool:
@@ -13686,11 +12941,8 @@ def repair_obsolete_surfaces(paths: DoctorPaths) -> dict[str, Any]:
 _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
     "context": repair_context,
     "context-launcher": repair_context_launcher,
-    "runtime": repair_runtime,
-    "release-ownership": repair_release_ownership,
     "database": repair_database,
     "unix-git-access": repair_unix_git_access,
-    "workers": repair_workers,
     "plan-render-worker": repair_plan_render_worker,
     "obsolete-surfaces": repair_obsolete_surfaces,
     "harness": repair_harness,
@@ -13699,11 +12951,8 @@ _REPAIRS: dict[str, Callable[[DoctorPaths], dict[str, Any]]] = {
 _REPAIR_POSTCONDITIONS: dict[str, tuple[str, ...]] = {
     "context": ("context.snapshot",),
     "context-launcher": ("context.launcher",),
-    "runtime": ("runtime.local-coding",),
-    "release-ownership": ("context.snapshot",),
     "database": ("database.local-coding",),
     "unix-git-access": ("access.unix-group",),
-    "workers": ("services.local-coding",),
     "plan-render-worker": ("services.plan-render",),
     "obsolete-surfaces": ("cleanup.obsolete-active-surfaces",),
     # The canary landing is the real gate and repair_harness raises if it does
@@ -13732,17 +12981,14 @@ _REPAIR_POSTCONDITIONS: dict[str, tuple[str, ...]] = {
 _AUTO_REPAIRABLE_CHECKS: dict[str, str] = {
     "context.snapshot": "context",
     "context.launcher": "context-launcher",
-    "runtime.local-coding": "runtime",
     "database.local-coding": "database",
-    # services.local-coding (the coding lifecycle workers + orchestrator +
-    # foreman) is deliberately NOT auto-repairable: the operator runs the
-    # coding workflow without the continual-harness apparatus (PP-ROLES-001 /
-    # two-gates directive), so those units stay disabled on purpose.  An
-    # auto-repair of them re-arms tgw-doctor-auto-repair.timer via
-    # repair_workers's _CODING_UNITS (same self-perpetuation as the removed
-    # access.unix-group entry, 22d20eb1) AND resurrects torn-down build units.
-    # Workers-down is an operator notice, not a repair trigger.  The Context
-    # generation, runtime, launcher, and database DO stay auto-maintained.
+    # runtime.local-coding and services.local-coding are no longer auto-repaired
+    # (and repair_runtime / repair_workers are gone entirely): the tgw-lib coding
+    # loop is the continual-harness orchestrator (LEAF-11-1.DELETE-APPARATUS).
+    # There is no materialized coding-runtime release tree to keep current and no
+    # lifecycle worker units to restore. check_runtime / check_units stay as
+    # diagnostics only. The Context generation, launcher, and database DO stay
+    # auto-maintained.
     "services.plan-render": "plan-render-worker",
     "cleanup.obsolete-active-surfaces": "obsolete-surfaces",
 }
@@ -14112,251 +13358,6 @@ def _compact_inventory(report: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def repair_coding_bootstrap(
-    commit: str, paths: DoctorPaths = DoctorPaths()
-) -> dict[str, Any]:
-    """Install one exact local coding runtime without consulting Context.
-
-    This is an explicit operator repair for the otherwise circular first
-    transition. Root installs fixed configuration and systemd definitions;
-    all repository reading, release creation, and selection run as the
-    ordinary ``db:tgw-coders`` materializer.
-    """
-
-    _require_root()
-    if _COMMIT.fullmatch(commit) is None:
-        raise DoctorError("coding bootstrap commit is invalid")
-    head, tree, status = _source_identity(paths)
-    if status or head != commit:
-        raise DoctorError(
-            "coding bootstrap requires the exact clean canonical source commit"
-        )
-    source_config = paths.repository / "config/tgw-coding-local.json"
-    if source_config.is_symlink() or not source_config.is_file():
-        raise DoctorError("candidate coding configuration is absent")
-    raw_config = source_config.read_bytes()
-    config_entry = _git(
-        paths.repository,
-        "ls-tree",
-        commit,
-        "--",
-        "config/tgw-coding-local.json",
-    ).split()
-    if (
-        len(config_entry) != 4
-        or config_entry[:2] != ["100644", "blob"]
-        or _git_blob_oid(raw_config) != config_entry[2]
-    ):
-        raise DoctorError("candidate coding configuration differs from exact Git bytes")
-    try:
-        parsed_config = json.loads(raw_config)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise DoctorError("candidate coding configuration is invalid") from exc
-    if (
-        not isinstance(parsed_config, Mapping)
-        or parsed_config.get("schema") != "tgw-local-coding-workflow/v1"
-    ):
-        raise DoctorError("candidate coding configuration schema is invalid")
-    coding = parsed_config.get("coding")
-    exact_paths = {
-        "repository_root": paths.repository,
-        "worktree_root": paths.worktrees,
-        "runtime_root": paths.runtime_root,
-    }
-    if not isinstance(coding, Mapping) or any(
-        coding.get(key) != str(expected)
-        for key, expected in exact_paths.items()
-    ):
-        raise DoctorError("candidate coding configuration paths differ from this host")
-    lowered = raw_config.decode("utf-8").lower()
-    forbidden = [item for item in _FORBIDDEN_CODING_DEPENDENCIES if item in lowered]
-    if forbidden:
-        raise DoctorError(
-            "candidate coding configuration contains forbidden dependencies: "
-            + ", ".join(forbidden)
-        )
-    group = grp.getgrnam(_CODING_RUNTIME_GROUP)
-    db = pwd.getpwnam("db")
-    if db.pw_uid == 0 or db.pw_name != "db":
-        raise DoctorError("ordinary db materializer account is unavailable")
-    final_head, final_tree, final_status = _source_identity(paths)
-    if final_status or (final_head, final_tree) != (commit, tree):
-        raise DoctorError("canonical source changed during coding bootstrap preflight")
-    paths.coding_config.parent.mkdir(parents=True, exist_ok=True)
-    if paths.coding_config.is_symlink() or (
-        paths.coding_config.exists() and not paths.coding_config.is_file()
-    ):
-        raise DoctorError("coding configuration destination is unsafe")
-    _atomic_bytes(
-        paths.coding_config,
-        raw_config,
-        mode=0o640,
-        uid=0,
-        gid=group.gr_gid,
-    )
-    journal: list[dict[str, Any]] = []
-    try:
-        support_roots = _provision_coding_support_roots(
-            paths, group.gr_gid, journal
-        )
-    except Exception:
-        rollback_errors = _close_mutation_journal(journal, rollback=True)
-        if rollback_errors:
-            raise DoctorError(
-                "coding bootstrap support-root rollback incomplete: "
-                + "; ".join(rollback_errors)
-            )
-        raise
-    commit_errors = _close_mutation_journal(journal, rollback=False)
-    if commit_errors:
-        raise DoctorError(
-            "coding bootstrap support-root transaction incomplete: "
-            + "; ".join(commit_errors)
-        )
-    command = [
-        "/usr/sbin/runuser",
-        "-u",
-        "db",
-        "-g",
-        _CODING_RUNTIME_GROUP,
-        "--",
-        "/usr/bin/env",
-        "HOME=/home/db",
-        "PYTHONDONTWRITEBYTECODE=1",
-        f"PYTHONPATH={paths.repository / 'src'}",
-        "/opt/TGW/.venvs/controller/bin/python3",
-        "-m",
-        "tgw.development.coding_root_effect",
-        "--config",
-        str(paths.coding_config),
-        "--bootstrap-commit",
-        commit,
-        "--bootstrap-tree",
-        tree,
-    ]
-    materialized = _run(command, timeout=300)
-    if materialized.returncode:
-        raise DoctorError(
-            materialized.stderr.strip()
-            or "ordinary db materializer failed during coding bootstrap"
-        )
-    try:
-        materialization = json.loads(materialized.stdout)
-    except json.JSONDecodeError as exc:
-        raise DoctorError("coding bootstrap materializer returned invalid evidence") from exc
-    if not isinstance(materialization, Mapping):
-        raise DoctorError("coding bootstrap materializer returned invalid evidence")
-    materialization = _validated_bootstrap_materialization(
-        materialization, commit=commit, tree=tree
-    )
-    release = paths.runtime_root / "releases" / commit
-    # The ordinary db:tgw-coders materializer is deliberately unable to
-    # create root-owned bytes.  Root first validates the exact Git-bound
-    # immutable release, then performs the narrow ownership promotion needed
-    # by the cold Context launcher and validates the same tree again.
-    _verify_release_tree(paths, commit, release)
-    _promote_bootstrap_release_ownership(
-        release,
-        uid=paths.context_install_uid,
-        gid=paths.context_install_gid,
-    )
-    _verify_release_tree(paths, commit, release)
-    current = paths.runtime_root / "current"
-    if not current.is_symlink() or current.resolve(strict=True) != release.resolve():
-        raise DoctorError("coding bootstrap did not select the exact release")
-    context_input = paths.context_task.parent
-    _repair_managed_directory(
-        context_input,
-        uid=db.pw_uid,
-        gid=group.gr_gid,
-        mode=0o2750,
-    )
-    context_inputs: list[str] = []
-    for context_path in (paths.context_task, paths.context_cursor):
-        observed = context_path.stat(follow_symlinks=False)
-        if (
-            context_path.is_symlink()
-            or not stat.S_ISREG(observed.st_mode)
-            or observed.st_nlink != 1
-        ):
-            raise DoctorError(f"Context input is unsafe: {context_path}")
-        if (
-            observed.st_uid != db.pw_uid
-            or observed.st_gid != group.gr_gid
-            or stat.S_IMODE(observed.st_mode) != 0o440
-        ):
-            os.chown(context_path, db.pw_uid, group.gr_gid)
-            os.chmod(context_path, 0o440)
-            context_inputs.append(str(context_path))
-    launcher_changes: list[str] = []
-    for destination, target in _launcher_links(paths).items():
-        source = release / "bin" / target.name
-        if not source.is_file():
-            raise DoctorError(f"candidate release lacks launcher: {source.name}")
-        if destination.exists() and not destination.is_symlink():
-            raise DoctorError(
-                f"coding launcher requires manual preservation before replacement: {destination}"
-            )
-        if not destination.is_symlink() or os.readlink(destination) != str(target):
-            _replace_link(destination, target)
-            launcher_changes.append(str(destination))
-    fixed_launchers = (
-        ("bin/tgw-operator", paths.operator_cli),
-        ("bin/tgw-coding-bootstrap", paths.coding_bootstrap),
-    )
-    for relative, destination in fixed_launchers:
-        try:
-            launcher_mode, launcher_bytes = read_exact_tree_file(
-                paths.repository,
-                commit=commit,
-                tree=tree,
-                path=relative,
-            )
-        except ValueError as exc:
-            raise DoctorError(f"candidate lacks fixed launcher {relative}") from exc
-        if launcher_mode != 0o755:
-            raise DoctorError(f"candidate fixed launcher mode differs: {relative}")
-        source = release / relative
-        if not _fixed_root_launcher_identity(paths, destination, source)["exact"]:
-            _atomic_bytes(
-                destination,
-                launcher_bytes,
-                mode=0o555,
-                uid=paths.context_install_uid,
-                gid=paths.context_install_gid,
-            )
-            launcher_changes.append(str(destination))
-        if not _fixed_root_launcher_identity(paths, destination, source)["exact"]:
-            raise DoctorError(f"fixed launcher installation is incomplete: {relative}")
-    plan_render = repair_plan_render_worker(paths, desired_commit=commit)
-    workers = repair_workers(paths, desired_commit=commit)
-    if paths.coding_config.read_bytes() != raw_config:
-        raise DoctorError("installed coding configuration changed during bootstrap")
-    units = check_units(paths, desired_commit=commit)
-    rendered = check_plan_render_worker(paths, desired_commit=commit)
-    if units["state"] != "PASS" or rendered["state"] != "PASS":
-        raise DoctorError("coding bootstrap services did not reach exact live state")
-    result = {
-        "schema": "tgw-local-coding-bootstrap/v1",
-        "ok": True,
-        "context_required": False,
-        "review_authority": False,
-        "materializer": {"actor": "db", "group": _CODING_RUNTIME_GROUP},
-        "commit": commit,
-        "tree": tree,
-        "configuration_sha256": _file_hash(paths.coding_config),
-        "support_roots_changed": support_roots,
-        "launcher_changes": launcher_changes,
-        "context_inputs_migrated": context_inputs,
-        "materialization": materialization,
-        "plan_render": plan_render,
-        "workers": workers,
-        "unit_check": units,
-        "plan_render_check": rendered,
-    }
-    return {**result, "receipt": _receipt(paths, "coding-bootstrap", {}, result)}
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tgw doctor")
     parser.add_argument("--json", action="store_true", dest="json_output")
@@ -14367,18 +13368,6 @@ def _parser() -> argparse.ArgumentParser:
     inventory_parser.add_argument("--full", action="store_true", help="include every discovered row")
     census_parser = sub.add_parser("condition-policy-census", help="census cached condition policies read-only")
     census_parser.add_argument("--cache", required=True, type=Path)
-    resume_parser = sub.add_parser("coding-resume", help="resume one exact local RESUMABLE_PARTIAL Todo")
-    resume_parser.add_argument("todo_id", type=int)
-    reconcile_parser = sub.add_parser("coding-reconcile", help="reconcile one older-runner closed implementation receipt")
-    reconcile_parser.add_argument("todo_id", type=int)
-    bootstrap_parser = sub.add_parser(
-        "coding-bootstrap",
-        help=(
-            "install one exact local coding runtime without Context; initial cutover "
-            "uses the root-owned /usr/local/sbin/tgw-coding-bootstrap"
-        ),
-    )
-    bootstrap_parser.add_argument("--commit", required=True)
     repair_parser = sub.add_parser("repair", help="restore an exact declared local state")
     repair_parser.add_argument("target", choices=[*_REPAIRS])
     repair_parser.add_argument("--commit", required=True)
@@ -14456,20 +13445,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.operation == "condition-policy-census":
             print(json.dumps(condition_policy_census(args.cache), indent=2, sort_keys=True))
-            return 0
-        if args.operation == "coding-resume":
-            from tgw.coding_cli import resume
-
-            result = resume(args.todo_id)
-            print(json.dumps(result, indent=2, sort_keys=True, default=str))
-            return 0 if result.get("ok", True) else 1
-        if args.operation == "coding-reconcile":
-            result = reconcile_implementation_receipt(args.todo_id)
-            print(json.dumps(result, indent=2, sort_keys=True))
-            return 0
-        if args.operation == "coding-bootstrap":
-            result = repair_coding_bootstrap(args.commit)
-            print(json.dumps(result, indent=2, sort_keys=True))
             return 0
         result = diagnose()
         if args.json_output:

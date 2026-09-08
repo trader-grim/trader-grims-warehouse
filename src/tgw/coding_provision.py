@@ -17,15 +17,18 @@ import uuid
 from typing import Any
 
 from tgw.coding_execution import execution_envelope
+from tgw.coding_snapshot import deserialize_snapshot
 from tgw.config import validate_service_request_config
+from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
+from tgw.development.treatments import CODING_TREATMENTS
 from tgw.queue import state_machine
 from tgw.queue.worker_base import HardFailure
-from tgw.development.coding_snapshot import deserialize_snapshot
 from tgw.workflow_kernel.evaluator import evaluate
-from tgw.development.foreman import EVALUATOR_VERSION
-from tgw.development.profiles import CODING_READY_FOR_IMPLEMENTATION
 from tgw.workflow_kernel.scheduler import select_treatment
-from tgw.development.treatments import CODING_TREATMENTS
+
+# Was imported from development.foreman (foreman/v1); foreman is removed
+# (LEAF-11-1.DELETE-APPARATUS). The provision evaluator stamps its own version.
+EVALUATOR_VERSION = "coding-provision/v1"
 
 QUEUE_NAME = "coding-provision"
 UNKNOWN = "unknown"

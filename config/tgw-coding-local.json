@@ -1,46 +1,8 @@
 {
   "schema": "tgw-local-coding-workflow/v1",
   "postgres_dsn": "dbname=tgw_lib_dev_state_machine user=tgw_coding",
-  "queue": {
-    "poll_interval_s": 2,
-    "lease_seconds": 2100
-  },
   "coding": {
-    "lifecycle_root": "/opt/TGW/var/tgw-coders/coding-lifecycles",
-    "lifecycle_stages": {
-      "implementation": "coding-queue:codex-implement/v1",
-      "controller": "coding-queue:controller-verify/v1",
-      "candidate": "coding-lineage:closed-candidate/v1",
-      "review": "coding-queue:claude-review/v1",
-      "integration": "coding-git:fast-forward/v1",
-      "materialization": "doctor-receipt:runtime-materialization/v1",
-      "live_verification": "doctor-receipt:runtime/v1",
-      "terminal_publication": "current-task-receipt:context/v1",
-      "operator_notification": "lifecycle-journal:notification/v1"
-    },
-    "root_effect_root": "/opt/TGW/var/tgw-coders/coding-root-effects",
-    "doctor_receipt_root": "/opt/TGW/tgw-lib/doctor-receipts",
-    "runtime_root": "/opt/TGW/tgw-lib/coding-runtime",
     "repository_root": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
-    "worktree_root": "/opt/TGW/var/worktrees",
-    "preservation_archive_root": "/opt/TGW/var/tgw-coders/coding-preservation",
-    "runner_state_root": "/opt/TGW/var/tgw-coders/runner-control",
-    "timeout_s": 1800,
-    "commands": {
-      "codex-implement": [
-        "/opt/TGW/.venvs/controller/bin/tgw-codex-implement-runner"
-      ],
-      "controller-verify": [
-        "/opt/TGW/.venvs/controller/bin/tgw-controller-verify-runner"
-      ],
-      "claude-review": [
-        "/opt/TGW/tgw-lib/coding-runtime/current/bin/tgw-local-independent-review-runner"
-      ]
-    },
-    "allowed_runners": [
-      "/opt/TGW/.venvs/controller/bin/tgw-codex-implement-runner",
-      "/opt/TGW/.venvs/controller/bin/tgw-controller-verify-runner",
-      "/opt/TGW/tgw-lib/coding-runtime/current/bin/tgw-local-independent-review-runner"
-    ]
+    "worktree_root": "/opt/TGW/var/worktrees"
   }
 }
