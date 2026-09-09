@@ -1,4 +1,9 @@
 tgw-harness ALL=(tgw-coder) NOPASSWD: /opt/TGW/.venvs/controller/bin/python3 -m tgw.development.harness_session *
+# tgw-doctor-auto-repair.service runs as tgw-harness (PP-ROLES-001 WU-3) and
+# delegates each whitelisted repair to the pinned root bootstrap -- the exact
+# action Doctor already prescribes to the operator, no new surface (this
+# replaced the tgw-recovery group pin the unit used when it ran as db):
+tgw-harness ALL=(root) NOPASSWD: /usr/local/sbin/tgw-coding-bootstrap --commit [0-9a-f]* --repair [a-z-]*
 # phase-0, until the interactive session runs as tgw-harness:
 claude       ALL=(tgw-harness) NOPASSWD: /usr/bin/git -C /opt/TGW/tgw-lib/src/trader-grims-warehouse update-ref refs/heads/main *
 claude       ALL=(tgw-harness) NOPASSWD: /opt/TGW/.venvs/controller/bin/python3 -m tgw.development.harness_cli *

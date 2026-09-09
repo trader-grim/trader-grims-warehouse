@@ -458,12 +458,13 @@ def _source_identity(paths: DoctorPaths) -> tuple[str, str, str]:
     status_command = protected_git_command(paths.repository, "status", "--short")
     status_environment = dict(protected_git_environment())
     # getresuid is deliberately not a test/actor projection: only a genuinely
-    # privileged process may cross into the ordinary db account.
+    # privileged process may cross into the ordinary tgw-harness service account
+    # (PP-ROLES-001 WU-3 -- was `db` before the service-identity sweep).
     if os.geteuid() == 0 and os.getresuid()[1] == 0:
         status_command = [
             "/usr/sbin/runuser",
             "-u",
-            "db",
+            "tgw-harness",
             "-g",
             _CODING_RUNTIME_GROUP,
             "--",
@@ -3810,9 +3811,9 @@ def _actor_path_access_flags(
     try:
         observed = path.stat(follow_symlinks=False)
     except PermissionError as exc:
-        # The probing process (e.g. `db` running auto-repair) cannot traverse
-        # to this path.  That says nothing about whether the tgw-coders actor
-        # can reach it via the group; report unverified, never a defect.
+        # The probing process (e.g. `tgw-harness` running auto-repair) cannot
+        # traverse to this path.  That says nothing about whether the tgw-coders
+        # actor can reach it via the group; report unverified, never a defect.
         raise _UnverifiablePrivilege(f"{path}: {exc}") from exc
     except OSError:
         return False
@@ -3985,7 +3986,10 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
         # Root performs the fixed bootstrap, but it is deliberately not a
         # coding-group principal.  Verify the ordinary operator and worker
         # accounts instead of treating root's non-membership as access drift.
-        for name in sorted({actor, "codex", "db"} - {"root"}):
+        # `tgw-harness` is the service identity that runs plan-render and
+        # auto-repair (PP-ROLES-001 WU-3); `db` stays covered until it leaves
+        # tgw-coders in WU-4.
+        for name in sorted({actor, "codex", "db", "tgw-harness"} - {"root"}):
             record = pwd.getpwnam(name)
             memberships = set(os.getgrouplist(name, record.pw_gid))
             member = group.gr_gid in memberships or name in group.gr_mem
@@ -4040,8 +4044,8 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
                 actor_row["exact"] and all(v is True for v in probes)
             )
         # A genuinely observed defect anywhere -> FAIL.  Otherwise, if some
-        # probe could not be verified (the check runs as `db`, which cannot
-        # traverse a codex/claude-owned path) -> UNKNOWN, never FAIL (Todo
+        # probe could not be verified (the check runs as `tgw-harness`, which
+        # cannot traverse a codex/claude-owned path) -> UNKNOWN, never FAIL (Todo
         # 1945: FAIL must mean the surface is wrong, not the observer blind).
         # This is what unblocks the tgw-doctor-auto-repair timer.
         defect = (
@@ -5999,12 +6003,13 @@ def _directory_identity(path: Path, *, uid: int, gid: int, mode: int) -> dict[st
 
 
 def _plan_render_storage_identity(paths: DoctorPaths) -> dict[str, Any]:
-    owner = pwd.getpwnam("db")
+    # PP-ROLES-001 WU-3: the plan-render worker runs as tgw-harness (was `db`).
+    owner = pwd.getpwnam("tgw-harness")
     group = grp.getgrnam("tgw-coders")
     mode = _PLAN_RENDER_DIRECTORY_MODE
     directories = [_directory_identity(path, uid=owner.pw_uid, gid=group.gr_gid, mode=mode) for path in (paths.plan_render_root, paths.plan_render_log_root)]
     return {
-        "owner": "db",
+        "owner": "tgw-harness",
         "owner_uid": owner.pw_uid,
         "group": "tgw-coders",
         "group_gid": group.gr_gid,
@@ -11992,7 +11997,8 @@ def _repair_managed_directory(path: Path, *, uid: int, gid: int, mode: int) -> b
 
 
 def _repair_plan_render_storage(paths: DoctorPaths) -> bool:
-    owner = pwd.getpwnam("db")
+    # PP-ROLES-001 WU-3: re-chown the plan-render output to tgw-harness (was `db`).
+    owner = pwd.getpwnam("tgw-harness")
     group = grp.getgrnam("tgw-coders")
     changed = False
     for path in (paths.plan_render_root, paths.plan_render_log_root):
@@ -13553,8 +13559,10 @@ def auto_repair(
 def _apply_auto_repair_via_bootstrap(area: str, desired_commit: str) -> dict[str, Any]:
     """Run exactly one whitelisted repair through the pinned root bootstrap.
 
-    The supervisor runs unprivileged (as db), so it delegates the root-owned
-    repair to the existing tgw-recovery sudoers pin — the same exact
+    The supervisor runs unprivileged (as tgw-harness, PP-ROLES-001 WU-3), so it
+    delegates the root-owned repair to the pinned ``tgw-harness`` sudoers grant
+    (``config/environment/sudoers.d/tgw-harness`` — was the tgw-recovery pin
+    when the unit ran as ``db``) — the same exact
     ``/usr/local/sbin/tgw-coding-bootstrap --repair`` action the Doctor already
     prescribes to the operator.  No sudo surface is widened.
     """

@@ -30,9 +30,11 @@ def test_local_plan_render_config_is_exact_and_independent() -> None:
     assert "provider" not in text
 
 
-def test_local_plan_render_unit_reuses_existing_worker_as_db_user() -> None:
+def test_local_plan_render_unit_reuses_existing_worker_as_tgw_harness() -> None:
     unit = (ROOT / "systemd/tgw-plan-render-local.service").read_text(encoding="utf-8")
-    assert "User=db\n" in unit
+    assert "User=tgw-harness\n" in unit
+    assert "Group=tgw-harness\n" in unit
+    assert "Environment=HOME=/home/tgw-harness\n" in unit
     assert "SupplementaryGroups=tgw-coders" in unit
     assert "WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current" in unit
     assert "Environment=PYTHONPATH=src" in unit
@@ -247,7 +249,7 @@ def _plan_render_check_fixture(
         doctor_cli.pwd,
         "getpwnam",
         lambda name: SimpleNamespace(pw_uid=os.getuid())
-        if name == "db"
+        if name == "tgw-harness"
         else None,
     )
     monkeypatch.setattr(
@@ -422,7 +424,7 @@ def test_plan_render_storage_repair_is_exact_and_idempotent(
         doctor_cli.pwd,
         "getpwnam",
         lambda name: SimpleNamespace(pw_uid=os.getuid())
-        if name == "db"
+        if name == "tgw-harness"
         else None,
     )
     monkeypatch.setattr(

@@ -7062,7 +7062,7 @@ def test_fixed_operator_launcher_survives_mutable_runtime_selector_swap(
     assert launcher.index('"$(/usr/bin/id -u)" -eq 0') < launcher.index(
         "/opt/TGW/tgw-lib/coding-runtime/current"
     )
-def test_doctor_effective_root_source_status_is_demoted_to_ordinary_db(
+def test_doctor_effective_root_source_status_is_demoted_to_tgw_harness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7087,7 +7087,7 @@ def test_doctor_effective_root_source_status_is_demoted_to_ordinary_db(
     assert command[:7] == [
         "/usr/sbin/runuser",
         "-u",
-        "db",
+        "tgw-harness",
         "-g",
         "tgw-coders",
         "--",
@@ -10278,7 +10278,7 @@ def test_check_unix_access_reports_unknown_not_fail_when_only_unverified(monkeyp
     r = doctor_cli.check_unix_access(paths)
     assert r["state"] == "UNKNOWN"
     assert r["repairable"] is False
-    assert set(r["evidence"]["unverified_actors"]) == {"db", "codex"}
+    assert set(r["evidence"]["unverified_actors"]) == {"db", "codex", "tgw-harness"}
 
 
 def test_check_unix_access_still_fails_on_a_real_defect(monkeypatch):

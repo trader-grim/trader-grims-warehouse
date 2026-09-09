@@ -80,7 +80,11 @@ sudo install -o root -g root -m 0440 \
 ```
 
 The fragment grants the only privilege boundary the identity model has:
-`claude` → `tgw-harness` → `tgw-coder`. Doctor's `access.harness-sudoers` check
+`claude` → `tgw-harness` → `tgw-coder`, plus one `tgw-harness ALL=(root)
+NOPASSWD:` line scoped to `/usr/local/sbin/tgw-coding-bootstrap --commit <hex>
+--repair <area>` — the delegation `tgw-doctor-auto-repair.service` uses now that
+it runs as `tgw-harness` (PP-ROLES-001 WU-3; it was the `tgw-recovery` group pin
+when that unit ran as `db`). Doctor's `access.harness-sudoers` check
 compares the installed file byte-for-byte against the canonical source and
 reports drift or absence as a named **FAIL** with the exact expected content.
 (If the installed file is `0440` and you run `tgw doctor check` as an ordinary
@@ -105,6 +109,22 @@ repair only **verifies** them. Slot names come from the executor catalogue
 (W1); values come from `tgw.env` today and from the Todo #1253 credential
 broker later. This is a single host-wide store — tgw-lib holds model-provider
 keys only.
+
+### 3. The service-identity units (PP-ROLES-001 WU-3)
+
+Two long-running units run as **`tgw-harness`** (they ran as `db` — the
+operator's personal login — until the WU-3 sweep):
+
+| unit | does | needs from the operator on install |
+| --- | --- | --- |
+| `tgw-plan-render-local.service` | renders the local Plan Taskboard projection | `chown -R tgw-harness:tgw-coders /opt/TGW/var/plan-render` (Doctor `services.plan-render` else reports the storage owner and auto-repairs it) |
+| `tgw-doctor-auto-repair.service` | runs `doctor auto-repair --apply` every 5 min; rebuilds the Context projection | the `tgw-harness` bootstrap sudoers grant (§1) — reinstall the fragment |
+
+Install: `sudo install -m 0644 -o root -g root
+systemd/tgw-{plan-render-local,doctor-auto-repair}.service
+/etc/systemd/system/` then `sudo systemctl daemon-reload && sudo systemctl
+restart tgw-plan-render-local.service`. `db` no longer runs any coding-workflow
+service; it leaves `tgw-coders` in WU-4.
 
 ## Reading the canary result
 

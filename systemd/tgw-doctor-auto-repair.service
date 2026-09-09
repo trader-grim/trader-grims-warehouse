@@ -6,12 +6,12 @@ ConditionPathExists=/opt/TGW/tgw-lib/config/tgw-coding-local.json
 
 [Service]
 Type=oneshot
-User=db
-Group=db
+User=tgw-harness
+Group=tgw-harness
 SupplementaryGroups=tgw-coders
 UMask=0002
 WorkingDirectory=/opt/TGW/tgw-lib/src/trader-grims-warehouse
-Environment=HOME=/home/db
+Environment=HOME=/home/tgw-harness
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=GIT_OPTIONAL_LOCKS=0
 Environment=PYTHONPATH=/opt/TGW/tgw-lib/coding-runtime/current/src

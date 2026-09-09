@@ -71,6 +71,12 @@ changes in the repo:
 tgw-doctor-auto-repair -n 50` shows why a repair isn't landing. A stuck timer is
 an agent fix — capture the journal and hand it over.
 
+`tgw-doctor-auto-repair.service` and `tgw-plan-render-local.service` run as
+**`tgw-harness`** (PP-ROLES-001 WU-3 — they ran as `db` before). A
+`sudo: a password is required` in the auto-repair journal means the
+`tgw-harness` bootstrap sudoers grant is missing — reinstall
+`config/environment/sudoers.d/tgw-harness`.
+
 **The auto-repair timer is gated by `access.unix-group`.** If that check FAILs,
 the timer refuses every repair, so `context.snapshot` / `context.launcher` stay
 red until it's cleared. `access.unix-group` FAILs when any file in the worktree

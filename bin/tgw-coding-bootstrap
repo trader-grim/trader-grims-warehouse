@@ -103,7 +103,7 @@ def _unprivileged_status() -> bytes:
     command = [
         str(_RUNUSER),
         "-u",
-        "db",
+        "tgw-harness",
         "-g",
         "tgw-coders",
         "--",

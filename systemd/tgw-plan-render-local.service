@@ -7,12 +7,12 @@ ConditionPathExists=/opt/TGW/tgw-lib/coding-runtime/current/src/tgw/workers/plan
 
 [Service]
 Type=simple
-User=db
-Group=db
+User=tgw-harness
+Group=tgw-harness
 SupplementaryGroups=tgw-coders
 UMask=0002
 WorkingDirectory=/opt/TGW/tgw-lib/coding-runtime/current
-Environment=HOME=/home/db
+Environment=HOME=/home/tgw-harness
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONPATH=src
 ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.workers.plan_render --config /opt/TGW/tgw-lib/config/tgw-plan-render-local.json
