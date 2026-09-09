@@ -46,9 +46,23 @@
 #   # group membership does NOT apply to a running session — verify from a FRESH
 #   # login first:
 #   #   su - claude -c 'sudo -n systemctl status tgw-context-publish.service'
-#   # ONLY once that works, remove the proxy and drop the subsumed grants:
-#   rm -f /etc/sudoers.d/90-db-nopasswd
-#   # drop the per-purpose grants this subsumes (KEEP tgw-flake-git, tgw-source-git)
+#   # ONLY once that works:
+#   rm -f /etc/sudoers.d/90-db-nopasswd            # the `(db) NOPASSWD: ALL` proxy
+#
+# Subsumed grants to drop (verified against `sudo -l -U claude` 2026-09-08):
+#   - the BARE `claude ... (root) NOPASSWD: /usr/local/sbin/tgw-coding-bootstrap`
+#     line (no args) — this fragment's `%tgw-operators` rule already grants both
+#     `tgw-coding-bootstrap` and `tgw-coding-bootstrap *`. Find it with
+#     `grep -rln tgw-coding-bootstrap /etc/sudoers /etc/sudoers.d/` (two hits:
+#     this file, and the one to edit) and remove that one line via `visudo -f`.
+# KEEP (distinct lanes, no overlap with the (root) tgw-* grant):
+#   (db) tgw-flake-git *          — Nix-flake lane
+#   (tgw-release) tgw-git-push    — feature-branch push broker
+#   (tgw-release) tgw-source-git *— source -> GitHub broker
+#   (tgw-release) tgw-plan-git *  — plan-vault -> GitHub broker (sudoers/tgw-plan-git)
+#   (tgw-harness) git ... / harness_cli *  — phase-0 land path (access.harness-sudoers;
+#                                            retires when the session runs as tgw-triage)
+#   tgw-recovery, tgw-trace-hooks — unrelated
 # Verified by: `tgw doctor` check `access.operator-sudoers` (drift/absence -> FAIL).
 
 # --- manage the tgw-* systemd units (the two-gates apparatus + Context) -------
