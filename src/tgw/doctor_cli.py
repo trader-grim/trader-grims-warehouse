@@ -4195,6 +4195,10 @@ def check_harness_sudoers(paths: DoctorPaths) -> dict[str, Any]:
 _OPERATOR_SUDOERS_INSTALLED = Path("/etc/sudoers.d/tgw-operators")
 _OPERATOR_SUDOERS_RELATIVE = Path("config/environment/sudoers.d/tgw-operators")
 _OPERATOR_GROUP = "tgw-operators"
+# Fixed GID: Debian's `operator` (37) is base-passwd-reserved; `groupadd -r`
+# here allocates into the crowded 977-987 tgw-* band. 4000-4999 is empty and
+# untouched by Debian convention — a deliberate, rebuild-stable choice.
+_OPERATOR_GID = 4000
 
 
 def check_operator_sudoers(paths: DoctorPaths) -> dict[str, Any]:
@@ -4222,25 +4226,44 @@ def check_operator_sudoers(paths: DoctorPaths) -> dict[str, Any]:
             ) from exc
 
         try:
-            grp.getgrnam(_OPERATOR_GROUP)
-            group_present = True
+            group_entry = grp.getgrnam(_OPERATOR_GROUP)
         except KeyError:
-            group_present = False
-        if not group_present:
+            group_entry = None
+        if group_entry is None:
             return _check(
                 identity,
                 "UNKNOWN",
                 (
                     f"PP-ROLES-001 WU-9 not yet ratified: group {_OPERATOR_GROUP!r} "
                     "does not exist; review "
-                    f"{_OPERATOR_SUDOERS_RELATIVE} and follow its install header"
+                    f"{_OPERATOR_SUDOERS_RELATIVE} and follow its install header "
+                    f"(create it at the fixed GID {_OPERATOR_GID})"
                 ),
                 evidence={
                     "canonical_path": str(canonical_path),
                     "group": _OPERATOR_GROUP,
                     "group_present": False,
+                    "expected_gid": _OPERATOR_GID,
                     "expected": expected,
                 },
+            )
+        if group_entry.gr_gid != _OPERATOR_GID:
+            return _check(
+                identity,
+                "FAIL",
+                (
+                    f"group {_OPERATOR_GROUP!r} is GID {group_entry.gr_gid}, "
+                    f"expected the fixed {_OPERATOR_GID}"
+                ),
+                evidence={
+                    "group": _OPERATOR_GROUP,
+                    "gid": group_entry.gr_gid,
+                    "expected_gid": _OPERATOR_GID,
+                },
+                repair=(
+                    f"operator: `groupmod -g {_OPERATOR_GID} {_OPERATOR_GROUP}` "
+                    "(check no files are left orphaned by the old GID)"
+                ),
             )
 
         operator_action = (

@@ -9715,13 +9715,18 @@ def _force_group_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor_cli.grp, "getgrnam", fake)
 
 
-def _force_group_present(monkeypatch: pytest.MonkeyPatch) -> None:
+def _force_group_present(monkeypatch: pytest.MonkeyPatch, *, gid: int | None = None) -> None:
     real = grp.getgrnam
-    sentinel = grp.getgrnam("tgw-coders")
+    entry = SimpleNamespace(
+        gr_name=doctor_cli._OPERATOR_GROUP,
+        gr_passwd="x",
+        gr_gid=doctor_cli._OPERATOR_GID if gid is None else gid,
+        gr_mem=[],
+    )
 
     def fake(name: str):
         if name == doctor_cli._OPERATOR_GROUP:
-            return sentinel
+            return entry
         return real(name)
 
     monkeypatch.setattr(doctor_cli.grp, "getgrnam", fake)
@@ -9775,6 +9780,20 @@ def test_operator_sudoers_fails_on_drift_and_absence(
     assert drift["evidence"]["expected"] == _OPERATOR_SUDOERS_SAMPLE
     assert "visudo" in drift["operator_action"]
     assert "90-db-nopasswd" in drift["operator_action"]
+
+
+def test_operator_sudoers_fails_on_wrong_gid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _operator_sudoers_paths(tmp_path, _OPERATOR_SUDOERS_SAMPLE)
+    _force_group_present(monkeypatch, gid=976)
+
+    result = doctor_cli.check_operator_sudoers(paths)
+
+    assert result["state"] == "FAIL"
+    assert result["evidence"]["gid"] == 976
+    assert result["evidence"]["expected_gid"] == doctor_cli._OPERATOR_GID
+    assert "groupmod" in result["operator_action"]
 
 
 def test_diagnose_includes_operator_sudoers_and_plan_vault_git(
