@@ -120,6 +120,28 @@ def test_pytest_gate_scopes_to_the_changed_sources_sibling_test(repo, tmp_path):
     assert "test_m.py" in result["detail"]
 
 
+def test_pytest_gate_ignores_a_concurrent_land_on_the_base_branch(repo, tmp_path):
+    # a task is in flight; meanwhile another task lands on main, touching an
+    # unrelated source with a since-broken sibling test. The in-flight gate must
+    # scope to what THIS worktree changed, not what main moved.
+    prepare = git_worktree_prepare(repo, tmp_path / "wts")
+    wt = prepare("todo-concurrent", _git(repo, "rev-parse", "main"))
+    (wt / "src" / "m.py").write_text("def f():\n    return 1  # my change\n")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-q", "-m", "my change")
+
+    # someone else lands on main: a new module whose sibling test is red
+    (repo / "src" / "other.py").write_text("def g():\n    return 2\n")
+    (repo / "tests" / "test_other.py").write_text("from other import g\n\ndef test_g():\n    assert g() == 999\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "concurrent land with a red test")
+
+    result = pytest_gate(python=sys.executable, run_ruff=False)("todo-concurrent", wt)
+    assert result["passed"] is True
+    assert "test_m.py" in result["detail"]
+    assert "test_other.py" not in result["detail"]
+
+
 def test_pytest_gate_ruff_lints_only_the_changed_source(repo, tmp_path):
     prepare = git_worktree_prepare(repo, tmp_path / "wts")
     wt = prepare("todo-ruff", _git(repo, "rev-parse", "main"))

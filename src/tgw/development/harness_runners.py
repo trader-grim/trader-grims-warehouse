@@ -100,16 +100,28 @@ def git_worktree_prepare(
 # --------------------------------------------------------------------------- #
 
 def _changed_paths(worktree: Path, base_ref: str) -> set[str]:
-    """Repo-relative paths this change touches: tracked diff vs ``base_ref``
-    plus not-yet-committed new files (``git diff`` never lists untracked)."""
+    """Repo-relative paths this change touches: working-tree diff vs the
+    merge-base with ``base_ref``, plus not-yet-committed new files (``git diff``
+    never lists untracked).
+
+    The diff is against the merge-base, not ``base_ref``'s current tip: a
+    concurrent land on ``base_ref`` while this task is in flight must not make
+    files that landing touched — but this worktree did not — look changed here
+    (that pulled unrelated, already-red sibling test files into the gate).
+    """
     def _lines(*args: str) -> list[str]:
         try:
             return _git(worktree, *args).splitlines()
         except RunnerError:
             return []
 
+    try:
+        base = _git(worktree, "merge-base", base_ref, "HEAD")
+    except RunnerError:
+        base = base_ref
+
     return (
-        set(_lines("diff", "--name-only", base_ref, "--"))
+        set(_lines("diff", "--name-only", base, "--"))
         | set(_lines("ls-files", "--others", "--exclude-standard"))
     )
 
