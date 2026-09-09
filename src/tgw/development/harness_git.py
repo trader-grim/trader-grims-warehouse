@@ -36,6 +36,12 @@ _HARNESS_SCRATCH: tuple[str, ...] = (
     "implementation-receipt.json",
     "review-receipt.json",
 )
+# Per-session scratch also lands in the worktree root: the disposable coder
+# HOMEs (tempfile prefixes ".tgw-harness-claude-" / "-session-" / "-opencode-").
+# A TemporaryDirectory normally self-deletes, but a session that is killed
+# (operator stop, lease loss, crash) leaves its dir behind. Purge anything
+# matching this glob before staging so it can never enter the squashed tree.
+_HARNESS_SCRATCH_GLOB = ".tgw-harness-*"
 
 # A ref publisher performs the guarded fast-forward advance of the base branch.
 # (ref, expected_old_oid, new_oid) -> None; raises on refusal or a lost race.
@@ -162,7 +168,10 @@ def land_accepted_task(
     # Drop the harness's own scratch (job file, session receipts) before it can
     # be staged — it is written into the worktree root and would otherwise land
     # in the squashed tree.
-    for rel in _HARNESS_SCRATCH:
+    scratch = list(_HARNESS_SCRATCH) + [
+        p.name for p in worktree.glob(_HARNESS_SCRATCH_GLOB)
+    ]
+    for rel in scratch:
         target = worktree / rel
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True)

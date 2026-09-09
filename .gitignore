@@ -50,6 +50,16 @@ catalog.migrated.json.bak
 docs/TGW-Plan-Vault/inbox/processed/
 docs/TGW-Plan-Vault/inbox/queued/
 
+# Continual-harness per-job scratch in a coder worktree root — the disposable
+# coder HOMEs (.tgw-harness-claude-*, -session-*, -opencode-*), the job file
+# (.tgw-harness), and the session receipts. harness_git purges these before a
+# land too; this is the belt so a killed session's leftovers never get staged.
+# (.tgw-canary IS deliberately tracked — the onboarding marker — so anchor this.)
+/.tgw-harness
+/.tgw-harness-*
+/implementation-receipt.json
+/review-receipt.json
+
 # Hand-edit backups of live config (never commit)
 *.bak-session*
 *.bak-[0-9]*

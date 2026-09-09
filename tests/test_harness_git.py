@@ -89,6 +89,11 @@ def test_land_excludes_the_harness_scratch_from_the_commit(repo):
     (wt / "implementation-receipt.json").write_text('{"outcome": "satisfied"}')
     (wt / "review-receipt.json").write_text('{"verdict": "PASS"}')
 
+    # a killed coder session leaves its disposable HOME behind (no self-delete)
+    sess = wt / ".tgw-harness-claude-abc123" / "home" / ".claude"
+    sess.mkdir(parents=True)
+    (sess / ".claude.json").write_text('{"projects": {}}')
+
     landed = harness_git.land_accepted_task(
         "todo-scratch", repository=repo, worktree=wt, message="Todo: feature",
     )
@@ -97,6 +102,7 @@ def test_land_excludes_the_harness_scratch_from_the_commit(repo):
     assert not any(
         f.startswith(".tgw-harness") or f.endswith("-receipt.json") for f in files
     )
+    assert not (wt / ".tgw-harness-claude-abc123").exists()  # purged from disk too
 
 
 def test_land_refuses_when_base_moved(repo):
