@@ -9715,13 +9715,15 @@ def _force_group_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor_cli.grp, "getgrnam", fake)
 
 
-def _force_group_present(monkeypatch: pytest.MonkeyPatch, *, gid: int | None = None) -> None:
+def _force_group_present(
+    monkeypatch: pytest.MonkeyPatch, *, gid: int | None = None, members: list[str] | None = None
+) -> None:
     real = grp.getgrnam
     entry = SimpleNamespace(
         gr_name=doctor_cli._OPERATOR_GROUP,
         gr_passwd="x",
         gr_gid=doctor_cli._OPERATOR_GID if gid is None else gid,
-        gr_mem=[],
+        gr_mem=["claude", "db"] if members is None else members,
     )
 
     def fake(name: str):
@@ -9794,6 +9796,32 @@ def test_operator_sudoers_fails_on_wrong_gid(
     assert result["evidence"]["gid"] == 976
     assert result["evidence"]["expected_gid"] == doctor_cli._OPERATOR_GID
     assert "groupmod" in result["operator_action"]
+
+
+def test_operator_sudoers_warns_when_group_has_no_envelope_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _operator_sudoers_paths(tmp_path, _OPERATOR_SUDOERS_SAMPLE)
+    _force_group_present(monkeypatch, members=[])
+
+    result = doctor_cli.check_operator_sudoers(paths)
+
+    assert result["state"] == "WARN"
+    assert "gpasswd -a claude" in result["operator_action"]
+
+
+def test_operator_sudoers_accepts_claude_as_member_pre_wu2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _operator_sudoers_paths(tmp_path, _OPERATOR_SUDOERS_SAMPLE)
+    _force_group_present(monkeypatch, members=["claude"])
+    installed = tmp_path / "etc-tgw-operators"
+    installed.write_text(_OPERATOR_SUDOERS_SAMPLE, encoding="utf-8")
+    monkeypatch.setattr(doctor_cli, "_OPERATOR_SUDOERS_INSTALLED", installed)
+
+    result = doctor_cli.check_operator_sudoers(paths)
+
+    assert result["state"] == "PASS"
 
 
 def test_diagnose_includes_operator_sudoers_and_plan_vault_git(

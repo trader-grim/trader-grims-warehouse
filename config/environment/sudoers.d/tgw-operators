@@ -6,9 +6,10 @@
 #   1. reviewed the allowlist below and decided which of the existing narrow
 #      per-purpose grants it may replace (tgw-flake-git / tgw-source-git belong
 #      to the Nix-flake / release lanes and STAY — see PP-ROLES-001 WU-9);
-#   2. created group `tgw-operators` at a FIXED GID (see below);
+#   2. created group `tgw-operators` at a FIXED GID (see below) and added
+#      `claude` + `db` to it;
 #   3. run `visudo -cf config/environment/sudoers.d/tgw-operators`;
-#   4. installed it (see "Install" below) and removed the
+#   4. installed it, VERIFIED the grant from a fresh login, then removed the
 #      `/etc/sudoers.d/90-db-nopasswd` `(db) NOPASSWD: ALL` proxy.
 # Until then `tgw doctor` reports `access.operator-sudoers` = UNKNOWN (the group
 # does not exist yet), never FAIL.
@@ -26,19 +27,28 @@
 # ============================================================================
 #
 # One group, one curated grant. Members = the operator effect-envelope:
-# `tgw-triage` (the interactive supervised session, PP-ROLES-001 WU-2) and,
-# transitionally, `db`. This fragment REPLACES the `(db) NOPASSWD: ALL` proxy in
+#   - `claude` — the interactive supervised session, TODAY. WU-2 has not built
+#     `tgw-triage` yet; until it does, `claude` IS that session. When WU-2 lands,
+#     swap: `gpasswd -a tgw-triage tgw-operators && gpasswd -d claude tgw-operators`
+#     (tracked in PP-ROLES-001 WU-2).
+#   - `db` — transitionally.
+# This fragment REPLACES the `(db) NOPASSWD: ALL` proxy in
 # /etc/sudoers.d/90-db-nopasswd and the per-purpose grab-bag it subsumes. `db`
 # keeps its own personal sudo (operator = highest precedence) but no service or
 # agent account routes root access through a human login.
 #
-# Install (operator, as root):
-#   visudo -cf config/environment/sudoers.d/tgw-operators
+# Install (operator, as root, on tgw-lib):
 #   groupadd -g 4000 tgw-operators
-#   gpasswd -a tgw-triage tgw-operators        # + `gpasswd -a db tgw-operators` transitionally
+#   gpasswd -a claude tgw-operators
+#   gpasswd -a db tgw-operators
+#   visudo -cf config/environment/sudoers.d/tgw-operators
 #   install -m 0440 -o root -g root config/environment/sudoers.d/tgw-operators /etc/sudoers.d/tgw-operators
+#   # group membership does NOT apply to a running session — verify from a FRESH
+#   # login first:
+#   #   su - claude -c 'sudo -n systemctl status tgw-context-publish.service'
+#   # ONLY once that works, remove the proxy and drop the subsumed grants:
 #   rm -f /etc/sudoers.d/90-db-nopasswd
-#   # then drop the per-purpose grants this subsumes (keep tgw-flake-git, tgw-source-git)
+#   # drop the per-purpose grants this subsumes (KEEP tgw-flake-git, tgw-source-git)
 # Verified by: `tgw doctor` check `access.operator-sudoers` (drift/absence -> FAIL).
 
 # --- manage the tgw-* systemd units (the two-gates apparatus + Context) -------

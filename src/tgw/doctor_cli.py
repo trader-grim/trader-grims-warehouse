@@ -4266,6 +4266,27 @@ def check_operator_sudoers(paths: DoctorPaths) -> dict[str, Any]:
                 ),
             )
 
+        # The effect-envelope: `claude` is the interactive session today;
+        # `tgw-triage` replaces it at PP-ROLES-001 WU-2; `db` is transitional.
+        envelope = {"claude", "tgw-triage", "db"}
+        members = set(group_entry.gr_mem)
+        if not (members & envelope):
+            return _check(
+                identity,
+                "WARN",
+                (
+                    f"group {_OPERATOR_GROUP!r} exists but no effect-envelope "
+                    "member (claude / tgw-triage / db) is in it — WU-9 install "
+                    "is incomplete"
+                ),
+                evidence={
+                    "group": _OPERATOR_GROUP,
+                    "members": sorted(members),
+                    "expected_any_of": sorted(envelope),
+                },
+                repair="operator: `gpasswd -a claude tgw-operators && gpasswd -a db tgw-operators`",
+            )
+
         operator_action = (
             f"operator: review {canonical_path}, then run "
             f"`visudo -cf {canonical_path}` and install it verbatim as "
