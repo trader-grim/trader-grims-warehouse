@@ -39,6 +39,21 @@ the printed public key as a **write-enabled deploy key** on `trader-grim/tgw-pla
 + set branch protection "block force pushes" (NOT "require linear history" — the
 vault stitches merges), then `scripts/install-tgw-plan-publish activate`.
 
+### GitHub branch protection (both repos)
+
+Belt-and-suspenders only — the real protection is the local FF-only brokers +
+`main_ref_guard`, which is why a mis-set or missing GitHub ruleset never blocks
+work. Target state on **both** `trader-grim/trader-grims-warehouse` and
+`trader-grim/tgw-plan`: one ruleset targeting the default branch with **Block
+force pushes** enabled, Enforcement = Active. Do **not** enable "Require linear
+history" (both repos carry merge commits). A GitHub Ruleset with no target
+silently does nothing ("does not target any resources").
+
+History (2026-09-08): the `tgw-plan` deploy key was briefly added to
+`trader-grims-warehouse` by mistake (removed), and during cleanup the
+`trader-grims-warehouse` `main` ruleset was deleted. Recreate it per above when
+convenient; nothing depends on it.
+
 ## Production retirement state
 
 The legacy checkout `tgw-prod:/opt/TGW/src/trader-grims-warehouse` was preserved as
