@@ -1,0 +1,11 @@
+[Unit]
+Description=TGW: periodic GitHub publish (source repo + plan vault)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=90
+Persistent=true
+
+[Install]
+WantedBy=timers.target

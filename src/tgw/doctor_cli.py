@@ -4423,6 +4423,95 @@ def check_plan_vault_git(paths: DoctorPaths) -> dict[str, Any]:
         return _failed(identity, exc)
 
 
+# WARN (never FAIL — publishing is not a gate) when a repo's local main has
+# drifted too far ahead of its GitHub mirror, so a stalled tgw-publish.timer
+# cannot lapse for days unnoticed (the recurring failure this closes).
+_PUBLISH_LAG_COMMITS = 20
+_PUBLISH_LAG_AGE_DAYS = 3
+
+
+def _publish_lag(repo: Path, upstream: str, local: str = "main") -> dict[str, Any] | None:
+    """Commit count + oldest-unpushed age of ``local`` beyond ``upstream``.
+
+    Reads only locally-cached remote-tracking refs — no network. Returns None
+    when the upstream ref is absent (never fetched) so the caller can stay quiet
+    rather than cry wolf.
+    """
+    try:
+        _git(repo, "rev-parse", "--verify", "--quiet", f"{upstream}^{{commit}}")
+    except Exception:
+        return None
+    count = int(_git(repo, "rev-list", "--count", f"{upstream}..{local}") or "0")
+    age_days: float | None = None
+    if count:
+        oldest = _git(
+            repo, "log", "--format=%ct", f"{upstream}..{local}"
+        ).split()
+        if oldest:
+            age_days = (time.time() - int(oldest[-1])) / 86400.0
+    return {"upstream": upstream, "behind_commits": count, "oldest_unpushed_age_days": age_days}
+
+
+def check_source_github_publish(paths: DoctorPaths) -> dict[str, Any]:
+    """Both TGW repos' local main vs their GitHub mirror.
+
+    `tgw-publish.timer` publishes source (`origin/main`) + plan vault
+    (`github/main`) fast-forward-only every ~15 min. This check surfaces a
+    stalled timer as a WARN — it never FAILs (two-gates: publishing is not a
+    gate) and never repairs.
+    """
+    identity = "source.github-publish"
+    try:
+        lags: dict[str, dict[str, Any]] = {}
+        src = _publish_lag(paths.repository, "origin/main")
+        if src is not None:
+            lags["source"] = src
+        if (_PLAN_VAULT / ".git").is_dir():
+            vault = _publish_lag(_PLAN_VAULT, "github/main")
+            if vault is not None:
+                lags["plan_vault"] = vault
+
+        if not lags:
+            return _check(
+                identity,
+                "UNKNOWN",
+                "no GitHub remote-tracking ref cached for either repo "
+                "(run `tgw-source-git fetch` / `tgw-plan-git fetch`)",
+            )
+
+        stale = []
+        for name, lag in lags.items():
+            age = lag["oldest_unpushed_age_days"]
+            if lag["behind_commits"] > _PUBLISH_LAG_COMMITS or (
+                age is not None and age > _PUBLISH_LAG_AGE_DAYS
+            ):
+                age_txt = "?" if age is None else f"{age:.1f}d"
+                stale.append(f"{name} +{lag['behind_commits']} commits, oldest {age_txt}")
+
+        if stale:
+            return _check(
+                identity,
+                "WARN",
+                "GitHub mirror is behind: " + "; ".join(stale),
+                evidence={"lags": lags, "thresholds": {
+                    "commits": _PUBLISH_LAG_COMMITS, "age_days": _PUBLISH_LAG_AGE_DAYS,
+                }},
+                repair=(
+                    "operator: `systemctl start tgw-publish` (or check "
+                    "`journalctl -u tgw-publish` — a non-fast-forward or auth "
+                    "failure blocks it)"
+                ),
+            )
+        summary = ", ".join(
+            f"{name} +{lag['behind_commits']}" for name, lag in lags.items()
+        )
+        return _check(
+            identity, "PASS", f"GitHub mirrors current ({summary})", evidence={"lags": lags}
+        )
+    except Exception as exc:
+        return _failed(identity, exc)
+
+
 # --------------------------------------------------------------------------- #
 # harness onboarding — LEAF-11-9 W2/W3
 # --------------------------------------------------------------------------- #
@@ -6649,6 +6738,7 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         check_harness_sudoers(paths),
         check_operator_sudoers(paths),
         check_plan_vault_git(paths),
+        check_source_github_publish(paths),
         check_harness_identities(paths),
         check_harness_import_path(paths),
         check_harness_executors(paths),

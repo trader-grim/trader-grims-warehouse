@@ -3,6 +3,10 @@ set -eu
 
 SOCKET=/run/tgw-github-agent/agent.sock
 PRIVATE_KEY=/var/lib/tgw-release/.ssh/trader-grims-warehouse_deploy_ed25519
+# The plan-vault deploy key is optional: it is added by install-tgw-plan-publish.
+# A missing file here must NOT fail this unit — that would take down the source
+# repo's publish path too.
+PLAN_PRIVATE_KEY=/var/lib/tgw-release/.ssh/tgw-plan_deploy_ed25519
 attempt=0
 
 while [ ! -S "$SOCKET" ]; do
@@ -16,3 +20,10 @@ done
 
 chmod 0600 "$SOCKET"
 SSH_AUTH_SOCK="$SOCKET" ssh-add "$PRIVATE_KEY"
+
+if [ -f "$PLAN_PRIVATE_KEY" ]; then
+    SSH_AUTH_SOCK="$SOCKET" ssh-add "$PLAN_PRIVATE_KEY" || {
+        echo "TGW GitHub agent: plan-vault deploy key present but ssh-add failed" >&2
+        exit 71
+    }
+fi

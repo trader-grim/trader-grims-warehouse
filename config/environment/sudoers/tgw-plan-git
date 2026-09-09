@@ -1,0 +1,19 @@
+# Plan-vault GitHub publisher — parallels sudoers/tgw-source-git.
+# The automated path is tgw-publish.timer (runs as tgw-release directly, no
+# sudo). These grants are for manual operator / session triggering.
+%tgw-release ALL=(tgw-release) NOPASSWD: /usr/local/sbin/tgw-plan-git status
+%tgw-release ALL=(tgw-release) NOPASSWD: /usr/local/sbin/tgw-plan-git fetch
+%tgw-release ALL=(tgw-release) NOPASSWD: /usr/local/sbin/tgw-plan-git dry-run
+%tgw-release ALL=(tgw-release) NOPASSWD: /usr/local/sbin/tgw-plan-git publish
+%tgw-release ALL=(tgw-release) NOPASSWD: /usr/local/sbin/tgw-publish
+
+# Operator effect-envelope (PP-ROLES-001 WU-9) may trigger a publish directly.
+%tgw-operators ALL=(tgw-release) NOPASSWD: /usr/local/sbin/tgw-plan-git dry-run
+%tgw-operators ALL=(tgw-release) NOPASSWD: /usr/local/sbin/tgw-plan-git publish
+%tgw-operators ALL=(tgw-release) NOPASSWD: /usr/local/sbin/tgw-publish
+
+# Phase-0: the supervised `claude` session may trigger a publish (read-only
+# effect — pushes already-accepted commits to the off-site mirror).
+claude ALL=(tgw-release) NOPASSWD: /usr/local/sbin/tgw-plan-git dry-run
+claude ALL=(tgw-release) NOPASSWD: /usr/local/sbin/tgw-plan-git publish
+claude ALL=(tgw-release) NOPASSWD: /usr/local/sbin/tgw-publish

@@ -9872,6 +9872,87 @@ def test_plan_vault_git_fails_on_bad_dir_and_unset_shared(
     assert any("not group-writable+setgid" in p for p in result["evidence"]["problems"])
 
 
+def _publish_git_stub(monkeypatch: pytest.MonkeyPatch, table: dict[tuple[str, ...], object]):
+    """Route doctor_cli._git calls through a {argtail: result} table.
+
+    A callable value is invoked; an Exception value is raised; a str is returned.
+    """
+    def fake(repo: Path, *args: str):
+        key = args
+        if key not in table:
+            # rev-parse --verify probes for absent refs land here
+            raise doctor_cli.DoctorError(f"unexpected git {args}")
+        val = table[key]
+        if isinstance(val, Exception):
+            raise val
+        return val
+
+    monkeypatch.setattr(doctor_cli, "_git", fake)
+
+
+def test_github_publish_unknown_without_cached_refs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor_cli, "_PLAN_VAULT", tmp_path / "no-vault")
+
+    def fake(repo: Path, *args: str):
+        raise doctor_cli.DoctorError("no such ref")
+
+    monkeypatch.setattr(doctor_cli, "_git", fake)
+
+    result = doctor_cli.check_source_github_publish(doctor_cli.DoctorPaths(repository=tmp_path))
+    assert result["state"] == "UNKNOWN"
+
+
+def test_github_publish_pass_when_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor_cli, "_PLAN_VAULT", tmp_path / "no-vault")
+    _publish_git_stub(monkeypatch, {
+        ("rev-parse", "--verify", "--quiet", "origin/main^{commit}"): "abc\n",
+        ("rev-list", "--count", "origin/main..main"): "0",
+    })
+    result = doctor_cli.check_source_github_publish(doctor_cli.DoctorPaths(repository=tmp_path))
+    assert result["state"] == "PASS"
+    assert result["evidence"]["lags"]["source"]["behind_commits"] == 0
+
+
+def test_github_publish_warn_on_commit_and_age_lag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor_cli, "_PLAN_VAULT", tmp_path / "no-vault")
+    old = str(int(time.time()) - 6 * 86400)
+    _publish_git_stub(monkeypatch, {
+        ("rev-parse", "--verify", "--quiet", "origin/main^{commit}"): "abc\n",
+        ("rev-list", "--count", "origin/main..main"): "3",
+        ("log", "--format=%ct", "origin/main..main"): f"{int(time.time())}\n{old}\n",
+    })
+    result = doctor_cli.check_source_github_publish(doctor_cli.DoctorPaths(repository=tmp_path))
+    assert result["state"] == "WARN"
+    assert "source" in result["detail"]
+    assert "systemctl start tgw-publish" in result["operator_action"]
+
+
+def test_diagnose_includes_github_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = doctor_cli._check("source.github-publish", "PASS", "ok")
+    monkeypatch.setattr(doctor_cli, "check_source_github_publish", lambda _p: sentinel)
+    for name in (
+        "check_host", "check_source", "check_context_snapshot", "check_context_launcher",
+        "check_context_processes", "check_unix_access", "check_harness_sudoers",
+        "check_operator_sudoers", "check_plan_vault_git", "check_harness_identities",
+        "check_harness_import_path", "check_harness_executors", "check_worktrees",
+        "check_database", "check_database_peer_auth", "check_units",
+        "check_plan_render_worker", "check_runtime", "check_obsolete_surfaces",
+        "check_main_ref_guard",
+    ):
+        monkeypatch.setattr(
+            doctor_cli, name,
+            (lambda _n: (lambda _paths: doctor_cli._check(_n, "PASS", "stub")))(name),
+        )
+    report = doctor_cli.diagnose(doctor_cli.DoctorPaths())
+    assert any(c["id"] == "source.github-publish" for c in report["checks"])
+
+
 # ---------------------------------------------------------------------------
 # harness onboarding — repair_harness + harness.* checks  (LEAF-11-9 W2/W3)
 # ---------------------------------------------------------------------------

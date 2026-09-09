@@ -1,0 +1,108 @@
+#!/bin/sh
+# Stand up the plan-vault -> GitHub publisher. Parallels install-tgw-source-access.
+#
+#   install-tgw-plan-publish prepare   # keygen + install units + restart agent;
+#                                       # prints the public key to register
+#   install-tgw-plan-publish activate  # after the deploy key is on GitHub:
+#                                       # verify, repoint the remote, enable timer
+#
+# Requires install-tgw-source-access to have run first (shared agent + known
+# hosts). Idempotent.
+set -eu
+
+MODE=${1:-prepare}
+VAULT=/opt/TGW/library/plans
+REMOTE=git@github-tgw-plan:trader-grim/tgw-plan.git
+RELEASE_USER=tgw-release
+RELEASE_GROUP=tgw-release
+KEY_DIRECTORY=/var/lib/tgw-release/.ssh
+PRIVATE_KEY=$KEY_DIRECTORY/tgw-plan_deploy_ed25519
+PUBLIC_KEY=$PRIVATE_KEY.pub
+SSH_PUBLIC_KEY=/etc/ssh/tgw_github_plan.pub
+AGENT_SOCKET=/run/tgw-github-agent/agent.sock
+SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SOURCE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIRECTORY/.." && pwd)
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "install-tgw-plan-publish must run as root" >&2
+    exit 77
+fi
+case "$MODE" in prepare|activate) ;; *)
+    echo "usage: install-tgw-plan-publish [prepare|activate]" >&2; exit 64 ;;
+esac
+if ! getent passwd "$RELEASE_USER" >/dev/null; then
+    echo "run install-tgw-source-access first ($RELEASE_USER is absent)" >&2
+    exit 69
+fi
+if [ ! -d "$VAULT/.git" ]; then
+    echo "plan vault checkout is absent at $VAULT" >&2
+    exit 69
+fi
+
+# --- scripts, ssh alias, sudoers, units ------------------------------------
+install -o root -g root -m 0644 \
+    "$SOURCE_ROOT/config/environment/ssh/github-tgw-plan.conf" \
+    /etc/ssh/ssh_config.d/11-tgw-github-plan.conf
+install -o root -g root -m 0755 \
+    "$SOURCE_ROOT/scripts/tgw-github-agent-load" \
+    /usr/local/libexec/tgw-github-agent-load
+install -o root -g root -m 0755 \
+    "$SOURCE_ROOT/scripts/tgw-plan-git" /usr/local/sbin/tgw-plan-git
+install -o root -g root -m 0755 \
+    "$SOURCE_ROOT/scripts/tgw-publish" /usr/local/sbin/tgw-publish
+install -o root -g root -m 0440 \
+    "$SOURCE_ROOT/config/environment/sudoers/tgw-plan-git" \
+    /etc/sudoers.d/tgw-plan-git
+visudo -cf /etc/sudoers.d/tgw-plan-git
+install -o root -g root -m 0644 \
+    "$SOURCE_ROOT/config/environment/systemd/tgw-publish.service" \
+    /etc/systemd/system/tgw-publish.service
+install -o root -g root -m 0644 \
+    "$SOURCE_ROOT/config/environment/systemd/tgw-publish.timer" \
+    /etc/systemd/system/tgw-publish.timer
+systemctl daemon-reload
+
+# --- deploy key -----------------------------------------------------------
+install -d -o "$RELEASE_USER" -g "$RELEASE_GROUP" -m 0700 "$KEY_DIRECTORY"
+if [ ! -e "$PRIVATE_KEY" ] && [ ! -e "$PUBLIC_KEY" ]; then
+    umask 077
+    ssh-keygen -q -t ed25519 -N "" -C "tgw-plan deploy (tgw-lib)" -f "$PRIVATE_KEY"
+elif [ ! -f "$PRIVATE_KEY" ] || [ ! -f "$PUBLIC_KEY" ]; then
+    echo "incomplete tgw-plan credential pair; refusing replacement" >&2
+    exit 65
+fi
+chown "$RELEASE_USER:$RELEASE_GROUP" "$PRIVATE_KEY" "$PUBLIC_KEY"
+chmod 0600 "$PRIVATE_KEY"
+chmod 0644 "$PUBLIC_KEY"
+install -o root -g root -m 0644 "$PUBLIC_KEY" "$SSH_PUBLIC_KEY"
+
+systemctl restart tgw-github-agent.service
+if [ ! -S "$AGENT_SOCKET" ]; then
+    echo "TGW GitHub agent socket is absent after restart" >&2
+    exit 70
+fi
+fp=$(ssh-keygen -lf "$PUBLIC_KEY" | awk '{print $2}')
+loaded=$(runuser -u "$RELEASE_USER" -- env SSH_AUTH_SOCK="$AGENT_SOCKET" ssh-add -l)
+case "$loaded" in
+    *"$fp"*) ;;
+    *) echo "agent did not load the tgw-plan deploy key" >&2; exit 70 ;;
+esac
+
+if [ "$MODE" = prepare ]; then
+    echo
+    echo "== register this as a WRITE-enabled deploy key on trader-grim/tgw-plan =="
+    cat "$PUBLIC_KEY"
+    echo
+    echo "then: also set branch protection on 'main' — block force pushes"
+    echo "      (NOT 'require linear history' — the vault stitches merges)"
+    echo "next=install-tgw-plan-publish activate"
+    exit 0
+fi
+
+# --- activate ------------------------------------------------------------
+runuser -u "$RELEASE_USER" -- /usr/local/sbin/tgw-plan-git status >/dev/null
+runuser -u "$RELEASE_USER" -- /usr/local/sbin/tgw-plan-git dry-run
+git -c safe.directory="$VAULT" -C "$VAULT" remote set-url github "$REMOTE"
+systemctl enable --now tgw-publish.timer
+echo "activated_remote=$REMOTE"
+echo "timer=$(systemctl is-active tgw-publish.timer)"

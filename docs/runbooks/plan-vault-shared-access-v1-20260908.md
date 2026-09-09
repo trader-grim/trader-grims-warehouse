@@ -67,7 +67,13 @@ is folded into **PP-ROLES-001 WU-3** and granted through **WU-9**).
 
 ## Publication to GitHub
 
-`trader-grim/tgw-plan`, `github` remote. `main` push is a deliberate operator
-step (no automated push, no fast-forward-only broker as the source repo has).
-As of 2026-09-08 the GitHub `main` was 5 days / ~30 commits behind local — the
-push cadence is manual and had lapsed.
+`trader-grim/tgw-plan`, `github` remote. Publishing is via
+`/usr/local/sbin/tgw-plan-git publish` (fast-forward-only wrapper, `tgw-release`
+identity, `github-tgw-plan` ssh alias + per-repo deploy key) and the shared
+`tgw-publish.timer` — see `three-repository-boundary-v3-20260815.md` §"GitHub
+publication". `tgw doctor` `source.github-publish` reports the lag.
+
+Historic (pre-broker): `main` push was a manual operator step and had lapsed —
+2026-09-08 GitHub `main` was ~32 commits behind local, and the credential used
+for the last push (`ccc9d82`) was a session's forwarded agent, not a service
+account.

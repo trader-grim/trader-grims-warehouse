@@ -16,6 +16,29 @@ These histories must never be merged. The application repository must not contai
 approved snapshot selected from it. The flake may pin an application revision, but
 must not contain or become the application repository.
 
+## GitHub publication (off-site mirror)
+
+Both the application source and the plan vault publish to GitHub through
+`tgw-release`, each with its own **per-repo deploy key** (never a personal
+account) served by `tgw-github-agent.service`:
+
+| repo | wrapper | ssh alias | deploy key |
+|---|---|---|---|
+| application source | `/usr/local/bin/tgw-source-git {status,fetch,dry-run,publish}` | `github-tgw-app` | `/var/lib/tgw-release/.ssh/trader-grims-warehouse_deploy_ed25519` |
+| plan vault | `/usr/local/sbin/tgw-plan-git {status,fetch,dry-run,publish}` | `github-tgw-plan` | `/var/lib/tgw-release/.ssh/tgw-plan_deploy_ed25519` |
+
+Both wrappers are **fast-forward-only** (client-side; the vault has no server-side
+broker). `tgw-publish.timer` runs `/usr/local/sbin/tgw-publish` every ~15 min as
+`tgw-release`, publishing both when local `main` is ahead — so **landing on
+`main` implies publishing** (coding-workflow two-gates). It is idempotent.
+`tgw doctor` `source.github-publish` WARNs (never FAILs) if a mirror falls
+> 20 commits / 3 days behind — a stalled timer cannot lapse unnoticed.
+
+Install: `scripts/install-tgw-plan-publish prepare` (keygen + units), register
+the printed public key as a **write-enabled deploy key** on `trader-grim/tgw-plan`
++ set branch protection "block force pushes" (NOT "require linear history" — the
+vault stitches merges), then `scripts/install-tgw-plan-publish activate`.
+
 ## Production retirement state
 
 The legacy checkout `tgw-prod:/opt/TGW/src/trader-grims-warehouse` was preserved as

@@ -1,0 +1,25 @@
+[Unit]
+Description=TGW: publish source repo + plan vault to GitHub (fast-forward only)
+After=tgw-github-agent.service
+Wants=tgw-github-agent.service
+ConditionPathExists=/run/tgw-github-agent/agent.sock
+
+[Service]
+Type=oneshot
+User=tgw-release
+Group=tgw-release
+SupplementaryGroups=tgw-coders
+ExecStart=/usr/local/sbin/tgw-publish
+Nice=10
+TimeoutStartSec=120
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/TGW/tgw-lib/src/trader-grims-warehouse/.git /opt/TGW/library/plans/.git
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes

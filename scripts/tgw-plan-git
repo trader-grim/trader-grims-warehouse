@@ -1,0 +1,84 @@
+#!/bin/sh
+# Fast-forward-only publisher for the TGW plan vault (/opt/TGW/library/plans ->
+# trader-grim/tgw-plan). Mirrors tgw-source-git: the vault has no server-side
+# FF-only broker, so this wrapper enforces it client-side. Runs as tgw-release
+# (a tgw-coders member, so it can fetch into the group-shared .git) with the
+# repo-scoped deploy key served by tgw-github-agent.service.
+set -eu
+
+COMMAND=${1:-}
+GIT_DIRECTORY=/opt/TGW/library/plans/.git
+REMOTE=git@github-tgw-plan:trader-grim/tgw-plan.git
+BRANCH=main
+
+export HOME=/nonexistent
+export PATH=/usr/bin:/bin
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_TERMINAL_PROMPT=0
+export SSH_AUTH_SOCK=/run/tgw-github-agent/agent.sock
+cd /
+
+git_repository() {
+    git --git-dir="$GIT_DIRECTORY" "$@"
+}
+
+remote_commit() {
+    git ls-remote --heads "$REMOTE" "$1" | awk 'NR == 1 {print $1}'
+}
+
+# Push only if local BRANCH strictly fast-forwards the remote (or the remote
+# branch does not exist yet). Never force, never touch any other ref or remote.
+assert_fast_forward() {
+    remote_head=$(remote_commit "refs/heads/$BRANCH")
+    if [ -n "$remote_head" ]; then
+        if ! git_repository cat-file -e "$remote_head^{commit}" 2>/dev/null; then
+            git_repository fetch --no-tags "$REMOTE" \
+                "+refs/heads/$BRANCH:refs/remotes/github/$BRANCH"
+        fi
+        if ! git_repository merge-base --is-ancestor "$remote_head" "$BRANCH"; then
+            echo "refusing: local $BRANCH does not fast-forward github ($remote_head)" >&2
+            exit 65
+        fi
+    fi
+}
+
+verify_remote_readback() {
+    local_value=$(git_repository rev-parse "$BRANCH^{commit}")
+    remote_value=$(remote_commit "refs/heads/$BRANCH")
+    if [ "$local_value" != "$remote_value" ]; then
+        echo "remote $BRANCH mismatch: local=$local_value remote=${remote_value:-absent}" >&2
+        exit 65
+    fi
+    echo "$BRANCH=$remote_value"
+}
+
+case "$COMMAND" in
+    status)
+        git_repository cat-file -e "$BRANCH^{commit}"
+        ssh-keygen -lf /etc/ssh/tgw_github_plan.pub
+        git ls-remote --heads "$REMOTE" "refs/heads/$BRANCH"
+        ;;
+    fetch)
+        git_repository fetch --no-tags "$REMOTE" \
+            "+refs/heads/$BRANCH:refs/remotes/github/$BRANCH"
+        ;;
+    dry-run)
+        git_repository cat-file -e "$BRANCH^{commit}"
+        assert_fast_forward
+        git_repository push --dry-run "$REMOTE" \
+            "refs/heads/$BRANCH:refs/heads/$BRANCH"
+        ;;
+    publish)
+        git_repository cat-file -e "$BRANCH^{commit}"
+        assert_fast_forward
+        git_repository push "$REMOTE" \
+            "refs/heads/$BRANCH:refs/heads/$BRANCH"
+        git_repository fetch --no-tags "$REMOTE" \
+            "+refs/heads/$BRANCH:refs/remotes/github/$BRANCH"
+        verify_remote_readback
+        ;;
+    *)
+        echo "usage: tgw-plan-git {status|fetch|dry-run|publish}" >&2
+        exit 64
+        ;;
+esac

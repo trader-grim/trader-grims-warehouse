@@ -1,0 +1,22 @@
+#!/bin/sh
+# Publish both TGW repos to GitHub. Idempotent: "Everything up-to-date" is a
+# clean no-op. Run by tgw-publish.timer as tgw-release; also runnable by an
+# operator. Two gates only (coding-workflow directive): landing on main implies
+# publishing — this is that implication, cadenced.
+set -u
+
+rc=0
+for tool in /usr/local/bin/tgw-source-git /usr/local/sbin/tgw-plan-git; do
+    [ -x "$tool" ] || continue
+    name=$(basename "$tool")
+    if out=$("$tool" publish 2>&1); then
+        # keep the local remote-tracking ref fresh so `tgw doctor`
+        # source.github-publish reflects reality after a successful push
+        "$tool" fetch >/dev/null 2>&1 || true
+        echo "$name: ${out:-ok}"
+    else
+        echo "$name: PUBLISH FAILED — $out" >&2
+        rc=1
+    fi
+done
+exit "$rc"
