@@ -103,7 +103,7 @@ _STUB = "stub"
 # catalogue executor not in this set is a dispatch-time WARN skip ("no runner
 # wired yet"), never a failure — wiring a runner is the only code change a new
 # executor needs.
-_WIRED_RUNNERS = frozenset({"claude", "codex"})
+_WIRED_RUNNERS = frozenset({"claude", "codex", "opencode"})
 
 
 def _valid_executors() -> frozenset[str]:
@@ -421,6 +421,89 @@ def _run_codex(prompt: str, worktree: Path, schema: dict[str, Any], *, invoke: I
             return _last_json_object(completed.stdout)
 
 
+_OPENCODE_DEFAULT_MODEL = "opencode/deepseek-v4-flash"
+
+
+def _opencode_report(stdout: str) -> dict[str, Any] | None:
+    """Parse ``opencode run --format json`` output.
+
+    Each line is a JSON event; the assistant's text lands in events carrying a
+    ``text`` / ``content`` / ``part`` payload. Fall back to scanning the whole
+    stream for the last JSON object (the schema report the prompt asks for)."""
+    texts: list[str] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            texts.append(line)
+            continue
+        if not isinstance(event, dict):
+            continue
+        for key in ("text", "content"):
+            payload = event.get(key)
+            if isinstance(payload, str) and payload:
+                texts.append(payload)
+        part = event.get("part") or event.get("message")
+        if isinstance(part, dict):
+            payload = part.get("text") or part.get("content")
+            if isinstance(payload, str) and payload:
+                texts.append(payload)
+    for chunk in reversed(texts):
+        found = _last_json_object(chunk)
+        if found is not None:
+            return found
+    return _last_json_object(stdout)
+
+
+def _run_opencode(
+    prompt: str, worktree: Path, job: dict[str, Any] | None, *, invoke: Invoke,
+) -> dict[str, Any] | None:
+    """opencode CLI runner. One opencode-zen key is a unified gateway to every
+    provider; the model (``provider/model``) comes from the job, else the free
+    DeepSeek default. Same shape as the other runners: fresh HOME, one
+    credential, parse the last JSON object out of the stream."""
+    opencode_bin = _executor_binary("opencode", optional=True)
+    if not opencode_bin:
+        raise SessionUnavailable("opencode executable not on PATH")
+    cred = _session_credential("opencode")
+    spec = coding_executor_catalog.executor_spec("opencode")
+    auth_src = spec.auth_file_path() if spec else None
+    file_auth = bool(auth_src and auth_src.is_file())
+    if not cred and not file_auth:
+        raise SessionUnavailable(
+            f"opencode: no OPENCODE_ZEN_API_KEY and no {auth_src or 'auth file'}"
+        )
+    model = (job or {}).get("model") or _OPENCODE_DEFAULT_MODEL
+    with tempfile.TemporaryDirectory(prefix=".tgw-harness-opencode-", dir=worktree) as tmp:
+        home = Path(tmp) / "home"
+        home.mkdir(parents=True, mode=0o700)
+        if file_auth:
+            dest = home / ".local" / "share" / "opencode"
+            dest.mkdir(parents=True, mode=0o700)
+            shutil.copyfile(auth_src, dest / "auth.json")
+            (dest / "auth.json").chmod(0o600)
+        env = _secret_scrubbed_env()
+        env["HOME"] = str(home)
+        if cred:
+            env[cred[0]] = cred[1]
+        completed = invoke(
+            [opencode_bin, "run", "--format", "json", "--pure",
+             "-m", str(model), "--dir", str(worktree), prompt],
+            cwd=worktree, input=None, text=True, capture_output=True, check=False,
+            env=env, timeout=_timeout_s(),
+        )
+    detail = ((completed.stderr or "") + (completed.stdout or "")).strip()[-800:]
+    if completed.returncode or '"type":"error"' in (completed.stdout or ""):
+        if _looks_unavailable(detail) or "insufficient balance" in detail.lower() \
+                or "creditserror" in detail.lower():
+            raise SessionUnavailable(f"opencode unavailable: {detail or 'no output'}")
+        raise SessionError(f"opencode session exit {completed.returncode}: {detail}")
+    return _opencode_report(completed.stdout)
+
+
 _STUB_CANARY = ".tgw-canary"
 
 
@@ -497,6 +580,8 @@ def _dispatch_chain(
                 report = _run_claude(prompt, worktree, invoke=invoke)
             elif executor == "codex":
                 report = _run_codex(prompt, worktree, schema, invoke=invoke)
+            elif executor == "opencode":
+                report = _run_opencode(prompt, worktree, job, invoke=invoke)
             else:
                 # a catalogue executor with no session-invocation implementation
                 # yet — skip it and keep the chain moving (never a task failure).
