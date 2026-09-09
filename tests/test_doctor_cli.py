@@ -9688,6 +9688,172 @@ def test_diagnose_includes_harness_sudoers_check(monkeypatch: pytest.MonkeyPatch
 
 
 # ---------------------------------------------------------------------------
+# access.operator-sudoers + access.plan-vault-git  (PP-ROLES-001 WU-9 / ratter)
+# ---------------------------------------------------------------------------
+
+
+_OPERATOR_SUDOERS_SAMPLE = "%tgw-operators ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload\n"
+
+
+def _operator_sudoers_paths(tmp_path: Path, canonical: str | None) -> doctor_cli.DoctorPaths:
+    repository = tmp_path / "repo"
+    fragment = repository / doctor_cli._OPERATOR_SUDOERS_RELATIVE
+    fragment.parent.mkdir(parents=True, exist_ok=True)
+    if canonical is not None:
+        fragment.write_text(canonical, encoding="utf-8")
+    return doctor_cli.DoctorPaths(repository=repository)
+
+
+def _force_group_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = grp.getgrnam
+
+    def fake(name: str):
+        if name == doctor_cli._OPERATOR_GROUP:
+            raise KeyError(name)
+        return real(name)
+
+    monkeypatch.setattr(doctor_cli.grp, "getgrnam", fake)
+
+
+def _force_group_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = grp.getgrnam
+    sentinel = grp.getgrnam("tgw-coders")
+
+    def fake(name: str):
+        if name == doctor_cli._OPERATOR_GROUP:
+            return sentinel
+        return real(name)
+
+    monkeypatch.setattr(doctor_cli.grp, "getgrnam", fake)
+
+
+def test_operator_sudoers_unknown_until_group_ratified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _operator_sudoers_paths(tmp_path, _OPERATOR_SUDOERS_SAMPLE)
+    _force_group_absent(monkeypatch)
+
+    result = doctor_cli.check_operator_sudoers(paths)
+
+    assert result["state"] == "UNKNOWN"
+    assert result["repairable"] is False
+    assert result["evidence"]["group_present"] is False
+    assert result["evidence"]["expected"] == _OPERATOR_SUDOERS_SAMPLE
+
+
+def test_operator_sudoers_passes_when_installed_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _operator_sudoers_paths(tmp_path, _OPERATOR_SUDOERS_SAMPLE)
+    _force_group_present(monkeypatch)
+    installed = tmp_path / "etc-tgw-operators"
+    installed.write_text(_OPERATOR_SUDOERS_SAMPLE, encoding="utf-8")
+    monkeypatch.setattr(doctor_cli, "_OPERATOR_SUDOERS_INSTALLED", installed)
+
+    result = doctor_cli.check_operator_sudoers(paths)
+
+    assert result["state"] == "PASS"
+    assert result["evidence"]["drift"] is False
+
+
+def test_operator_sudoers_fails_on_drift_and_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _operator_sudoers_paths(tmp_path, _OPERATOR_SUDOERS_SAMPLE)
+    _force_group_present(monkeypatch)
+    installed = tmp_path / "etc-tgw-operators"
+    monkeypatch.setattr(doctor_cli, "_OPERATOR_SUDOERS_INSTALLED", installed)
+
+    absent = doctor_cli.check_operator_sudoers(paths)
+    assert absent["state"] == "FAIL"
+    assert absent["evidence"]["installed_present"] is False
+
+    installed.write_text(_OPERATOR_SUDOERS_SAMPLE + "db ALL=(ALL) NOPASSWD: ALL\n", encoding="utf-8")
+    drift = doctor_cli.check_operator_sudoers(paths)
+    assert drift["state"] == "FAIL"
+    assert drift["evidence"]["drift"] is True
+    assert drift["evidence"]["expected"] == _OPERATOR_SUDOERS_SAMPLE
+    assert "visudo" in drift["operator_action"]
+    assert "90-db-nopasswd" in drift["operator_action"]
+
+
+def test_diagnose_includes_operator_sudoers_and_plan_vault_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "check_host", "check_source", "check_context_snapshot", "check_context_launcher",
+        "check_context_processes", "check_unix_access", "check_harness_sudoers",
+        "check_harness_identities", "check_harness_import_path", "check_harness_executors",
+        "check_worktrees", "check_database", "check_database_peer_auth", "check_units",
+        "check_plan_render_worker", "check_runtime", "check_obsolete_surfaces",
+        "check_main_ref_guard",
+    ):
+        monkeypatch.setattr(
+            doctor_cli, name,
+            (lambda _n: (lambda _paths: doctor_cli._check(_n, "PASS", "stub")))(name),
+        )
+
+    report = doctor_cli.diagnose(doctor_cli.DoctorPaths())
+    ids = {c["id"] for c in report["checks"]}
+    assert "access.operator-sudoers" in ids
+    assert "access.plan-vault-git" in ids
+
+
+def _fake_plan_vault(tmp_path: Path, *, shared: str, group_ok: bool, bad_dir: bool) -> Path:
+    vault = tmp_path / "plans"
+    objects = vault / ".git" / "objects" / "ab"
+    objects.mkdir(parents=True)
+    good = stat.S_IRWXU | stat.S_IRWXG | stat.S_ISGID
+    for d in (vault / ".git" / "objects", objects):
+        d.chmod(good)
+    if bad_dir:
+        objects.chmod(stat.S_IRWXU)
+    return vault
+
+
+def test_plan_vault_git_unknown_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doctor_cli, "_PLAN_VAULT", tmp_path / "nope")
+    result = doctor_cli.check_plan_vault_git(doctor_cli.DoctorPaths())
+    assert result["state"] == "UNKNOWN"
+
+
+def test_plan_vault_git_passes_on_shared_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _fake_plan_vault(tmp_path, shared="group", group_ok=True, bad_dir=False)
+    git_group = grp.getgrgid((vault / ".git").stat().st_gid).gr_name
+    monkeypatch.setattr(doctor_cli, "_PLAN_VAULT", vault)
+    monkeypatch.setattr(doctor_cli, "_PLAN_VAULT_SHARED_GROUP", git_group)
+    monkeypatch.setattr(doctor_cli, "_git", lambda *_a, **_k: "group")
+
+    result = doctor_cli.check_plan_vault_git(doctor_cli.DoctorPaths())
+
+    assert result["state"] == "PASS", result["detail"]
+
+
+def test_plan_vault_git_fails_on_bad_dir_and_unset_shared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _fake_plan_vault(tmp_path, shared="", group_ok=True, bad_dir=True)
+    monkeypatch.setattr(doctor_cli, "_PLAN_VAULT", vault)
+    monkeypatch.setattr(doctor_cli, "_PLAN_VAULT_SHARED_GROUP", grp.getgrgid(os.getgid()).gr_name)
+
+    def boom(*_a: Any, **_k: Any) -> str:
+        raise doctor_cli.DoctorError("key does not exist")
+
+    monkeypatch.setattr(doctor_cli, "_git", boom)
+
+    result = doctor_cli.check_plan_vault_git(doctor_cli.DoctorPaths())
+
+    assert result["state"] == "FAIL"
+    assert result["repairable"] is True
+    assert any("core.sharedRepository" in p for p in result["evidence"]["problems"])
+    assert any("not group-writable+setgid" in p for p in result["evidence"]["problems"])
+
+
+# ---------------------------------------------------------------------------
 # harness onboarding — repair_harness + harness.* checks  (LEAF-11-9 W2/W3)
 # ---------------------------------------------------------------------------
 

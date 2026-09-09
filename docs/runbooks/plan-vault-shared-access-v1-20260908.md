@@ -48,18 +48,22 @@ sudo chgrp -R tgw-coders .git
 Idempotent. Apply after any root-run operation on the vault (a repair, a
 `git gc`, a manual clone/restore).
 
-## Open — doctor coverage gap
+## Doctor coverage — `access.plan-vault-git`
 
-`tgw doctor` `access.unix-group` / `repair unix-git-access` covers only
-`/opt/TGW/tgw-lib/src/trader-grims-warehouse` and its worktrees, **not the plan
-vault**. Until that gap is closed:
+Closed 2026-09-08 (LEAF-11 ratter reconciliation, first leaf). `tgw doctor` now
+runs **`access.plan-vault-git`** (`src/tgw/doctor_cli.py` `check_plan_vault_git`):
 
-- fold "plan vault `.git` is group-shared" into **PP-ROLES-001 WU-3** (the
-  `db` → service-identity sweep) and grant the fix through **WU-9**
-  (`%tgw-operators`), so it is not a `sudo -u db` dance;
-- add a `access.plan-vault-git` check to Doctor that asserts
-  `core.sharedRepository = group` and no non-group-writable
-  `.git/objects`/`.git/worktrees` directory.
+- asserts `core.sharedRepository = group`, `.git` group = `tgw-coders`, and
+  every `.git/objects` / `.git/worktrees` directory is group-writable + setgid;
+- FAIL hands the operator the idempotent fix above (it never writes);
+- absent vault → UNKNOWN (not every host carries `/opt/TGW/library/plans`).
+
+It is **not** auto-repairable — the fix needs root/`tgw-release` on the vault,
+which the operator runs (or, once ratified, a `%tgw-operators` member — the fix
+is folded into **PP-ROLES-001 WU-3** and granted through **WU-9**).
+
+`access.unix-group` / `repair unix-git-access` still covers only
+`/opt/TGW/tgw-lib/src/trader-grims-warehouse` and its worktrees.
 
 ## Publication to GitHub
 

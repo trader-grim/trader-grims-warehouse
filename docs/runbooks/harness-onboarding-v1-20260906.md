@@ -81,6 +81,16 @@ reports drift or absence as a named **FAIL** with the exact expected content.
 user, the check reports **UNKNOWN** for content and points you here; the
 byte comparison then runs under `--repair harness` or `sudo tgw doctor check`.)
 
+The **operator effect-envelope** is a second, separate fragment —
+`config/environment/sudoers.d/tgw-operators` (PP-ROLES-001 WU-9): one
+`tgw-operators` group + one curated `%tgw-operators ALL=(root) NOPASSWD:` grant
+(manage/observe the `tgw-*` units, run `tgw-coding-bootstrap`) that replaces the
+`(db) NOPASSWD: ALL` proxy in `/etc/sudoers.d/90-db-nopasswd`. Install it the
+same way (its own header lists the `groupadd` / `gpasswd` / proxy-removal
+steps). Doctor's **`access.operator-sudoers`** check mirrors
+`access.harness-sudoers` once the group exists; until the operator ratifies WU-9
+it reports **UNKNOWN**, never FAIL.
+
 ### 2. The provider keys
 
 `/opt/TGW/secrets/tgw.env` (`0640 root:tgw-coders`). The operator pastes the

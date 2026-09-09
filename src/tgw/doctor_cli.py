@@ -4192,6 +4192,214 @@ def check_harness_sudoers(paths: DoctorPaths) -> dict[str, Any]:
         return _failed(identity, exc)
 
 
+_OPERATOR_SUDOERS_INSTALLED = Path("/etc/sudoers.d/tgw-operators")
+_OPERATOR_SUDOERS_RELATIVE = Path("config/environment/sudoers.d/tgw-operators")
+_OPERATOR_GROUP = "tgw-operators"
+
+
+def check_operator_sudoers(paths: DoctorPaths) -> dict[str, Any]:
+    """The operator effect-envelope sudoers grant matches the checked-in canonical.
+
+    PP-ROLES-001 WU-9: one ``tgw-operators`` group + one curated
+    ``%tgw-operators ALL=(root) NOPASSWD:`` fragment replace the
+    ``(db) NOPASSWD: ALL`` proxy and the per-purpose grab-bag, so no service or
+    agent account routes root through a human login. This check never writes
+    sudoers — it makes drift or absence a named FAIL and hands the operator the
+    exact expected bytes, exactly like ``access.harness-sudoers``.
+
+    WU-9 is operator-ratified, not agent-applied. Until the ``tgw-operators``
+    group exists the check reports UNKNOWN (nothing to compare against yet),
+    never FAIL, so landing the canonical does not add a false failure.
+    """
+    identity = "access.operator-sudoers"
+    try:
+        canonical_path = paths.repository / _OPERATOR_SUDOERS_RELATIVE
+        try:
+            expected = canonical_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise DoctorError(
+                f"canonical operator sudoers fragment is unavailable at {canonical_path}"
+            ) from exc
+
+        try:
+            grp.getgrnam(_OPERATOR_GROUP)
+            group_present = True
+        except KeyError:
+            group_present = False
+        if not group_present:
+            return _check(
+                identity,
+                "UNKNOWN",
+                (
+                    f"PP-ROLES-001 WU-9 not yet ratified: group {_OPERATOR_GROUP!r} "
+                    "does not exist; review "
+                    f"{_OPERATOR_SUDOERS_RELATIVE} and follow its install header"
+                ),
+                evidence={
+                    "canonical_path": str(canonical_path),
+                    "group": _OPERATOR_GROUP,
+                    "group_present": False,
+                    "expected": expected,
+                },
+            )
+
+        operator_action = (
+            f"operator: review {canonical_path}, then run "
+            f"`visudo -cf {canonical_path}` and install it verbatim as "
+            f"{_OPERATOR_SUDOERS_INSTALLED} (mode 0440 root:root); "
+            "remove /etc/sudoers.d/90-db-nopasswd"
+        )
+        try:
+            installed: str | None = _OPERATOR_SUDOERS_INSTALLED.read_text(encoding="utf-8")
+            present = True
+        except FileNotFoundError:
+            installed = None
+            present = False
+        except PermissionError as exc:
+            if os.geteuid() != 0:
+                return _check(
+                    identity,
+                    "UNKNOWN",
+                    (
+                        f"installed {_OPERATOR_SUDOERS_INSTALLED} is not readable "
+                        "without root; content drift is verified by "
+                        "`sudo tgw doctor check`"
+                    ),
+                    evidence={
+                        "installed_path": str(_OPERATOR_SUDOERS_INSTALLED),
+                        "canonical_path": str(canonical_path),
+                        "installed_present": True,
+                        "expected": expected,
+                    },
+                )
+            raise DoctorError(
+                f"installed {_OPERATOR_SUDOERS_INSTALLED} is unreadable"
+            ) from exc
+
+        drift = present and installed != expected
+        exact = present and not drift
+        if not present:
+            detail = (
+                f"operator sudoers fragment is absent at {_OPERATOR_SUDOERS_INSTALLED} "
+                f"but group {_OPERATOR_GROUP!r} exists"
+            )
+        elif drift:
+            detail = (
+                f"installed {_OPERATOR_SUDOERS_INSTALLED} differs from canonical "
+                f"{_OPERATOR_SUDOERS_RELATIVE}"
+            )
+        else:
+            detail = (
+                f"installed operator sudoers fragment matches canonical "
+                f"{_OPERATOR_SUDOERS_RELATIVE}"
+            )
+        evidence: dict[str, Any] = {
+            "installed_path": str(_OPERATOR_SUDOERS_INSTALLED),
+            "canonical_path": str(canonical_path),
+            "group": _OPERATOR_GROUP,
+            "group_present": True,
+            "installed_present": present,
+            "drift": drift,
+            "expected": expected,
+        }
+        if not exact:
+            evidence["installed"] = installed
+        return _check(
+            identity,
+            "PASS" if exact else "FAIL",
+            detail,
+            evidence=evidence,
+            repair=None if exact else operator_action,
+        )
+    except Exception as exc:
+        return _failed(identity, exc)
+
+
+_PLAN_VAULT = Path("/opt/TGW/library/plans")
+_PLAN_VAULT_SHARED_GROUP = "tgw-coders"
+
+
+def check_plan_vault_git(paths: DoctorPaths) -> dict[str, Any]:
+    """The plan vault is a group-shared git repository for ``tgw-coders``.
+
+    ``access.unix-group`` / ``repair unix-git-access`` cover only the
+    application source tree, never ``/opt/TGW/library/plans``. A root operation
+    on the vault (a Context repair, ``git gc``, a restore) can leave
+    ``.git/objects`` fanout directories non-group-writable; commits then land
+    probabilistically (2026-09-08 incident — ``docs/runbooks/
+    plan-vault-shared-access-v1-20260908.md``). This check asserts the "shared
+    repository" contract and never writes: it hands the operator the idempotent
+    fix from that runbook. Absent vault -> UNKNOWN (not every host has it).
+    """
+    identity = "access.plan-vault-git"
+    try:
+        git_dir = _PLAN_VAULT / ".git"
+        if not git_dir.is_dir():
+            return _check(
+                identity,
+                "UNKNOWN",
+                f"no plan vault checkout at {_PLAN_VAULT}",
+                evidence={"path": str(_PLAN_VAULT)},
+            )
+
+        problems: list[str] = []
+        try:
+            shared = _git(_PLAN_VAULT, "config", "--get", "core.sharedRepository")
+        except Exception:
+            shared = ""
+        if shared not in {"group", "1", "true"}:
+            problems.append(f"core.sharedRepository is {shared or 'unset'!r}, expected 'group'")
+
+        try:
+            git_group = grp.getgrgid(git_dir.stat().st_gid).gr_name
+        except (KeyError, OSError):
+            git_group = str(git_dir.stat().st_gid)
+        if git_group != _PLAN_VAULT_SHARED_GROUP:
+            problems.append(f".git group is {git_group!r}, expected {_PLAN_VAULT_SHARED_GROUP!r}")
+
+        bad_dirs: list[str] = []
+        for base in ("objects", "worktrees"):
+            root = git_dir / base
+            if not root.is_dir():
+                continue
+            for sub in [root, *(p for p in root.rglob("*") if p.is_dir())]:
+                try:
+                    mode = sub.stat().st_mode
+                except OSError:
+                    continue
+                if not (mode & stat.S_IWGRP) or not (mode & stat.S_ISGID):
+                    bad_dirs.append(str(sub.relative_to(git_dir)))
+        if bad_dirs:
+            shown = ", ".join(sorted(bad_dirs)[:5])
+            more = "" if len(bad_dirs) <= 5 else f" (+{len(bad_dirs) - 5} more)"
+            problems.append(
+                f"{len(bad_dirs)} .git dir(s) not group-writable+setgid: {shown}{more}"
+            )
+
+        fix = (
+            f"operator/root: cd {_PLAN_VAULT} && git config core.sharedRepository group "
+            "&& sudo find .git/objects .git/worktrees -type d -exec chmod g+rwxs {} + "
+            "&& sudo chgrp -R tgw-coders .git   "
+            "(docs/runbooks/plan-vault-shared-access-v1-20260908.md)"
+        )
+        if problems:
+            return _check(
+                identity,
+                "FAIL",
+                "; ".join(problems),
+                evidence={"path": str(_PLAN_VAULT), "problems": problems},
+                repair=fix,
+            )
+        return _check(
+            identity,
+            "PASS",
+            f"{_PLAN_VAULT} satisfies the tgw-coders shared-repository contract",
+            evidence={"path": str(_PLAN_VAULT), "shared_repository": shared, "group": git_group},
+        )
+    except Exception as exc:
+        return _failed(identity, exc)
+
+
 # --------------------------------------------------------------------------- #
 # harness onboarding — LEAF-11-9 W2/W3
 # --------------------------------------------------------------------------- #
@@ -6416,6 +6624,8 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         check_context_processes(paths),
         check_unix_access(paths),
         check_harness_sudoers(paths),
+        check_operator_sudoers(paths),
+        check_plan_vault_git(paths),
         check_harness_identities(paths),
         check_harness_import_path(paths),
         check_harness_executors(paths),
