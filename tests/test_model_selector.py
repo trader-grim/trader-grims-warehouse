@@ -22,6 +22,23 @@ def _no_env_pin(monkeypatch):
     monkeypatch.delenv("TGW_MODEL_AVAILABILITY", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_observation_holds(monkeypatch):
+    # hermetic by default: no live dispatch-outcome holds unless a test
+    # installs its own recent_status stub (never a real file).
+    monkeypatch.setattr(ms.model_observations, "recent_status", lambda executor, **k: None)
+
+
+def _stub_holds(monkeypatch, **holds):
+    """Install a fake observations store: named executors are held, the rest
+    are not. No real file is touched."""
+    def fake(executor, **kwargs):
+        if executor in holds:
+            return ("held", holds[executor])
+        return None
+    monkeypatch.setattr(ms.model_observations, "recent_status", fake)
+
+
 _BASE = {
     "updated": "2026-09-04",
     "executors": {
@@ -130,3 +147,80 @@ def test_known_executors_come_from_the_coding_executor_catalogue(tmp_path, monke
                                        "review": {"prefer": ["acme"]}}})
     monkeypatch.setenv("TGW_MODEL_AVAILABILITY", str(path))
     assert ms.select_executor("implementation").executor == "acme"
+
+
+# --------------------------------------------------------------------------- #
+# dispatch-outcome holds (LEAF-11-8 / Todo 1956 slice)
+# --------------------------------------------------------------------------- #
+
+_HOLD_BASE = {
+    "updated": "2026-09-04",
+    "executors": {
+        "opencode": {"available": True},
+        "claude": {"available": True},
+        "manual": {"available": True},
+    },
+    "roles": {
+        "implementation": {"prefer": ["opencode", "claude", "manual"]},
+        "review": {"prefer": ["claude", "opencode", "manual"]},
+    },
+}
+
+
+def test_select_skips_a_held_executor_and_picks_the_next_with_a_reason(monkeypatch):
+    _stub_holds(monkeypatch, opencode="unavailable 300s ago (cooldown 60m): quota wall")
+    sel = ms.select_executor("implementation", availability=_HOLD_BASE)
+    assert sel.status == "SELECTED"
+    assert sel.executor == "claude"  # opencode is first but held
+    assert "hold" in sel.reason.lower()
+    assert "opencode" in sel.reason
+    assert sel.considered == ("opencode", "claude", "manual")
+
+
+def test_select_prefers_the_first_unheld_executor_without_hold_noise():
+    sel = ms.select_executor("implementation", availability=_HOLD_BASE)
+    assert sel.executor == "opencode"
+    assert "hold" not in sel.reason.lower()
+
+
+def test_env_pin_still_selects_a_held_executor_with_a_noted_reason(monkeypatch):
+    _stub_holds(monkeypatch, opencode="unavailable 300s ago (cooldown 60m): quota wall")
+    monkeypatch.setenv("TGW_IMPLEMENT_EXECUTOR", "opencode")
+    sel = ms.select_executor("implementation", availability=_HOLD_BASE)
+    assert sel.executor == "opencode"  # operator override wins
+    assert "pinned" in sel.reason
+    assert "hold" in sel.reason.lower()
+
+
+def test_all_held_abstains_with_a_reason_naming_the_holds(monkeypatch):
+    _stub_holds(
+        monkeypatch,
+        opencode="unavailable 300s ago (cooldown 60m): quota wall",
+        claude="error 60s ago (cooldown 15m): exit 1",
+        manual="unavailable 10s ago (cooldown 60m): no runner",
+    )
+    sel = ms.select_executor("implementation", availability=_HOLD_BASE)
+    assert sel.status == "ABSTAIN"
+    assert sel.executor is None
+    assert "held" in sel.reason.lower()
+    assert "quota wall" in sel.reason
+    assert "exit 1" in sel.reason
+
+
+def test_abstain_lists_both_unavailable_and_held_kinds(monkeypatch):
+    _stub_holds(monkeypatch, claude="error 60s ago (cooldown 15m): exit 1",
+                manual="unavailable 10s ago (cooldown 60m): no runner")
+    data = json.loads(json.dumps(_HOLD_BASE))
+    data["executors"]["opencode"] = {"available": False, "reason": "zen key exhausted"}
+    sel = ms.select_executor("implementation", availability=data)
+    assert sel.status == "ABSTAIN"
+    assert "zen key exhausted" in sel.reason  # the file-unavailable kind
+    assert "hold" in sel.reason.lower()  # the live-hold kind, not silently ignored
+
+
+def test_an_unreadable_observations_store_means_no_hold(monkeypatch):
+    def boom(executor, **kwargs):
+        raise RuntimeError("store on fire")
+    monkeypatch.setattr(ms.model_observations, "recent_status", boom)
+    sel = ms.select_executor("implementation", availability=_HOLD_BASE)
+    assert sel.executor == "opencode"  # fail open: garbage never blocks a dispatch

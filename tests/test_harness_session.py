@@ -21,6 +21,13 @@ def _force_claude(monkeypatch):
     monkeypatch.setattr(harness_session, "_claude_binary", lambda: "/usr/bin/true")
 
 
+@pytest.fixture(autouse=True)
+def _no_observations_by_default(monkeypatch):
+    # hermetic by default: dispatch outcomes are not written to the durable
+    # store unless a test enables recording and stubs the store.
+    monkeypatch.setattr(harness_session, "OBSERVATIONS_ENABLED", False)
+
+
 def _claude_out(report: dict) -> str:
     # Claude -p --output-format json emits JSONL; the final report is the last
     # JSON object inside the result text.
@@ -370,3 +377,96 @@ def test_stub_executor_lands_offline(tmp_path, monkeypatch):
 
     rev = harness_session.run_review_session(job)
     assert rev == {"verdict": "PASS", "findings": []}
+
+
+# --------------------------------------------------------------------------- #
+# dispatch-outcome recording (LEAF-11-8 / Todo 1956 slice)
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture()
+def _recorded(monkeypatch):
+    """Enable recording with a stubbed store; return the captured calls as a
+    list of (executor, role, outcome, detail)."""
+    monkeypatch.setattr(harness_session, "OBSERVATIONS_ENABLED", True)
+    calls = []
+
+    def fake(executor, role, outcome, *, detail=""):
+        calls.append((executor, role, outcome, detail))
+        return True
+
+    monkeypatch.setattr(harness_session.model_observations, "record", fake)
+    return calls
+
+
+def test_unavailable_attempt_is_recorded(tmp_path, monkeypatch, _recorded):
+    # no credential -> SessionUnavailable -> the chain reroutes AND the
+    # outcome is recorded so the next select_executor holds this executor.
+    monkeypatch.setattr(harness_session, "_session_credential", lambda e: None)
+    job = {"task_id": "t1", "body": "do X", "worktree": str(tmp_path)}
+    out = harness_session.run_implement_session(job, invoke=_fake_invoke("", returncode=1))
+    assert out["outcome"] == "failed"
+    assert len(_recorded) == 1
+    executor, role, outcome, detail = _recorded[0]
+    assert (executor, role, outcome) == ("claude", "implementation", "unavailable")
+    assert detail  # the SessionUnavailable detail is carried
+
+
+def test_error_attempt_is_recorded_then_reraised(tmp_path, monkeypatch, _recorded):
+    # a genuine session failure still raises (existing behaviour) but the
+    # "error" outcome is recorded first.
+    monkeypatch.setattr(harness_session, "_session_credential", lambda e: ("ANTHROPIC_API_KEY", "x"))
+    monkeypatch.setattr(harness_session, "_executor_chain", lambda job=None: ["claude"])
+    job = {"task_id": "t1", "body": "do X", "worktree": str(tmp_path)}
+    with pytest.raises(harness_session.SessionError):
+        harness_session.run_implement_session(
+            job, invoke=_fake_invoke("boom: internal error", returncode=1))
+    assert [c[:3] for c in _recorded] == [("claude", "implementation", "error")]
+
+
+def test_successful_report_is_recorded_as_available(tmp_path, _recorded):
+    job = {"task_id": "t1", "body": "do X", "worktree": str(tmp_path)}
+    out = harness_session.run_implement_session(
+        job, invoke=_fake_invoke(_claude_out({"status": "implemented", "summary": "did X"})),
+    )
+    assert out["outcome"] == "satisfied"
+    assert [c[:3] for c in _recorded] == [("claude", "implementation", "available")]
+
+
+def test_review_role_is_threaded_through(tmp_path, _recorded):
+    job = {"task_id": "t1", "body": "do X", "worktree": str(tmp_path)}
+    out = harness_session.run_review_session(
+        job, invoke=_fake_invoke(_claude_out({"verdict": "pass", "findings": []})),
+    )
+    assert out == {"verdict": "PASS", "findings": []}
+    assert [c[:3] for c in _recorded] == [("claude", "review", "available")]
+
+
+def test_recording_never_breaks_a_dispatch(tmp_path, monkeypatch):
+    # a store that raises must not turn a working session into a failure.
+    monkeypatch.setattr(harness_session, "OBSERVATIONS_ENABLED", True)
+
+    def boom(executor, role, outcome, *, detail=""):
+        raise RuntimeError("store on fire")
+
+    monkeypatch.setattr(harness_session.model_observations, "record", boom)
+    job = {"task_id": "t1", "body": "do X", "worktree": str(tmp_path)}
+    out = harness_session.run_implement_session(
+        job, invoke=_fake_invoke(_claude_out({"status": "implemented", "summary": "ok"})),
+    )
+    assert out["outcome"] == "satisfied"
+
+
+def test_recording_gate_off_writes_nothing(tmp_path, monkeypatch):
+    # OBSERVATIONS_ENABLED False (the default in this file's fixture): the
+    # store is never touched even on success.
+    calls = []
+    monkeypatch.setattr(
+        harness_session.model_observations, "record",
+        lambda *a, **k: calls.append((a, k)) or True,
+    )
+    job = {"task_id": "t1", "body": "do X", "worktree": str(tmp_path)}
+    out = harness_session.run_implement_session(
+        job, invoke=_fake_invoke(_claude_out({"status": "implemented", "summary": "ok"})),
+    )
+    assert out["outcome"] == "satisfied"
+    assert calls == []

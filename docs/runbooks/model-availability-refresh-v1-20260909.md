@@ -82,3 +82,40 @@ comes back empty), the job makes **no** `available` / `model` changes — it
 only bumps `updated` and appends a receipt whose `sources_failed` explains
 why. It exits 0 either way; a cold network is not a failure for a daily
 timer.
+
+## The second half: live dispatch-outcome holds (Todo 1956 slice)
+
+Freshness (above) keeps the catalogue from going stale; **health** is tracked
+live by the dispatch itself — `tgw.model_observations` (LEAF-11-8 / Todo
+1956). There is no prober daemon: every session attempt in
+`tgw.development.harness_session._dispatch_chain` writes one observation, and
+`tgw.model_selector.select_executor` reads them back on the next turn:
+
+- `unavailable` — the attempt raised `SessionUnavailable` (no credential /
+  quota / auth / rate-limit). Holds the executor out of selection for **60
+  min**.
+- `error` — the attempt ran but failed for a non-availability reason
+  (`SessionError` or no parseable report). Holds for **15 min**.
+- `available` — the attempt produced a report. Clears any hold for that
+  executor immediately.
+
+A held executor is skipped exactly like one the availability file marks
+unavailable, and the hold reason travels in `Selection.reason` (and in an
+all-held ABSTAIN alongside the file's own reasons). An explicit operator pin
+(`$TGW_IMPLEMENT_EXECUTOR` / `$TGW_REVIEW_EXECUTOR`) still overrides a hold,
+with the reason noting it. Recording never raises into a dispatch, and the
+selector only reads — `harness_session` is the sole writer.
+
+The observations file lives at `/opt/TGW/var/log/model-observations.jsonl`
+(durable, not `/tmp`; override with `$TGW_MODEL_OBSERVATIONS`, recording
+gated by `$TGW_MODEL_OBSERVATIONS_ENABLED` / the `OBSERVATIONS_ENABLED` flag,
+default ON). It is append-only JSON-lines (`tgw-model-observation/v1`) and
+self-bounding: past 2000 lines it is rewritten to the last 1000.
+
+To clear a stuck hold: delete the file, or append an `available` observation
+for the executor (a successful dispatch does this on its own). Check what the
+selector currently sees with:
+
+```
+python3 -c "from tgw import model_observations as m; print(m.recent_status('opencode'))"
+```

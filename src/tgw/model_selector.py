@@ -12,6 +12,16 @@ the daily timer and the ``freshness: frozen`` opt-out.
 No silent fallback: if nothing in the policy is available the selection is
 ABSTAIN with a reason, and the caller decides what to do with that.
 
+Live health (Todo 1956 dispatch-outcome slice): on top of the file's static
+``available`` flags, ``select_executor`` consults
+``tgw.model_observations.recent_status`` — the append-only log of dispatch
+outcomes the harness writes after every session attempt. An executor with an
+active observation hold is skipped exactly like one marked unavailable, and
+the hold reason is carried in ``Selection.reason``. An explicit operator pin
+(``$TGW_IMPLEMENT_EXECUTOR`` / ``$TGW_REVIEW_EXECUTOR``) still wins over a
+hold, with the reason noting it. This module only reads observations — the
+harness is the sole writer.
+
 Availability file (first found wins):
   1. ``$TGW_MODEL_AVAILABILITY``
   2. ``/opt/TGW/tgw-lib/config/model-availability.json``  (operator-editable)
@@ -47,7 +57,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from tgw import coding_executor_catalog
+from tgw import coding_executor_catalog, model_observations
 
 SCHEMA = "tgw-model-selection/v1"
 
@@ -147,6 +157,13 @@ def select_executor(role: str, *, availability: dict[str, Any] | None = None) ->
     An explicit ``$TGW_IMPLEMENT_EXECUTOR`` / ``$TGW_REVIEW_EXECUTOR`` pin is a
     deliberate operator override and always wins; if the availability file marks
     that executor unavailable the selection still uses it but the reason says so.
+    The same applies to a live dispatch-outcome hold (see ``model_observations``):
+    the pin wins, and the reason notes the hold.
+
+    Without a pin, an executor under an active observation hold is skipped just
+    like one the availability file marks unavailable, and the hold reason is
+    carried in ``Selection.reason``. When every preferred executor is either
+    unavailable or held the selection is ABSTAIN with a reason naming both kinds.
     """
     data = availability if availability is not None else load_availability()
     executors = data["executors"]
@@ -162,12 +179,29 @@ def select_executor(role: str, *, availability: dict[str, Any] | None = None) ->
             return "not listed in the availability file"
         return str(entry.get("reason") or "marked unavailable")
 
+    def _observation_hold(name: str) -> str | None:
+        """The active dispatch-outcome hold reason for *name*, or None.
+
+        Pure read — ``model_selector`` never writes observations — and never
+        raises: an unreadable store simply means no hold (fail open).
+        """
+        try:
+            status = model_observations.recent_status(name)
+        except Exception:
+            return None
+        if not status:
+            return None
+        return str(status[1])
+
     known = known_executors()
     pin = os.environ.get({"implementation": "TGW_IMPLEMENT_EXECUTOR", "review": "TGW_REVIEW_EXECUTOR"}.get(role, ""))
     if pin:
         if pin not in known:
             raise ModelSelectorError(f"pinned executor {pin!r} is not a known executor")
         reason = "pinned via env" if _is_available(pin) else f"pinned via env (availability file: {_held_reason(pin)})"
+        hold = _observation_hold(pin)
+        if hold is not None:
+            reason += f" (observation hold: {hold})"
         return Selection(role, "SELECTED", pin, reason, (pin,), updated)
 
     role_policy = data["roles"].get(role)
@@ -177,9 +211,27 @@ def select_executor(role: str, *, availability: dict[str, Any] | None = None) ->
     for candidate in prefer:
         if candidate not in known:
             raise ModelSelectorError(f"role {role!r} policy names an unknown executor {candidate!r}")
-        if _is_available(candidate):
+    held_notes: list[str] = []
+    unavailable_notes: list[str] = []
+    for candidate in prefer:
+        if not _is_available(candidate):
+            unavailable_notes.append(f"{candidate} ({_held_reason(candidate)})")
+            continue
+        hold = _observation_hold(candidate)
+        if hold is not None:
+            held_notes.append(f"{candidate} (observation hold: {hold})")
+            continue
+        if held_notes:
+            reason = (f"first available in {role} policy {list(prefer)} "
+                      f"(skipped held: {'; '.join(held_notes)})")
+        else:
             reason = f"first available in {role} policy {list(prefer)}"
-            return Selection(role, "SELECTED", candidate, reason, prefer, updated)
+        return Selection(role, "SELECTED", candidate, reason, prefer, updated)
 
-    held = "; ".join(f"{name} ({_held_reason(name)})" for name in prefer)
-    return Selection(role, "ABSTAIN", None, f"no executor in the {role} policy is available: {held}", prefer, updated)
+    parts: list[str] = []
+    if unavailable_notes:
+        parts.append("unavailable: " + "; ".join(unavailable_notes))
+    if held_notes:
+        parts.append("held: " + "; ".join(held_notes))
+    detail = "; ".join(parts) if parts else "empty policy"
+    return Selection(role, "ABSTAIN", None, f"no executor in the {role} policy is available: {detail}", prefer, updated)

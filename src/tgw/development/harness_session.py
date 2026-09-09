@@ -28,7 +28,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
-from tgw import coding_executor_catalog
+from tgw import coding_executor_catalog, model_observations
 
 Invoke = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -85,6 +85,37 @@ class SessionError(RuntimeError):
 class SessionUnavailable(RuntimeError):
     """One executor could not be used (binary absent, no credential, auth/quota
     wall). The chain moves to the next executor; it is not a task failure."""
+
+
+# --------------------------------------------------------------------------- #
+# dispatch-outcome observations (LEAF-11-8 / Todo 1956 slice)
+# --------------------------------------------------------------------------- #
+
+#: Master switch for writing dispatch outcomes to ``tgw.model_observations``.
+#: Default ON — every dispatch outcome IS a probe that steers the next
+#: ``select_executor`` call. Tests set this False (or set
+#: ``$TGW_MODEL_OBSERVATIONS_ENABLED`` to an off word) to stay hermetic.
+OBSERVATIONS_ENABLED = True
+
+
+def _observations_enabled() -> bool:
+    if not OBSERVATIONS_ENABLED:
+        return False
+    try:
+        return model_observations.enabled()
+    except Exception:
+        return False
+
+
+def _record_observation(executor: str, role: str, outcome: str, detail: str = "") -> None:
+    """Write one dispatch outcome to the observations store. Never raises —
+    the record path must not be able to break a dispatch."""
+    if not _observations_enabled():
+        return
+    try:
+        model_observations.record(executor, role, outcome, detail=detail[:600])
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -623,10 +654,16 @@ def _apply_executor_bins(job: dict[str, Any]) -> None:
 
 def _dispatch_chain(
     job: dict[str, Any], prompt: str, schema: dict[str, Any], *, invoke: Invoke,
+    role: str = "implementation",
 ) -> tuple[str, dict[str, Any] | None, list[str]]:
     """Try each executor in the chain. Return (executor, report, skipped) for
     the first that runs and produces something; on total exhaustion return
-    ("", None, skipped) with the per-executor reasons."""
+    ("", None, skipped) with the per-executor reasons.
+
+    Every attempt is recorded to ``tgw.model_observations`` (the dispatch is
+    the probe): ``SessionUnavailable`` → ``unavailable``, any other failure →
+    ``error``, a produced report → ``available``. Recording never raises.
+    """
     _apply_executor_bins(job)
     worktree = Path(job["worktree"])
     skipped: list[str] = []
@@ -645,8 +682,16 @@ def _dispatch_chain(
                 # yet — skip it and keep the chain moving (never a task failure).
                 raise SessionUnavailable("no harness_session runner wired for this executor yet")
         except SessionUnavailable as exc:
+            _record_observation(executor, role, "unavailable", str(exc))
             skipped.append(f"{executor}: {exc}")
             continue
+        except Exception as exc:
+            _record_observation(executor, role, "error", f"{type(exc).__name__}: {exc}")
+            raise
+        if report is not None:
+            _record_observation(executor, role, "available")
+        else:
+            _record_observation(executor, role, "error", "session ran but produced no report")
         return executor, report, skipped
     return "", None, skipped
 
@@ -654,6 +699,7 @@ def _dispatch_chain(
 def run_implement_session(job: dict[str, Any], *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
     executor, report, skipped = _dispatch_chain(
         job, implement_prompt(job), _IMPLEMENT_SCHEMA, invoke=invoke,
+        role="implementation",
     )
     if not executor:
         return {"outcome": "failed", "artifacts": [{"kind": "executor_chain_exhausted",
@@ -673,6 +719,7 @@ def run_implement_session(job: dict[str, Any], *, invoke: Invoke = subprocess.ru
 def run_review_session(job: dict[str, Any], *, invoke: Invoke = subprocess.run) -> dict[str, Any]:
     executor, report, _skipped = _dispatch_chain(
         job, review_prompt(job), _REVIEW_SCHEMA, invoke=invoke,
+        role="review",
     )
     if not executor or not isinstance(report, dict) or "findings" not in report:
         # review is non-gating (the test suite is the gate); a reviewer that
