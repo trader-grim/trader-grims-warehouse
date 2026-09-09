@@ -26,15 +26,17 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-def _grant_group_write(root: Path) -> None:
-    """Add group rwX (and setgid on dirs) across *root* so a sibling
-    tgw-coders identity can operate in it. Best-effort — a path that is already
-    owned by another member and not writable by us is left as is."""
+def _grant_group_write(root: Path, *, deep: bool = True) -> None:
+    """Add group rwX (and setgid on dirs) so a sibling tgw-coders identity can
+    operate in *root*. ``deep`` walks the whole tree (a fresh worktree, whose
+    files the orchestrator user just wrote); otherwise only *root* and its
+    immediate children (enough for the coder to drop a temp dir / rewrite the
+    index). Best-effort — a path not owned by us is skipped."""
     import stat as _stat
 
     if not root.exists():
         return
-    targets = [root, *(p for p in root.rglob("*"))]
+    targets = [root, *root.iterdir()] if not deep else [root, *root.rglob("*")]
     for p in targets:
         try:
             mode = p.lstat().st_mode
@@ -105,10 +107,16 @@ def git_worktree_prepare(
         name = task_id
         branch = f"coding/{actor}/{name}"
         worktree = (worktree_root / name).resolve()
-        if not worktree.exists():
+        fresh = not worktree.exists()
+        if fresh:
             _git(repository, "worktree", "add", "-b", branch, str(worktree), base_commit)
-        _grant_group_write(worktree)
-        _grant_group_write(repository / ".git" / "worktrees" / name)
+        # The confined coder session (tgw-coder) edits existing tracked files
+        # that `git worktree add` wrote as the orchestrator user (tgw-harness),
+        # so the whole tree — and this worktree's git metadata — has to be
+        # group-writable. Full walk on a fresh worktree; a cheap top-level
+        # re-assert on reuse (the coder's own writes are already umask-002 g+w).
+        _grant_group_write(worktree, deep=fresh)
+        _grant_group_write(repository / ".git" / "worktrees" / name, deep=fresh)
         head = _git(worktree, "rev-parse", "HEAD")
         observed = _git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
         if observed != branch:
