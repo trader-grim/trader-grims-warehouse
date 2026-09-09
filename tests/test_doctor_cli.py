@@ -9961,6 +9961,71 @@ def test_github_publish_warn_on_commit_and_age_lag(
     assert "systemctl start tgw-publish" in result["operator_action"]
 
 
+def _inv(users: dict) -> dict:
+    return {"schema": "tgw-identity-inventory/v1", "generated": "2026-09-08T00:00:00Z",
+            "host": "tgw-lib", "complete": True, "users": users, "ssh_aliases_global": []}
+
+
+def _inv_repo(tmp_path: Path, baseline: dict | None) -> doctor_cli.DoctorPaths:
+    repo = tmp_path / "repo"
+    (repo / "config/environment").mkdir(parents=True)
+    (repo / "scripts").mkdir()
+    (repo / "scripts/tgw-identity-inventory").write_text("#!/bin/sh\n")
+    if baseline is not None:
+        (repo / doctor_cli._IDENTITY_INVENTORY_REL).write_text(json.dumps(baseline))
+    return doctor_cli.DoctorPaths(repository=repo)
+
+
+def test_identity_inventory_unknown_without_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _inv_repo(tmp_path, None)
+    result = doctor_cli.check_identity_inventory(paths)
+    assert result["state"] == "UNKNOWN"
+    assert "--write" in result["operator_action"]
+
+
+def test_identity_inventory_unknown_without_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _inv_repo(tmp_path, _inv({}))
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 1000)
+    result = doctor_cli.check_identity_inventory(paths)
+    assert result["state"] == "UNKNOWN"
+    assert "root" in result["detail"]
+
+
+def test_identity_inventory_pass_and_warn_on_addition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = _inv({"tgw-coder": {
+        "groups": ["tgw-coders"], "sudo": [], "credential_files": {"codex_auth": False},
+        "ssh_keys": [],
+    }})
+    paths = _inv_repo(tmp_path, base)
+    monkeypatch.setattr(doctor_cli.os, "geteuid", lambda: 0)
+
+    live_same = json.dumps(base)
+    monkeypatch.setattr(doctor_cli.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(returncode=0, stdout=live_same, stderr=""))
+    assert doctor_cli.check_identity_inventory(paths)["state"] == "PASS"
+
+    drifted = _inv({"tgw-coder": {
+        "groups": ["tgw-coders", "sudo"],
+        "sudo": [{"runas": "root", "command": "/bin/systemctl *"}],
+        "credential_files": {"codex_auth": True},
+        "ssh_keys": [{"fingerprint": "SHA256:new"}],
+    }})
+    monkeypatch.setattr(doctor_cli.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(returncode=0, stdout=json.dumps(drifted), stderr=""))
+    warn = doctor_cli.check_identity_inventory(paths)
+    assert warn["state"] == "WARN"
+    adds = warn["evidence"]["additions"]
+    assert any("credentials: +codex_auth" in a for a in adds)
+    assert any("groups: +sudo" in a for a in adds)
+    assert any("ssh_fingerprints: +SHA256:new" in a for a in adds)
+
+
 def test_diagnose_includes_github_publish(monkeypatch: pytest.MonkeyPatch) -> None:
     sentinel = doctor_cli._check("source.github-publish", "PASS", "ok")
     monkeypatch.setattr(doctor_cli, "check_source_github_publish", lambda _p: sentinel)

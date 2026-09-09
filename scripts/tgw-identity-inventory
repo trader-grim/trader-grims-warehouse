@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Generate the tgw-lib identity / capability inventory.
+
+The authoritative "where is the key for X / who can do X" map: per user, the
+groups, sudo grants, SSH key fingerprints (never private material), SSH host
+aliases, credential-file presence, and systemd units. Answers questions like
+"which account can push trader-grim/tgw-plan" by lookup instead of a hunt, and
+generates PP-ROLES-001's hand-maintained "current reality" table.
+
+Runs best as root (needs `sudo -l -U <user>` and to read other homes'
+`~/.ssh`); degrades gracefully, marking unreadable fields.
+
+    tgw-identity-inventory                # JSON to stdout
+    tgw-identity-inventory --write        # write config/environment/identity-inventory.json
+    tgw-identity-inventory --users a,b    # restrict
+
+Security: records fingerprints and paths only. The artifact itself is an
+attack-surface map — keep it in the repo/backup, never anywhere shared.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import grp
+import json
+import os
+import pwd
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+SCHEMA = "tgw-identity-inventory/v1"
+CANONICAL = Path(__file__).resolve().parent.parent / "config/environment/identity-inventory.json"
+_SSH_CONFIG_GLOBS = ("/etc/ssh/ssh_config", "/etc/ssh/ssh_config.d")
+_CREDENTIAL_FILES = {
+    "git_credentials": ".git-credentials",
+    "gh_hosts": ".config/gh/hosts.yml",
+    "netrc": ".netrc",
+    "codex_auth": ".codex/auth.json",
+    "claude_login": ".claude/.credentials.json",
+}
+
+
+def _run(*argv: str) -> tuple[int, str]:
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=20)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 127, str(exc)
+
+
+def _target_users(explicit: list[str] | None) -> list[str]:
+    if explicit:
+        return explicit
+    names: set[str] = set()
+    for p in pwd.getpwall():
+        if p.pw_uid == 0 or 900 <= p.pw_uid <= 1100 or p.pw_name.startswith("tgw"):
+            names.add(p.pw_name)
+    for g in grp.getgrall():
+        if g.gr_name.startswith("tgw"):
+            names.update(g.gr_mem)
+    return sorted(names)
+
+
+def _groups(name: str) -> list[str]:
+    try:
+        u = pwd.getpwnam(name)
+    except KeyError:
+        return []
+    out = {g.gr_name for g in grp.getgrall() if name in g.gr_mem}
+    try:
+        out.add(grp.getgrgid(u.pw_gid).gr_name)
+    except KeyError:
+        pass
+    return sorted(out)
+
+
+def _sudo(name: str) -> object:
+    rc, text = _run("sudo", "-n", "-l", "-U", name)
+    if rc != 0:
+        if "may not run sudo" in text or "not allowed to run sudo" in text:
+            return []
+        return {"unreadable": text.strip()[:200]}
+    rules: list[dict] = []
+    for line in text.splitlines():
+        m = re.match(r"\s*\(([^)]+)\)\s*(NOPASSWD:\s*)?(.+)", line)
+        if not m:
+            continue
+        rules.append({
+            "runas": m.group(1),
+            "nopasswd": bool(m.group(2)),
+            "command": m.group(3).strip(),
+        })
+    return rules
+
+
+def _ssh_keys(home: Path) -> object:
+    d = home / ".ssh"
+    try:
+        entries = sorted(d.iterdir())
+    except OSError as exc:
+        return {"unreadable": str(exc)}
+    keys = []
+    seen = set()
+    for f in entries:
+        if f.name in {"known_hosts", "config", "authorized_keys"} or f.name.endswith(".pub"):
+            continue
+        rc, out = _run("ssh-keygen", "-lf", str(f))
+        if rc != 0:
+            continue
+        parts = out.split()
+        if len(parts) >= 4 and parts[1] not in seen:
+            seen.add(parts[1])
+            keys.append({
+                "path": str(f).replace(str(home), "~"),
+                "bits": parts[0],
+                "fingerprint": parts[1],
+                "comment": parts[2],
+                "type": parts[-1].strip("()"),
+            })
+    return keys
+
+
+def _ssh_hosts(home: Path) -> object:
+    cfg = home / ".ssh" / "config"
+    try:
+        text = cfg.read_text()
+    except OSError:
+        return []
+    hosts: list[dict] = []
+    cur: dict | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, _, val = line.partition(" ")
+        k = key.lower()
+        if k == "host":
+            cur = {"host": val.strip()}
+            hosts.append(cur)
+        elif cur is not None and k in {"hostname", "identityfile", "identityagent", "user"}:
+            cur[k] = val.strip()
+    return hosts
+
+
+def _credentials(home: Path) -> dict:
+    out = {}
+    for label, rel in _CREDENTIAL_FILES.items():
+        try:
+            out[label] = (home / rel).exists()
+        except OSError:
+            out[label] = None
+    return out
+
+
+def _systemd_units_by_user() -> dict[str, list[str]]:
+    rc, out = _run(
+        "systemctl", "show", "--all", "--property=Id,User", "--type=service,timer,path", "*"
+    )
+    mapping: dict[str, list[str]] = {}
+    if rc != 0:
+        return mapping
+    unit = user = None
+    for line in out.splitlines():
+        if line.startswith("Id="):
+            unit = line[3:]
+        elif line.startswith("User="):
+            user = line[5:] or "root"
+        elif line == "" and unit:
+            mapping.setdefault(user or "root", []).append(unit)
+            unit = user = None
+    if unit:
+        mapping.setdefault(user or "root", []).append(unit)
+    return mapping
+
+
+def _global_ssh_aliases() -> list[dict]:
+    files: list[Path] = []
+    for g in _SSH_CONFIG_GLOBS:
+        p = Path(g)
+        if p.is_dir():
+            files.extend(sorted(p.glob("*.conf")))
+        elif p.is_file():
+            files.append(p)
+    aliases: list[dict] = []
+    for f in files:
+        try:
+            text = f.read_text()
+        except OSError:
+            continue
+        cur: dict | None = None
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, _, val = line.partition(" ")
+            k = key.lower()
+            if k == "host":
+                cur = {"host": val.strip(), "source": str(f)}
+                aliases.append(cur)
+            elif cur is not None and k in {"hostname", "identityfile", "identityagent"}:
+                cur[k] = val.strip()
+    return aliases
+
+
+def build(users: list[str] | None) -> dict:
+    unit_map = _systemd_units_by_user()
+    inv: dict[str, object] = {}
+    for name in _target_users(users):
+        try:
+            u = pwd.getpwnam(name)
+        except KeyError:
+            inv[name] = {"error": "no such user"}
+            continue
+        home = Path(u.pw_dir)
+        inv[name] = {
+            "uid": u.pw_uid,
+            "gid": u.pw_gid,
+            "shell": u.pw_shell,
+            "home": u.pw_dir,
+            "groups": _groups(name),
+            "sudo": _sudo(name),
+            "ssh_keys": _ssh_keys(home),
+            "ssh_config_hosts": _ssh_hosts(home),
+            "credential_files": _credentials(home),
+            "systemd_units": sorted(unit_map.get(name, [])),
+        }
+    return {
+        "schema": SCHEMA,
+        "generated": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "host": os.uname().nodename,
+        "generated_as": pwd.getpwuid(os.geteuid()).pw_name,
+        "complete": os.geteuid() == 0,
+        "users": inv,
+        "ssh_aliases_global": _global_ssh_aliases(),
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--write", action="store_true", help=f"write {CANONICAL}")
+    ap.add_argument("--users", help="comma-separated user list (default: tgw-relevant)")
+    args = ap.parse_args()
+    if os.geteuid() != 0:
+        print("warning: not root — sudo grants and other homes' ~/.ssh will be partial",
+              file=sys.stderr)
+    data = build(args.users.split(",") if args.users else None)
+    text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    if args.write:
+        if not data["complete"]:
+            print("refusing --write: run as root for a complete inventory", file=sys.stderr)
+            return 1
+        CANONICAL.write_text(text)
+        print(f"wrote {CANONICAL}")
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

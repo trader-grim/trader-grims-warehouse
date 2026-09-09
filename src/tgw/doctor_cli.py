@@ -4533,6 +4533,102 @@ def check_source_github_publish(paths: DoctorPaths) -> dict[str, Any]:
         return _failed(identity, exc)
 
 
+_IDENTITY_INVENTORY_REL = Path("config/environment/identity-inventory.json")
+_IDENTITY_INVENTORY_SCRIPT = Path("scripts/tgw-identity-inventory")
+
+
+def _inventory_projection(inv: Mapping[str, Any]) -> dict[str, dict[str, list[str]]]:
+    """Per-user {sudo, credentials, ssh_fingerprints, groups} as sorted lists."""
+    out: dict[str, dict[str, list[str]]] = {}
+    for name, u in (inv.get("users") or {}).items():
+        if not isinstance(u, Mapping):
+            continue
+        sudo = u.get("sudo")
+        sudo_cmds = sorted(
+            f"({r.get('runas')}) {r.get('command')}"
+            for r in (sudo if isinstance(sudo, list) else [])
+            if isinstance(r, Mapping)
+        )
+        creds = sorted(k for k, v in (u.get("credential_files") or {}).items() if v)
+        keys = u.get("ssh_keys")
+        fps = sorted(
+            k.get("fingerprint", "")
+            for k in (keys if isinstance(keys, list) else [])
+            if isinstance(k, Mapping)
+        )
+        out[name] = {
+            "sudo": sudo_cmds,
+            "credentials": creds,
+            "ssh_fingerprints": fps,
+            "groups": sorted(u.get("groups") or []),
+        }
+    return out
+
+
+def check_identity_inventory(paths: DoctorPaths) -> dict[str, Any]:
+    """The tgw-lib identity/capability map matches its checked-in baseline.
+
+    `scripts/tgw-identity-inventory` records, per user, the sudo grants, SSH key
+    fingerprints, credential-file presence, groups, and systemd units — the
+    authoritative "who can do X / where is the key for X" map (PP-ROLES-001
+    WU-10). This check regenerates it and WARNs (never FAILs — it is
+    observation, not a gate) on any *added* capability vs
+    `config/environment/identity-inventory.json`: a service account that gained
+    a credential or a sudo grant it should not have.
+    """
+    identity = "access.identity-inventory"
+    try:
+        baseline_path = paths.repository / _IDENTITY_INVENTORY_REL
+        script = paths.repository / _IDENTITY_INVENTORY_SCRIPT
+        regen = f"operator: `sudo {script} --write` then commit {_IDENTITY_INVENTORY_REL}"
+        try:
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return _check(identity, "UNKNOWN", f"no baseline at {_IDENTITY_INVENTORY_REL}",
+                          repair=regen)
+        if os.geteuid() != 0:
+            return _check(
+                identity, "UNKNOWN",
+                "drift check needs root (sudo grants + other homes' ~/.ssh); "
+                "run `sudo tgw doctor check`",
+            )
+        proc = subprocess.run(
+            [sys.executable, str(script)], capture_output=True, text=True, timeout=90,
+        )
+        if proc.returncode != 0:
+            raise DoctorError(f"tgw-identity-inventory failed: {proc.stderr.strip()[:200]}")
+        live = json.loads(proc.stdout)
+
+        base_proj = _inventory_projection(baseline)
+        live_proj = _inventory_projection(live)
+        additions: list[str] = []
+        for name, lv in live_proj.items():
+            bv = base_proj.get(name, {"sudo": [], "credentials": [], "ssh_fingerprints": [], "groups": []})
+            for field in ("sudo", "credentials", "ssh_fingerprints", "groups"):
+                for item in set(lv[field]) - set(bv[field]):
+                    additions.append(f"{name}.{field}: +{item}")
+
+        if additions:
+            shown = "; ".join(sorted(additions)[:6])
+            more = "" if len(additions) <= 6 else f" (+{len(additions) - 6} more)"
+            return _check(
+                identity, "WARN",
+                f"identity capability added since baseline: {shown}{more}",
+                evidence={"additions": sorted(additions), "baseline_generated": baseline.get("generated")},
+                repair=(
+                    "review each addition; if intended, "
+                    f"`sudo {script} --write` and commit"
+                ),
+            )
+        return _check(
+            identity, "PASS",
+            f"identity inventory matches baseline ({len(live_proj)} users)",
+            evidence={"baseline_generated": baseline.get("generated")},
+        )
+    except Exception as exc:
+        return _failed(identity, exc)
+
+
 # --------------------------------------------------------------------------- #
 # harness onboarding — LEAF-11-9 W2/W3
 # --------------------------------------------------------------------------- #
@@ -6760,6 +6856,7 @@ def diagnose(paths: DoctorPaths = DoctorPaths()) -> dict[str, Any]:
         check_operator_sudoers(paths),
         check_plan_vault_git(paths),
         check_source_github_publish(paths),
+        check_identity_inventory(paths),
         check_harness_identities(paths),
         check_harness_import_path(paths),
         check_harness_executors(paths),
