@@ -1,6 +1,6 @@
 {
   "complete": true,
-  "generated": "2026-09-09T02:17:00Z",
+  "generated": "2026-09-09T06:35:18Z",
   "generated_as": "root",
   "host": "tgw-lib",
   "schema": "tgw-identity-inventory/v1",
@@ -15,6 +15,13 @@
       "identityagent": "/run/tgw-github-agent/agent.sock",
       "identityfile": "/etc/ssh/tgw_github_app.pub",
       "source": "/etc/ssh/ssh_config.d/10-tgw-github-app.conf"
+    },
+    {
+      "host": "github-tgw-plan",
+      "hostname": "github.com",
+      "identityagent": "/run/tgw-github-agent/agent.sock",
+      "identityfile": "/etc/ssh/tgw_github_plan.pub",
+      "source": "/etc/ssh/ssh_config.d/11-tgw-github-plan.conf"
     },
     {
       "host": ".host machine/.host",
@@ -92,6 +99,36 @@
           "command": "/usr/bin/systemctl start tgw-*, /usr/bin/systemctl stop tgw-*, /usr/bin/systemctl restart tgw-*, /usr/bin/systemctl reload tgw-*, /usr/bin/systemctl enable tgw-*, /usr/bin/systemctl disable tgw-*, /usr/bin/systemctl mask tgw-*, /usr/bin/systemctl unmask tgw-*, /usr/bin/systemctl reset-failed tgw-*, /usr/bin/systemctl daemon-reload, /usr/bin/systemctl status tgw-*, /usr/bin/systemctl show tgw-*, /usr/bin/systemctl is-active tgw-*, /usr/bin/systemctl is-enabled tgw-*, /usr/bin/systemctl is-failed tgw-*, /usr/bin/systemctl cat tgw-*, /usr/bin/systemctl list-timers tgw-*, /usr/bin/journalctl -u tgw-*, /usr/bin/journalctl --unit tgw-*, /usr/bin/journalctl --unit\\=tgw-*, /usr/local/sbin/tgw-coding-bootstrap, /usr/local/sbin/tgw-coding-bootstrap *",
           "nopasswd": true,
           "runas": "root"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
         },
         {
           "command": "ALL",
@@ -206,6 +243,31 @@
         },
         {
           "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-publish",
           "nopasswd": true,
           "runas": "tgw-release"
         },
@@ -423,6 +485,46 @@
           "runas": "root"
         },
         {
+          "command": "/usr/local/sbin/tgw-plan-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
           "command": "ALL",
           "nopasswd": true,
           "runas": "db"
@@ -453,10 +555,7 @@
           "runas": "tgw-release"
         }
       ],
-      "systemd_units": [
-        "tgw-doctor-auto-repair.service",
-        "tgw-plan-render-local.service"
-      ],
+      "systemd_units": [],
       "uid": 1000
     },
     "deepseek": {
@@ -503,6 +602,31 @@
         },
         {
           "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-publish",
           "nopasswd": true,
           "runas": "tgw-release"
         },
@@ -597,55 +721,13 @@
         "hermaroid",
         "nix-users",
         "tgw-access",
-        "tgw-agent-exchange",
-        "tgw-coders"
+        "tgw-agent-exchange"
       ],
       "home": "/home/hermaroid",
       "shell": "/bin/bash",
       "ssh_config_hosts": [],
       "ssh_keys": [],
-      "sudo": [
-        {
-          "command": "/usr/local/bin/tgw-flake-git status",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/bin/tgw-flake-git fetch",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/sbin/tgw-git-push",
-          "nopasswd": true,
-          "runas": "tgw-release"
-        },
-        {
-          "command": "/usr/local/bin/tgw-source-git status",
-          "nopasswd": true,
-          "runas": "tgw-release"
-        },
-        {
-          "command": "/usr/local/bin/tgw-source-git fetch",
-          "nopasswd": true,
-          "runas": "tgw-release"
-        },
-        {
-          "command": "/usr/local/bin/tgw-source-git dry-run",
-          "nopasswd": true,
-          "runas": "tgw-release"
-        }
-      ],
+      "sudo": [],
       "systemd_units": [],
       "uid": 1002
     },
@@ -662,7 +744,6 @@
         "hermes",
         "nix-users",
         "tgw-access",
-        "tgw-coders",
         "tgw-recovery"
       ],
       "home": "/home/hermes",
@@ -673,31 +754,6 @@
       },
       "sudo": [
         {
-          "command": "/usr/local/bin/tgw-flake-git status",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/bin/tgw-flake-git fetch",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/sbin/tgw-git-push",
-          "nopasswd": true,
-          "runas": "tgw-release"
-        },
-        {
           "command": "ALL",
           "nopasswd": true,
           "runas": "db"
@@ -706,21 +762,6 @@
           "command": "/usr/local/sbin/tgw-coding-bootstrap",
           "nopasswd": true,
           "runas": "root"
-        },
-        {
-          "command": "/usr/local/bin/tgw-source-git status",
-          "nopasswd": true,
-          "runas": "tgw-release"
-        },
-        {
-          "command": "/usr/local/bin/tgw-source-git fetch",
-          "nopasswd": true,
-          "runas": "tgw-release"
-        },
-        {
-          "command": "/usr/local/bin/tgw-source-git dry-run",
-          "nopasswd": true,
-          "runas": "tgw-release"
         }
       ],
       "systemd_units": [],
@@ -1070,8 +1111,7 @@
       "gid": 1010,
       "groups": [
         "nix-users",
-        "prime",
-        "tgw-coders"
+        "prime"
       ],
       "home": "/home/prime",
       "shell": "/bin/bash",
@@ -1079,48 +1119,7 @@
       "ssh_keys": {
         "unreadable": "[Errno 2] No such file or directory: '/home/prime/.ssh'"
       },
-      "sudo": [
-        {
-          "command": "/usr/local/bin/tgw-flake-git status",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/bin/tgw-flake-git fetch",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/sbin/tgw-git-push",
-          "nopasswd": true,
-          "runas": "tgw-release"
-        },
-        {
-          "command": "/usr/local/bin/tgw-source-git status",
-          "nopasswd": true,
-          "runas": "tgw-release"
-        },
-        {
-          "command": "/usr/local/bin/tgw-source-git fetch",
-          "nopasswd": true,
-          "runas": "tgw-release"
-        },
-        {
-          "command": "/usr/local/bin/tgw-source-git dry-run",
-          "nopasswd": true,
-          "runas": "tgw-release"
-        }
-      ],
+      "sudo": [],
       "systemd_units": [],
       "uid": 1010
     },
@@ -1374,6 +1373,7 @@
         "tgw-context-snapshot-promote.path",
         "tgw-context-snapshot-promote.service",
         "tgw-doctor-auto-repair.timer",
+        "tgw-publish.timer",
         "tgw-tmp-inode-alarm.service",
         "tgw-tmp-inode-alarm.timer",
         "thermald.service",
@@ -1383,7 +1383,6 @@
         "ufw.service",
         "unattended-upgrades.service",
         "upower.service",
-        "user-runtime-dir@0.service",
         "user-runtime-dir@1000.service",
         "user-runtime-dir@1001.service",
         "user-runtime-dir@1006.service",
@@ -1645,6 +1644,11 @@
           "runas": "tgw-coder"
         },
         {
+          "command": "/usr/local/sbin/tgw-coding-bootstrap --commit [0-9a-f]* --repair [a-z-]*",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
           "command": "/usr/local/bin/tgw-source-git status",
           "nopasswd": true,
           "runas": "tgw-release"
@@ -1660,7 +1664,10 @@
           "runas": "tgw-release"
         }
       ],
-      "systemd_units": [],
+      "systemd_units": [
+        "tgw-doctor-auto-repair.service",
+        "tgw-plan-render-local.service"
+      ],
       "uid": 981
     },
     "tgw-release": {
@@ -1692,6 +1699,13 @@
           "comment": "github.com",
           "fingerprint": "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU",
           "path": "~/.ssh/known_hosts.old",
+          "type": "ED25519"
+        },
+        {
+          "bits": "256",
+          "comment": "tgw-plan",
+          "fingerprint": "SHA256:NVK0R/hhS7FG8b3azc4o/TgtwiGXWpXBuC5bubz3scM",
+          "path": "~/.ssh/tgw-plan_deploy_ed25519",
           "type": "ED25519"
         },
         {
@@ -1729,6 +1743,31 @@
           "runas": "tgw-release"
         },
         {
+          "command": "/usr/local/sbin/tgw-plan-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-plan-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
           "command": "/usr/local/bin/tgw-source-git status",
           "nopasswd": true,
           "runas": "tgw-release"
@@ -1750,7 +1789,8 @@
         }
       ],
       "systemd_units": [
-        "tgw-github-agent.service"
+        "tgw-github-agent.service",
+        "tgw-publish.service"
       ],
       "uid": 997
     },
@@ -1768,7 +1808,6 @@
         "nix-users",
         "tgw-access",
         "tgw-agent-exchange",
-        "tgw-coders",
         "tgw-release",
         "tigwadev"
       ],
@@ -1786,42 +1825,27 @@
       ],
       "sudo": [
         {
-          "command": "/usr/local/bin/tgw-flake-git status",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/bin/tgw-flake-git fetch",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
-          "nopasswd": true,
-          "runas": "db"
-        },
-        {
-          "command": "/usr/local/sbin/tgw-git-push",
+          "command": "/usr/local/sbin/tgw-plan-git status",
           "nopasswd": true,
           "runas": "tgw-release"
         },
         {
-          "command": "/usr/local/bin/tgw-source-git status",
+          "command": "/usr/local/sbin/tgw-plan-git fetch",
           "nopasswd": true,
           "runas": "tgw-release"
         },
         {
-          "command": "/usr/local/bin/tgw-source-git fetch",
+          "command": "/usr/local/sbin/tgw-plan-git dry-run",
           "nopasswd": true,
           "runas": "tgw-release"
         },
         {
-          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "command": "/usr/local/sbin/tgw-plan-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-publish",
           "nopasswd": true,
           "runas": "tgw-release"
         },
