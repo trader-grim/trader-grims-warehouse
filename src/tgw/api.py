@@ -1091,6 +1091,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--message", help="enqueue/start: commit subject for the accepted task")
     p.add_argument("--executor", help="enqueue/start: ordered executor preference (e.g. claude,codex)")
     p.add_argument("--max-rounds", type=int, dest="max_rounds", help="enqueue/start: remediation round budget")
+    p.add_argument("--body-file", dest="body_file", help="enqueue: file holding the task text (ad-hoc spec / solved work unit)")
     p.add_argument("--limit", type=int, help="queue: max recent jobs to list")
     p.add_argument("--endpoint", help="explicit endpoint override")
     p.add_argument("--api-key", help="explicit credential override")

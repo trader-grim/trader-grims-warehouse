@@ -89,16 +89,22 @@ def enqueue(
     todo_id: int,
     message: str,
     *,
+    body: str | None = None,
     executor_preference: tuple[str, ...] = (),
     max_rounds: int | None = None,
     priority: int = DEFAULT_PRIORITY,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     origin: str = "operator",
 ) -> dict[str, Any]:
-    """Put one Todo on the coding queue for the daemon to pick up.
+    """Put one job on the coding queue for the daemon to pick up.
 
-    Idempotent per Todo: if a non-terminal job for this Todo already exists its
-    id is returned with ``created=False`` and nothing new is enqueued.
+    ``todo_id`` addresses the job and dedupes it (one live job per id). When
+    ``body`` is given it is the task text verbatim (an ad-hoc spec, or a
+    solved plan/PP work unit); otherwise the daemon reads Todo ``todo_id``'s
+    body from the store at dispatch time.
+
+    Idempotent: if a non-terminal job for this id already exists its job_id is
+    returned with ``created=False`` and nothing new is enqueued.
     """
     todo_id = int(todo_id)
     if not isinstance(message, str) or not message.strip():
@@ -108,6 +114,10 @@ def enqueue(
         "message": message.strip(),
         "origin": origin,
     }
+    if body is not None:
+        if not body.strip():
+            raise HarnessQueueError("body, when given, must be non-empty")
+        payload["body"] = body
     if executor_preference:
         payload["executor_preference"] = list(executor_preference)
     if max_rounds is not None:

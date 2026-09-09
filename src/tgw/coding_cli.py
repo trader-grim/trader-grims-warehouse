@@ -194,20 +194,30 @@ def enqueue(
     message: str | None = None,
     executor: str | None = None,
     max_rounds: int | None = None,
+    body_file: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Put one Todo on the coding queue for the ``cat_herder`` daemon to run
+    """Put one job on the coding queue for the ``cat_herder`` daemon to run
     (Todo 2003). Unlike ``start`` this returns immediately — the daemon dispatches
-    it. Idempotent per Todo."""
+    it. Idempotent per id. With ``--body-file`` the task text is that file
+    (an ad-hoc spec / a solved work unit) and the id is just the dedupe handle;
+    otherwise Todo ``todo_id``'s stored body is used."""
     identifier = _todo_id(todo_id)
     config = _initialize(config_path)
-    item = todo.todo_get(identifier)
-    if item is None:
-        raise CodingCLIError(f"Todo {identifier} does not exist locally")
-    if item.get("done_at") is not None:
-        raise CodingCLIError(f"Todo {identifier} is already complete")
-    body = str(item.get("body") or "").strip()
-    if not body:
-        raise CodingCLIError(f"Todo {identifier} has no body to implement")
+    ad_hoc_body: str | None = None
+    if body_file is not None:
+        ad_hoc_body = Path(body_file).read_text(encoding="utf-8")
+        if not ad_hoc_body.strip():
+            raise CodingCLIError(f"body file {body_file} is empty")
+        body = ad_hoc_body
+    else:
+        item = todo.todo_get(identifier)
+        if item is None:
+            raise CodingCLIError(f"Todo {identifier} does not exist locally")
+        if item.get("done_at") is not None:
+            raise CodingCLIError(f"Todo {identifier} is already complete")
+        body = str(item.get("body") or "").strip()
+        if not body:
+            raise CodingCLIError(f"Todo {identifier} has no body to implement")
 
     from tgw.development import harness_queue
 
@@ -215,6 +225,7 @@ def enqueue(
     outcome = harness_queue.enqueue(
         identifier,
         message or _commit_subject(identifier, body),
+        body=ad_hoc_body,
         executor_preference=(tuple(e.strip() for e in executor.split(",") if e.strip())
                              if executor else ()),
         max_rounds=max_rounds,
@@ -416,6 +427,7 @@ def run(args: argparse.Namespace) -> int:
                 message=getattr(args, "message", None),
                 executor=getattr(args, "executor", None),
                 max_rounds=getattr(args, "max_rounds", None),
+                body_file=getattr(args, "body_file", None),
             )
         elif args.coding_op == "queue":
             result = queue_status(config_path=config_path,
@@ -483,6 +495,9 @@ def parser() -> argparse.ArgumentParser:
     enqueue_parser.add_argument("--message", help="commit subject (default: from the Todo)")
     enqueue_parser.add_argument("--executor", help="ordered executor preference (e.g. claude,codex)")
     enqueue_parser.add_argument("--max-rounds", type=int, dest="max_rounds")
+    enqueue_parser.add_argument("--body-file", dest="body_file",
+                                help="file holding the task text (ad-hoc spec / solved work unit); "
+                                     "TODO_ID is then just the dedupe handle")
 
     queue_parser = commands.add_parser(
         "queue", help="show the coding queue (state counts + recent jobs)")

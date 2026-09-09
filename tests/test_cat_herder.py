@@ -94,11 +94,25 @@ def test_landed_job_is_marked_succeeded(ids, monkeypatch):
     job = harness_queue.enqueue(tid, "make it so", executor_preference=("stub",))
     assert _herder().run_once() == 0
 
-    assert seen["target"] == f"todo-{tid}"
+    # no body in the payload -> a bare digit target so harness_cli reads the Todo
+    assert seen["target"] == str(tid)
+    assert seen["kw"]["body"] is None
     assert seen["kw"]["message"] == "make it so"
     assert seen["kw"]["coder_user"] == "tgw-coder"
     assert seen["kw"]["executor_preference"] == ("stub",)
     assert _state(job["job_id"])[0] == "succeeded"
+
+
+def test_ad_hoc_body_travels_with_the_job(ids, monkeypatch):
+    tid = _new_id(ids)
+    seen = {}
+    monkeypatch.setattr(harness_cli, "dispatch",
+                        lambda target, **kw: seen.update(target=target, kw=kw) or {"outcome": "landed"})
+    harness_queue.enqueue(tid, "ad-hoc spec", body="## Task\nDo the specific thing.")
+    assert _herder().run_once() == 0
+    # a body -> a "todo-<id>" target and the body passed through verbatim
+    assert seen["target"] == f"todo-{tid}"
+    assert seen["kw"]["body"] == "## Task\nDo the specific thing."
 
 
 def test_blocked_job_is_parked(ids, monkeypatch):

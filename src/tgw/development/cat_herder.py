@@ -184,6 +184,8 @@ class CatHerder:
 
         executor_preference = tuple(payload.get("executor_preference") or ())
         max_rounds = int(payload.get("max_rounds") or harness_orchestrator.DEFAULT_MAX_ROUNDS)
+        body = payload.get("body")
+        body = body if isinstance(body, str) and body.strip() else None
 
         if not harness_queue.mark_running(job_id, token):
             log.warning("job %s lease already lost before start — skipping", job_id)
@@ -196,7 +198,7 @@ class CatHerder:
             target=self._heartbeat_loop, args=(job_id, token, stop_beat), daemon=True)
         beat.start()
         try:
-            result = self._dispatch(todo_id, message, executor_preference, max_rounds)
+            result = self._dispatch(todo_id, message, executor_preference, max_rounds, body)
         except harness_orchestrator.OrchestratorBusy as exc:
             self._retry(job_id, token, attempt, max_attempts, 120,
                         f"another owner holds the task cursor: {exc}")
@@ -226,11 +228,15 @@ class CatHerder:
                         f"unexpected outcome {outcome!r}: {json.dumps(result)[:1500]}")
 
     def _dispatch(self, todo_id: int, message: str,
-                  executor_preference: tuple[str, ...], max_rounds: int) -> dict[str, Any]:
+                  executor_preference: tuple[str, ...], max_rounds: int,
+                  body: str | None = None) -> dict[str, Any]:
+        # a bare digit target makes harness_cli read Todo <id>'s body from the
+        # store; a "todo-<id>" target requires the body to travel with the job.
+        target = f"todo-{todo_id}" if body is not None else str(todo_id)
         return harness_cli.dispatch(
-            f"todo-{todo_id}",
+            target,
             message=message,
-            body=None,
+            body=body,
             repository=self._repository,
             worktree_root=self._worktree_root,
             max_rounds=max_rounds,
