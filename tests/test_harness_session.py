@@ -231,7 +231,7 @@ def test_executor_bin_from_job_sets_the_env(tmp_path, monkeypatch):
 def test_executor_chain_default_is_the_full_list(monkeypatch):
     monkeypatch.delenv("TGW_HARNESS_EXECUTOR", raising=False)
     monkeypatch.setattr("tgw.model_selector.select_executor", lambda role: (_ for _ in ()).throw(Exception()))
-    assert harness_session._executor_chain() == ["claude", "codex"]
+    assert harness_session._executor_chain() == ["claude", "codex", "opencode"]
 
 
 def test_stub_executor_is_offline_only_by_explicit_request(monkeypatch):

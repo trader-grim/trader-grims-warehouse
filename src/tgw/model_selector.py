@@ -21,7 +21,7 @@ Shape::
       "updated": "2026-09-04",
       "executors": {
         "claude":   {"available": true,  "models": ["claude-sonnet-5", ...]},
-        "opencode": {"available": false, "reason": "executor backend not wired"},
+        "opencode": {"available": true},
         "codex":    {"available": false, "reason": "20x Pro lapsed 2026-08-29"},
         "manual":   {"available": true}
       },

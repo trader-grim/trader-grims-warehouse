@@ -421,7 +421,19 @@ def _run_codex(prompt: str, worktree: Path, schema: dict[str, Any], *, invoke: I
             return _last_json_object(completed.stdout)
 
 
-_OPENCODE_DEFAULT_MODEL = "opencode/deepseek-v4-flash"
+# opencode routes by the model-id prefix; one runner reaches every provider it
+# has a key for. muse-spark 1.3 (contributor-free tier on the opencode-zen key)
+# is the default; a job can name any `provider/model` (groq/*, openrouter/*/*:free,
+# nous/*, anthropic/*, opencode/*). The free-tier landscape moves fast — this is
+# a starting point, not a fixed choice (that is what leaf 11.8's selector is for).
+_OPENCODE_DEFAULT_MODEL = "opencode/muse-spark-1.3-contributor-free"
+
+# model-provider key slots the opencode runner keeps in its otherwise-scrubbed
+# env (opencode is the gateway; it needs whichever the chosen model uses).
+_OPENCODE_PROVIDER_KEYS = (
+    "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY", "GROQ_API_KEY",
+    "OPENROUTER_API_KEY", "NOUS_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
+)
 
 
 def _opencode_report(stdout: str) -> dict[str, Any] | None:
@@ -461,10 +473,11 @@ def _opencode_report(stdout: str) -> dict[str, Any] | None:
 def _run_opencode(
     prompt: str, worktree: Path, job: dict[str, Any] | None, *, invoke: Invoke,
 ) -> dict[str, Any] | None:
-    """opencode CLI runner. One opencode-zen key is a unified gateway to every
-    provider; the model (``provider/model``) comes from the job, else the free
-    DeepSeek default. Same shape as the other runners: fresh HOME, one
-    credential, parse the last JSON object out of the stream."""
+    """opencode CLI runner. opencode is a multi-provider gateway; the model
+    (``provider/model``) comes from the job, else the muse-spark-1.3 free-tier
+    default. Same shape as the other runners (fresh HOME, parse the last JSON
+    object out of the ``--format json`` stream) but the env keeps every
+    model-provider key, not one, so opencode can route across providers."""
     opencode_bin = _executor_binary("opencode", optional=True)
     if not opencode_bin:
         raise SessionUnavailable("opencode executable not on PATH")
@@ -477,6 +490,9 @@ def _run_opencode(
             f"opencode: no OPENCODE_ZEN_API_KEY and no {auth_src or 'auth file'}"
         )
     model = (job or {}).get("model") or _OPENCODE_DEFAULT_MODEL
+    # _session_credential sourced secrets_root/tgw.env; keep every model-provider
+    # key so opencode can route to (and fall back across) any of them.
+    provider_keys = {k: os.environ[k] for k in _OPENCODE_PROVIDER_KEYS if os.environ.get(k)}
     with tempfile.TemporaryDirectory(prefix=".tgw-harness-opencode-", dir=worktree) as tmp:
         home = Path(tmp) / "home"
         home.mkdir(parents=True, mode=0o700)
@@ -487,6 +503,7 @@ def _run_opencode(
             (dest / "auth.json").chmod(0o600)
         env = _secret_scrubbed_env()
         env["HOME"] = str(home)
+        env.update(provider_keys)
         if cred:
             env[cred[0]] = cred[1]
         completed = invoke(
