@@ -1,10 +1,16 @@
 #!/usr/bin/python3.13 -IS
-"""Acyclic, exact first-install entry point for the local coding runtime.
+"""Acyclic, hash-verified privileged entry point for local Doctor.
 
 Install this reviewed file as ``/usr/local/sbin/tgw-coding-bootstrap`` owned by
 root and mode 0555. It never imports Python from the group-writable checkout.
 Instead it verifies Git objects by identity, reconstructs the requested commit
 in a private root-owned directory, and invokes that exact Doctor implementation.
+
+  tgw-coding-bootstrap --commit <HEAD>              # privileged `doctor check`
+  tgw-coding-bootstrap --commit <HEAD> --repair <op>
+
+The tgw-lib development loop has no materialized release tree
+(LEAF-11-1.DELETE-APPARATUS); there is no "bootstrap" / "materialize" mode.
 """
 
 from __future__ import annotations
@@ -273,10 +279,23 @@ def _extract_exact(commit: str, destination: Path) -> str:
     return tree
 
 
+def _doctor_arguments(args: argparse.Namespace) -> list[str]:
+    """The ``tgw.doctor_cli`` argv for this invocation.
+
+    No ``--repair``: a hash-verified privileged ``doctor check`` (run from the
+    reconstructed exact commit, never the mutable checkout). The tgw-lib loop
+    has no materialized release tree — LEAF-11-1.DELETE-APPARATUS removed the
+    ``coding-bootstrap`` op, so there is no "materialize" mode here.
+    """
+    if args.repair is None:
+        return ["check", "--full"]
+    return ["repair", args.repair, "--commit", args.commit, "--json"]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="tgw-coding-bootstrap",
-        description="run one exact local coding bootstrap or privileged repair",
+        description="run one hash-verified privileged Doctor check or repair",
     )
     parser.add_argument("--commit", required=True)
     parser.add_argument(
@@ -293,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
             "obsolete-surfaces",
             "harness",
         ),
-        help="run one exact Doctor repair instead of the coding bootstrap",
+        help="run one exact Doctor repair instead of a check",
     )
     parser.add_argument(
         "--review-evidence",
@@ -333,17 +352,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             tree = _extract_exact(args.commit, staging)
-            doctor_arguments = (
-                ["coding-bootstrap", "--commit", args.commit]
-                if args.repair is None
-                else [
-                    "repair",
-                    args.repair,
-                    "--commit",
-                    args.commit,
-                    "--json",
-                ]
-            )
+            doctor_arguments = _doctor_arguments(args)
             if args.review_evidence is not None:
                 doctor_arguments.extend(
                     ["--review-evidence", str(args.review_evidence)]
@@ -356,11 +365,14 @@ def main(argv: list[str] | None = None) -> int:
                 env=_candidate_environment(staging),
                 check=False,
             )
-            if completed.returncode:
-                raise BootstrapError("exact candidate Doctor bootstrap failed")
-            operation = "coding bootstrap" if args.repair is None else f"{args.repair} repair"
+            if completed.returncode and args.repair is not None:
+                raise BootstrapError("exact candidate Doctor repair failed")
+            operation = (
+                "privileged doctor check" if args.repair is None
+                else f"{args.repair} repair"
+            )
             print(f"completed exact local {operation} from {args.commit} tree {tree}")
-            return 0
+            return completed.returncode if args.repair is None else 0
         finally:
             shutil.rmtree(staging)
     except (BootstrapError, OSError) as exc:

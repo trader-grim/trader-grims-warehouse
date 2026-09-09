@@ -27,17 +27,23 @@ authenticated, so it cannot require them.
 ## The one operation
 
 ```text
-# once, so the root-owned launcher carries the `harness` repair target:
-sudo -n /usr/local/sbin/tgw-coding-bootstrap --commit <sha>
+# if the root-owned launcher is behind the checked-in bin/tgw-coding-bootstrap
+# (there is no self-update since LEAF-11-1.DELETE-APPARATUS — see below):
+sudo install -m 0555 -o root -g root \
+  /opt/TGW/tgw-lib/src/trader-grims-warehouse/bin/tgw-coding-bootstrap \
+  /usr/local/sbin/tgw-coding-bootstrap
 # then, the onboarding operation itself:
 sudo -n /usr/local/sbin/tgw-coding-bootstrap --repair harness --commit <sha>
 ```
 
-`<sha>` is the exact clean `refs/heads/main` commit you are onboarding. The
-first line is the ordinary full coding bootstrap (it reinstalls
-`/usr/local/sbin/tgw-coding-bootstrap` from the commit tree); skip it only if
-`tgw-coding-bootstrap --repair harness --help` already lists `harness`. The
-`--repair harness` run is idempotent. It:
+`<sha>` is the exact clean `refs/heads/main` commit you are onboarding.
+
+**The launcher no longer self-updates.** LEAF-11-1.DELETE-APPARATUS removed the
+`coding-bootstrap` Doctor op; there is no materialized release tree for the
+tgw-lib loop. `tgw-coding-bootstrap --commit <HEAD>` (no `--repair`) is now a
+hash-verified privileged `tgw doctor check`, not a bootstrap. When
+`bin/tgw-coding-bootstrap` changes in the repo, reinstall it with the `install`
+line above. The `--repair harness` run is idempotent. It:
 
 1. ensures the `tgw-harness` (uid 981, login shell, publisher) and `tgw-coder`
    (uid 980, nologin, confined, non-publisher) identities, their `tgw-coders`

@@ -3,7 +3,9 @@ set -eu
 
 if [ "$(/usr/bin/id -u)" -eq 0 ]; then
     echo "tgw: privileged execution through the mutable coding runtime is disabled" >&2
-    echo "use /usr/local/sbin/tgw-coding-bootstrap with an exact commit" >&2
+    _h=$(/usr/bin/git -C /opt/TGW/tgw-lib/src/trader-grims-warehouse rev-parse HEAD 2>/dev/null || echo '<HEAD>')
+    echo "  privileged check:  sudo /usr/local/sbin/tgw-coding-bootstrap --commit $_h" >&2
+    echo "  privileged repair: sudo /usr/local/sbin/tgw-coding-bootstrap --commit $_h --repair <op>" >&2
     exit 126
 fi
 
