@@ -302,8 +302,12 @@ def _claude_report(stdout: str) -> dict[str, Any] | None:
 # session execution
 # --------------------------------------------------------------------------- #
 
+def _context_mcp_available() -> bool:
+    return _CONTEXT_MCP.is_file() and os.access(_CONTEXT_MCP, os.X_OK)
+
+
 def _write_isolated_codex_config(codex_home: Path) -> None:
-    if not (_CONTEXT_MCP.is_file() and os.access(_CONTEXT_MCP, os.X_OK)):
+    if not _context_mcp_available():
         return
     lines = [
         "[mcp_servers.tgw-context]\n",
@@ -314,6 +318,35 @@ def _write_isolated_codex_config(codex_home: Path) -> None:
         lines += [f"\n[mcp_servers.tgw-context.tools.{tool}]\n", 'approval_mode = "approve"\n']
     (codex_home / "config.toml").write_text("".join(lines), encoding="utf-8")
     (codex_home / "config.toml").chmod(0o600)
+
+
+def _write_claude_mcp_config(claude_config_dir: Path) -> Path | None:
+    """The tgw-context MCP for a claude coder session (read-only projection —
+    plan graph, code graph, plan source, status). Returns the --mcp-config
+    path, or None when the launcher is absent."""
+    if not _context_mcp_available():
+        return None
+    cfg = {"mcpServers": {"tgw-context": {"command": str(_CONTEXT_MCP), "args": []}}}
+    path = claude_config_dir / "tgw-context-mcp.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def _write_opencode_mcp_config(opencode_home: Path) -> None:
+    """The tgw-context MCP for an opencode coder session. opencode reads
+    ~/.config/opencode/opencode.jsonc; a `local` MCP is a spawned stdio server."""
+    if not _context_mcp_available():
+        return
+    cfgdir = opencode_home / ".config" / "opencode"
+    cfgdir.mkdir(parents=True, exist_ok=True)
+    cfg = {
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {"tgw-context": {"type": "local", "command": [str(_CONTEXT_MCP)],
+                                "enabled": True, "timeout": 30000}},
+    }
+    (cfgdir / "opencode.jsonc").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    (cfgdir / "opencode.jsonc").chmod(0o600)
 
 
 _UNAVAILABLE_PATTERNS = (
@@ -363,9 +396,13 @@ def _run_claude(prompt: str, worktree: Path, *, invoke: Invoke) -> dict[str, Any
         env["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
         if cred:
             env[cred[0]] = cred[1]
+        argv = [claude_bin, "-p", "--output-format", "json",
+                "--permission-mode", "bypassPermissions"]
+        mcp_cfg = _write_claude_mcp_config(home / ".claude")
+        if mcp_cfg:
+            argv += ["--mcp-config", str(mcp_cfg)]
         completed = invoke(
-            [claude_bin, "-p", "--output-format", "json",
-             "--permission-mode", "bypassPermissions"],
+            argv,
             cwd=worktree, input=prompt, text=True, capture_output=True, check=False,
             env=env, timeout=_timeout_s(),
         )
@@ -501,13 +538,17 @@ def _run_opencode(
             dest.mkdir(parents=True, mode=0o700)
             shutil.copyfile(auth_src, dest / "auth.json")
             (dest / "auth.json").chmod(0o600)
+        # tgw-context MCP: opencode reads $HOME/.config/opencode/opencode.jsonc.
+        # We cannot pass --pure (it disables plugins *and* MCP); the fresh HOME
+        # is the isolation boundary instead, and this is the only config there.
+        _write_opencode_mcp_config(home)
         env = _secret_scrubbed_env()
         env["HOME"] = str(home)
         env.update(provider_keys)
         if cred:
             env[cred[0]] = cred[1]
         completed = invoke(
-            [opencode_bin, "run", "--format", "json", "--pure",
+            [opencode_bin, "run", "--format", "json",
              "-m", str(model), "--dir", str(worktree), prompt],
             cwd=worktree, input=None, text=True, capture_output=True, check=False,
             env=env, timeout=_timeout_s(),

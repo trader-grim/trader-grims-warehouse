@@ -209,6 +209,63 @@ def test_claude_session_gets_only_its_own_credential(tmp_path, monkeypatch):
     assert "PATH" in env  # non-secret env survives
 
 
+def test_claude_session_wires_the_context_mcp(tmp_path, monkeypatch):
+    # the tgw-context MCP must reach the claude coder session: a --mcp-config
+    # pointing at a file that names the launcher.
+    monkeypatch.setattr(harness_session, "_context_mcp_available", lambda: True)
+    monkeypatch.setattr(harness_session, "_session_credential",
+                        lambda e: ("CLAUDE_CODE_OAUTH_TOKEN", "t"))
+    seen = {}
+
+    def fake_invoke(cmd, **kw):
+        seen["cmd"] = list(cmd)
+        i = cmd.index("--mcp-config")
+        seen["mcp"] = json.loads(open(cmd[i + 1]).read())
+        return subprocess.CompletedProcess(
+            cmd, 0, _claude_out({"status": "implemented", "summary": "ok"}), "")
+
+    harness_session.run_implement_session(
+        {"task_id": "t", "body": "b", "worktree": str(tmp_path)}, invoke=fake_invoke)
+    assert "--mcp-config" in seen["cmd"]
+    assert seen["mcp"]["mcpServers"]["tgw-context"]["command"] == str(harness_session._CONTEXT_MCP)
+
+
+def test_claude_session_has_no_mcp_flag_when_launcher_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(harness_session, "_context_mcp_available", lambda: False)
+    monkeypatch.setattr(harness_session, "_session_credential",
+                        lambda e: ("CLAUDE_CODE_OAUTH_TOKEN", "t"))
+    seen = {}
+
+    def fake_invoke(cmd, **kw):
+        seen["cmd"] = list(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0, _claude_out({"status": "implemented", "summary": "ok"}), "")
+
+    harness_session.run_implement_session(
+        {"task_id": "t", "body": "b", "worktree": str(tmp_path)}, invoke=fake_invoke)
+    assert "--mcp-config" not in seen["cmd"]
+
+
+def test_opencode_session_wires_the_context_mcp_and_is_not_pure(tmp_path, monkeypatch):
+    monkeypatch.setattr(harness_session, "_context_mcp_available", lambda: True)
+    monkeypatch.setattr(harness_session, "_executor_binary", lambda n, optional=False: "/usr/bin/true")
+    monkeypatch.setattr(harness_session, "_session_credential",
+                        lambda e: ("OPENCODE_ZEN_API_KEY", "zk"))
+    seen = {}
+
+    def fake_invoke(cmd, **kw):
+        seen["cmd"] = list(cmd)
+        cfg = os.path.join(kw["env"]["HOME"], ".config", "opencode", "opencode.jsonc")
+        seen["cfg"] = json.loads(open(cfg).read())
+        return subprocess.CompletedProcess(
+            cmd, 0, json.dumps({"type": "result", "content":
+                                json.dumps({"status": "implemented", "summary": "ok"})}) + "\n", "")
+
+    harness_session._run_opencode("do it", tmp_path, {"model": "opencode/x"}, invoke=fake_invoke)
+    assert "--pure" not in seen["cmd"]
+    assert seen["cfg"]["mcp"]["tgw-context"]["command"] == [str(harness_session._CONTEXT_MCP)]
+
+
 def test_executor_bin_from_job_sets_the_env(tmp_path, monkeypatch):
     monkeypatch.delenv("TGW_CLAUDE_BIN", raising=False)
     monkeypatch.delenv("TGW_CODEX_BIN", raising=False)
