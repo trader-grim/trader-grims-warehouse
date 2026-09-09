@@ -252,6 +252,12 @@ def main() -> int:
             print("refusing --write: run as root for a complete inventory", file=sys.stderr)
             return 1
         CANONICAL.write_text(text)
+        # group-writable: written as root, but lives in the tgw-coders shared
+        # tree — a 0644 file trips `tgw doctor` access.unix-group.
+        try:
+            os.chmod(CANONICAL, 0o664)
+        except OSError:
+            pass
         print(f"wrote {CANONICAL}")
     else:
         sys.stdout.write(text)
