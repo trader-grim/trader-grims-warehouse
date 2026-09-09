@@ -1,0 +1,31 @@
+# TGW dev-box developer access — tgw-lib only.
+#
+# The interactive development session on tgw-lib gets the access a real
+# developer has: unrestricted, passwordless. The narrow per-purpose grants
+# that preceded this ("least privilege" applied to a single-tenant dev box)
+# blinded routine diagnosis -- reading /etc/sudoers.d, /var/spool/cron, other
+# homes, pg_ident.conf, /proc/<pid>/environ, and db user-scope units all
+# stalled on "run it as root". That is backwards for a dev box.
+#
+# Boundaries this deliberately does NOT draw -- they belong to the hardening
+# pass, done once the coding workflow works, and on tgw-prod, not here:
+#   identity separation / credential split, sudoers drift checks (access.*),
+#   the tgw-root-effect break-glass spine, pg_ident peer-auth as a gate.
+# See memory: roles-are-build-securing-is-later.
+#
+# `claude` is the dev seat today; when the hardening pass makes the interactive
+# session `tgw-triage`, this grant moves with it (or is scoped down then).
+#
+# Install (root, tgw-lib):
+#   visudo -cf config/environment/sudoers.d/claude-dev
+#   install -m 0440 -o root -g root config/environment/sudoers.d/claude-dev /etc/sudoers.d/claude-dev
+#
+# Now redundant for `claude` (this one grant covers them) -- remove at leisure:
+#   /etc/sudoers.d/tgw-flake-git  tgw-git-push  tgw-source-git  tgw-plan-git
+#   /etc/sudoers.d/tgw-recovery   (+ `groupdel tgw-recovery` -- Mordac residue)
+#   /etc/sudoers.d/tgw-operators is also redundant for claude, but `db` is in
+#     that group too -- leave it, or give `db` the same NOPASSWD:ALL and drop it.
+# KEEP /etc/sudoers.d/tgw-harness -- the orchestrator runs as tgw-harness and
+#   needs it; that is the workflow, not developer visibility.
+
+claude ALL=(ALL) NOPASSWD: ALL
