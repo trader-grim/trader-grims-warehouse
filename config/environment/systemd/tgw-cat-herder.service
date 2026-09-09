@@ -1,0 +1,34 @@
+[Unit]
+# cat_herder — the continual-harness orchestrator as a standing daemon
+# (LEAF-11-1 residual / Todo 2003). Dequeues coding jobs from the shared
+# queue_jobs table (queue_name='coding') and runs each through
+# harness_cli.dispatch, one at a time. The queue lease + harness_ledger are the
+# only durable state, so a restart resumes cleanly.
+Description=TGW cat_herder — autonomous continual-harness coding loop (Todo 2003)
+After=postgresql.service network-online.target
+Wants=postgresql.service network-online.target
+
+[Service]
+Type=simple
+# Runs as the sanctioned ref publisher (tgw.main_ref_guard._PUBLISHER_IDENTITIES);
+# it self-publishes the fast-forward and sudo's to tgw-coder for the confined
+# implement/review sessions (see /etc/sudoers.d/tgw-harness). NOT sandboxed with
+# NoNewPrivileges — that sudo hop is the designed path.
+User=tgw-harness
+Group=tgw-harness
+SupplementaryGroups=tgw-coders
+WorkingDirectory=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.development.cat_herder \
+    --config /opt/TGW/tgw-lib/config/tgw-coding-local.json
+Restart=on-failure
+RestartSec=10
+Nice=10
+# SIGTERM asks the herder to finish the job in flight, then exit. A job that
+# outlives this is SIGKILLed; its lease then expires and recover_expired_jobs()
+# requeues it on the next herder — no work is lost.
+KillSignal=SIGTERM
+TimeoutStopSec=900
+
+[Install]
+WantedBy=multi-user.target

@@ -76,6 +76,32 @@ def tgw_coding_start(todo_id: int | str, source_commit: str = "") -> str:
 
 
 @mcp.tool()
+def tgw_coding_enqueue(todo_id: int | str, message: str = "", executor: str = "",
+                       max_rounds: int = 0) -> str:
+    """Put one Todo on the coding queue for the ``cat_herder`` daemon to run.
+
+    Returns immediately (unlike ``tgw_coding_start``): the daemon dispatches it
+    autonomously. Idempotent per Todo. Use this to hand coding work off and move
+    on to planning/executive work rather than blocking on each dispatch.
+    """
+    return _result(
+        "enqueue",
+        coding_cli.enqueue,
+        todo_id,
+        config_path=_config_path(),
+        message=message or None,
+        executor=executor or None,
+        max_rounds=max_rounds or None,
+    )
+
+
+@mcp.tool()
+def tgw_coding_queue() -> str:
+    """Return the coding queue: state counts and the most recent jobs."""
+    return _result("queue", coding_cli.queue_status, config_path=_config_path())
+
+
+@mcp.tool()
 def tgw_coding_resume(todo_id: int, source_commit: str = "") -> str:
     """Resume one Todo from its durable ledger cursor."""
 

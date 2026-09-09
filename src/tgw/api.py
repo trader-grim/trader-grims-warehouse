@@ -1078,11 +1078,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next / --nextloop (e.g. claude, gemini, admin, tigwa)")
 
     p = sub.add_parser("coding", help="control the local tgw-lib coding workflow")
-    p.add_argument("coding_op", choices=["start", "status", "log", "stop", "access-status"])
-    p.add_argument("request_id", nargs="?", help="Todo ID for start/status; durable job ID for log/stop")
+    p.add_argument("coding_op",
+                   choices=["start", "enqueue", "queue", "status", "log", "stop", "access-status"])
+    p.add_argument("request_id", nargs="?", help="Todo ID for start/enqueue/status; durable job ID for log/stop")
     p.add_argument("--todo-id", type=int)
     p.add_argument("--object-generation")
     p.add_argument("--source-commit", help="exact lowercase 40-hex commit in the registered repository")
+    p.add_argument("--message", help="enqueue/start: commit subject for the accepted task")
+    p.add_argument("--executor", help="enqueue/start: ordered executor preference (e.g. claude,codex)")
+    p.add_argument("--max-rounds", type=int, dest="max_rounds", help="enqueue/start: remediation round budget")
+    p.add_argument("--limit", type=int, help="queue: max recent jobs to list")
     p.add_argument("--endpoint", help="explicit endpoint override")
     p.add_argument("--api-key", help="explicit credential override")
 
@@ -5808,8 +5813,8 @@ def main() -> int:
 
         elif args.op == "coding":
             from tgw.coding_cli import run as run_coding
-            if args.coding_op == "start" and not (args.todo_id or args.request_id):
-                parser.error("coding start requires TODO_ID")
+            if args.coding_op in {"start", "enqueue"} and not (args.todo_id or args.request_id):
+                parser.error(f"coding {args.coding_op} requires TODO_ID")
             if args.coding_op in {"log", "stop"} and not args.request_id:
                 parser.error(f"coding {args.coding_op} requires REQUEST_ID")
             return run_coding(args)

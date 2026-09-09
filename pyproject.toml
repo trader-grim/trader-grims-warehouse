@@ -119,6 +119,7 @@ tgw-coding-provision-worker   = "tgw.coding_provision_worker:main"
 tgw-harness-implement-session  = "tgw.development.harness_session:implement_main"
 tgw-harness-review-session     = "tgw.development.harness_session:review_main"
 tgw-harness-run                = "tgw.development.harness_cli:main"
+tgw-cat-herder                 = "tgw.development.cat_herder:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

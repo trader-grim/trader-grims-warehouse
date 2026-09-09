@@ -187,6 +187,67 @@ def start(
     }
 
 
+def enqueue(
+    todo_id: int | str,
+    *,
+    config_path: Path | str = DEFAULT_CONFIG,
+    message: str | None = None,
+    executor: str | None = None,
+    max_rounds: int | None = None,
+) -> dict[str, Any]:
+    """Put one Todo on the coding queue for the ``cat_herder`` daemon to run
+    (Todo 2003). Unlike ``start`` this returns immediately — the daemon dispatches
+    it. Idempotent per Todo."""
+    identifier = _todo_id(todo_id)
+    config = _initialize(config_path)
+    item = todo.todo_get(identifier)
+    if item is None:
+        raise CodingCLIError(f"Todo {identifier} does not exist locally")
+    if item.get("done_at") is not None:
+        raise CodingCLIError(f"Todo {identifier} is already complete")
+    body = str(item.get("body") or "").strip()
+    if not body:
+        raise CodingCLIError(f"Todo {identifier} has no body to implement")
+
+    from tgw.development import harness_queue
+
+    harness_queue.init(config["postgres_dsn"])
+    outcome = harness_queue.enqueue(
+        identifier,
+        message or _commit_subject(identifier, body),
+        executor_preference=(tuple(e.strip() for e in executor.split(",") if e.strip())
+                             if executor else ()),
+        max_rounds=max_rounds,
+    )
+    return {
+        "schema": "tgw-local-coding-enqueue/v1",
+        "ok": True,
+        "todo_id": identifier,
+        "job_id": outcome["job_id"],
+        "created": outcome["created"],
+        "state": outcome["state"],
+        "note": ("queued for cat_herder" if outcome["created"]
+                 else "a live job for this Todo already exists"),
+    }
+
+
+def queue_status(*, config_path: Path | str = DEFAULT_CONFIG, limit: int = 20) -> dict[str, Any]:
+    """State counts and recent jobs on the coding queue (Todo 2003)."""
+    config = _initialize(config_path)
+    from tgw.development import harness_queue
+
+    harness_queue.init(config["postgres_dsn"])
+    snap = harness_queue.snapshot(limit=limit)
+    return {
+        "schema": "tgw-local-coding-queue/v1",
+        "ok": True,
+        "database": config["postgres_dsn"],
+        "queue": snap["queue"],
+        "counts": snap["counts"],
+        "jobs": snap["jobs"],
+    }
+
+
 def resume(
     todo_id: int | str,
     *,
@@ -348,6 +409,17 @@ def run(args: argparse.Namespace) -> int:
                 message=getattr(args, "message", None),
                 executor=getattr(args, "executor", None),
             )
+        elif args.coding_op == "enqueue":
+            result = enqueue(
+                _todo_id(target or getattr(args, "todo_id", None)),
+                config_path=config_path,
+                message=getattr(args, "message", None),
+                executor=getattr(args, "executor", None),
+                max_rounds=getattr(args, "max_rounds", None),
+            )
+        elif args.coding_op == "queue":
+            result = queue_status(config_path=config_path,
+                                  limit=int(getattr(args, "limit", None) or 20))
         elif args.coding_op == "resume":
             result = resume(
                 _todo_id(target),
@@ -404,6 +476,17 @@ def parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--message", help="commit subject for the accepted task (default: from the Todo)")
     start_parser.add_argument("--executor", help="ordered executor preference (e.g. claude,codex or stub); "
                               "empty = model selector / default chain")
+
+    enqueue_parser = commands.add_parser(
+        "enqueue", help="put one Todo on the coding queue for the cat_herder daemon")
+    enqueue_parser.add_argument("coding_target", metavar="TODO_ID")
+    enqueue_parser.add_argument("--message", help="commit subject (default: from the Todo)")
+    enqueue_parser.add_argument("--executor", help="ordered executor preference (e.g. claude,codex)")
+    enqueue_parser.add_argument("--max-rounds", type=int, dest="max_rounds")
+
+    queue_parser = commands.add_parser(
+        "queue", help="show the coding queue (state counts + recent jobs)")
+    queue_parser.add_argument("--limit", type=int, default=20)
 
     resume_parser = commands.add_parser("resume", help="resume one Todo from its ledger cursor")
     resume_parser.add_argument("coding_target", metavar="TODO_ID")

@@ -110,6 +110,30 @@ def test_read_and_control_tools_share_cli_functions(monkeypatch, tmp_path):
     ]
 
 
+def test_enqueue_and_queue_tools_call_the_cli(monkeypatch, tmp_path):
+    config = tmp_path / "coding.json"
+    monkeypatch.setenv("TGW_CODING_CONFIG", str(config))
+    calls = []
+    monkeypatch.setattr(
+        coding_mcp_server.coding_cli, "enqueue",
+        lambda todo_id, *, config_path, message, executor, max_rounds: calls.append(
+            ("enqueue", todo_id, message, executor, max_rounds))
+        or {"ok": True, "todo_id": todo_id, "job_id": "j1", "created": True},
+    )
+    monkeypatch.setattr(
+        coding_mcp_server.coding_cli, "queue_status",
+        lambda *, config_path: calls.append(("queue", config_path))
+        or {"ok": True, "queue": "coding", "counts": {}},
+    )
+
+    assert json.loads(coding_mcp_server.tgw_coding_enqueue(1954, "do 11.6"))["job_id"] == "j1"
+    assert json.loads(coding_mcp_server.tgw_coding_queue())["queue"] == "coding"
+    assert calls == [
+        ("enqueue", 1954, "do 11.6", None, None),
+        ("queue", config),
+    ]
+
+
 def test_errors_are_explicit_and_do_not_become_authority_gates(monkeypatch):
     monkeypatch.setattr(
         coding_mcp_server.coding_cli,
