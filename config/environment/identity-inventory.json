@@ -1,0 +1,1872 @@
+{
+  "complete": true,
+  "generated": "2026-09-09T02:17:00Z",
+  "generated_as": "root",
+  "host": "tgw-lib",
+  "schema": "tgw-identity-inventory/v1",
+  "ssh_aliases_global": [
+    {
+      "host": "*",
+      "source": "/etc/ssh/ssh_config"
+    },
+    {
+      "host": "github-tgw-app",
+      "hostname": "github.com",
+      "identityagent": "/run/tgw-github-agent/agent.sock",
+      "identityfile": "/etc/ssh/tgw_github_app.pub",
+      "source": "/etc/ssh/ssh_config.d/10-tgw-github-app.conf"
+    },
+    {
+      "host": ".host machine/.host",
+      "source": "/etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf"
+    },
+    {
+      "host": "unix/* vsock/* machine/*",
+      "source": "/etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf"
+    }
+  ],
+  "users": {
+    "claude": {
+      "credential_files": {
+        "claude_login": true,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 1006,
+      "groups": [
+        "claude",
+        "nix-users",
+        "tgw-access",
+        "tgw-coders",
+        "tgw-operators",
+        "tgw-recovery"
+      ],
+      "home": "/home/claude",
+      "shell": "/bin/bash",
+      "ssh_config_hosts": [],
+      "ssh_keys": [],
+      "sudo": [
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/bin/git -C /opt/TGW/tgw-lib/src/trader-grims-warehouse update-ref refs/heads/main *",
+          "nopasswd": true,
+          "runas": "tgw-harness"
+        },
+        {
+          "command": "/opt/TGW/.venvs/controller/bin/python3 -m tgw.development.harness_cli *",
+          "nopasswd": true,
+          "runas": "tgw-harness"
+        },
+        {
+          "command": "/usr/bin/git -C /opt/TGW/tgw-lib/src/trader-grims-warehouse *",
+          "nopasswd": true,
+          "runas": "tgw-harness"
+        },
+        {
+          "command": "/usr/bin/systemctl start tgw-*, /usr/bin/systemctl stop tgw-*, /usr/bin/systemctl restart tgw-*, /usr/bin/systemctl reload tgw-*, /usr/bin/systemctl enable tgw-*, /usr/bin/systemctl disable tgw-*, /usr/bin/systemctl mask tgw-*, /usr/bin/systemctl unmask tgw-*, /usr/bin/systemctl reset-failed tgw-*, /usr/bin/systemctl daemon-reload, /usr/bin/systemctl status tgw-*, /usr/bin/systemctl show tgw-*, /usr/bin/systemctl is-active tgw-*, /usr/bin/systemctl is-enabled tgw-*, /usr/bin/systemctl is-failed tgw-*, /usr/bin/systemctl cat tgw-*, /usr/bin/systemctl list-timers tgw-*, /usr/bin/journalctl -u tgw-*, /usr/bin/journalctl --unit tgw-*, /usr/bin/journalctl --unit\\=tgw-*, /usr/local/sbin/tgw-coding-bootstrap, /usr/local/sbin/tgw-coding-bootstrap *",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "ALL",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-coding-bootstrap",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        }
+      ],
+      "systemd_units": [],
+      "uid": 1006
+    },
+    "codex": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": true,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 1004,
+      "groups": [
+        "codex",
+        "nix-users",
+        "tgw-access",
+        "tgw-coders",
+        "tgw-release"
+      ],
+      "home": "/home/codex",
+      "shell": "/bin/bash",
+      "ssh_config_hosts": [
+        {
+          "host": "tgw-lib",
+          "hostname": "100.68.223.70",
+          "identityfile": "~/.ssh/id_ed25519",
+          "user": "codex"
+        },
+        {
+          "host": "tgw-prod",
+          "hostname": "100.107.99.66",
+          "identityfile": "~/.ssh/id_ed25519",
+          "user": "codex"
+        },
+        {
+          "host": "catnanny",
+          "hostname": "100.110.102.122",
+          "identityfile": "~/.ssh/id_ed25519",
+          "user": "codex"
+        }
+      ],
+      "ssh_keys": [
+        {
+          "bits": "256",
+          "comment": "codex@tgw-lib",
+          "fingerprint": "SHA256:01PZ9Vo/6G5PpISm7KXkdq/Pq8QMG3EWEKHB6VIYfAw",
+          "path": "~/.ssh/id_ed25519",
+          "type": "ED25519"
+        },
+        {
+          "bits": "256",
+          "comment": "100.68.223.70",
+          "fingerprint": "SHA256:Zud8pacgue7AN3ZZwMEMgDmIdGknnJE3SGCZRJqx/wM",
+          "path": "~/.ssh/known_hosts.old",
+          "type": "ECDSA"
+        },
+        {
+          "bits": "256",
+          "comment": "tgw-plan@tgw-lib",
+          "fingerprint": "SHA256:Hqz+xzkaRSeaGcHJa6rxdpA6Y0eG+zYIVFu3I+8h2wk",
+          "path": "~/.ssh/tgw-plan_github_deploy_ed25519",
+          "type": "ED25519"
+        }
+      ],
+      "sudo": [
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        }
+      ],
+      "systemd_units": [],
+      "uid": 1004
+    },
+    "db": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 1000,
+      "groups": [
+        "audio",
+        "cdrom",
+        "claude",
+        "codex",
+        "db",
+        "deepseek",
+        "dialout",
+        "dip",
+        "floppy",
+        "input",
+        "lp",
+        "lpadmin",
+        "netdev",
+        "nix-users",
+        "plugdev",
+        "sambashare",
+        "scanner",
+        "sudo",
+        "tgw-access",
+        "tgw-coders",
+        "tgw-operators",
+        "tgw-recovery",
+        "tgw-release",
+        "users",
+        "vboxsf",
+        "video"
+      ],
+      "home": "/home/db",
+      "shell": "/usr/bin/bash",
+      "ssh_config_hosts": [
+        {
+          "host": "github.com",
+          "hostname": "github.com",
+          "identityfile": "~/.ssh/id_ed25519-github",
+          "user": "git"
+        },
+        {
+          "host": "tgw-prod tgw-prod.local 192.168.60.100",
+          "hostname": "192.168.60.100",
+          "identityfile": "~/.ssh/id_ed25519_new",
+          "user": "db"
+        }
+      ],
+      "ssh_keys": [
+        {
+          "bits": "256",
+          "comment": "trader-grim@a1131",
+          "fingerprint": "SHA256:+q+FqQeKC4N1DnjKGi9LsEHrc6tLomVFNembbaBI5HE",
+          "path": "~/.ssh/id_ed25519-github",
+          "type": "ED25519"
+        },
+        {
+          "bits": "256",
+          "comment": "codex-maintenance-20260814",
+          "fingerprint": "SHA256:3Xx4nMexbZtffyhyYo35Qbt7w7e5kAf8HLsnARphBao",
+          "path": "~/.ssh/id_ed25519_codex_maintenance_20260814",
+          "type": "ED25519"
+        },
+        {
+          "bits": "256",
+          "comment": "db@tgw-prod-2026",
+          "fingerprint": "SHA256:RXrXlex6oC8zd5PgvduZvxrtjH+KajxTnMGAkU/TxSs",
+          "path": "~/.ssh/id_ed25519_new",
+          "type": "ED25519"
+        },
+        {
+          "bits": "256",
+          "comment": "192.168.60.100",
+          "fingerprint": "SHA256:rlpJVoxojT0/p+JV94w5JZ4uuY/5Wnp9DRQQKdZemhE",
+          "path": "~/.ssh/known_hosts.old",
+          "type": "ED25519"
+        }
+      ],
+      "sudo": [
+        {
+          "command": "ALL",
+          "nopasswd": false,
+          "runas": "ALL : ALL"
+        },
+        {
+          "command": "/sbin/halt",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/sbin/poweroff",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/sbin/reboot",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/sbin/blkid \"\"",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/sbin/fdisk.distrib",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/bin/ceni",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/bin/persist-config",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/bin/persist-save",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/sbin/minstall",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/bin/chvt",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/sbin/pm-hibernate",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/sbin/pm-suspend",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/lib/mx-tweak/backlight-brightness",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/lib/mx-updater/actions/updater_reload_action",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/bin/systemctl start tgw-*, /usr/bin/systemctl stop tgw-*, /usr/bin/systemctl restart tgw-*, /usr/bin/systemctl reload tgw-*, /usr/bin/systemctl enable tgw-*, /usr/bin/systemctl disable tgw-*, /usr/bin/systemctl mask tgw-*, /usr/bin/systemctl unmask tgw-*, /usr/bin/systemctl reset-failed tgw-*, /usr/bin/systemctl daemon-reload, /usr/bin/systemctl status tgw-*, /usr/bin/systemctl show tgw-*, /usr/bin/systemctl is-active tgw-*, /usr/bin/systemctl is-enabled tgw-*, /usr/bin/systemctl is-failed tgw-*, /usr/bin/systemctl cat tgw-*, /usr/bin/systemctl list-timers tgw-*, /usr/bin/journalctl -u tgw-*, /usr/bin/journalctl --unit tgw-*, /usr/bin/journalctl --unit\\=tgw-*, /usr/local/sbin/tgw-coding-bootstrap, /usr/local/sbin/tgw-coding-bootstrap *",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "ALL",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-coding-bootstrap",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        }
+      ],
+      "systemd_units": [
+        "tgw-doctor-auto-repair.service",
+        "tgw-plan-render-local.service"
+      ],
+      "uid": 1000
+    },
+    "deepseek": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 1005,
+      "groups": [
+        "deepseek",
+        "nix-users",
+        "tgw-access",
+        "tgw-coders",
+        "tgw-recovery",
+        "tgw-release"
+      ],
+      "home": "/home/deepseek",
+      "shell": "/bin/bash",
+      "ssh_config_hosts": [],
+      "ssh_keys": [],
+      "sudo": [
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "ALL",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-coding-bootstrap",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        }
+      ],
+      "systemd_units": [],
+      "uid": 1005
+    },
+    "dnsmasq": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 65534,
+      "groups": [
+        "nogroup"
+      ],
+      "home": "/var/lib/misc",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/var/lib/misc/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 999
+    },
+    "goose": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 1008,
+      "groups": [
+        "goose"
+      ],
+      "home": "/home/goose",
+      "shell": "/bin/bash",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/home/goose/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 1008
+    },
+    "hermaroid": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 1002,
+      "groups": [
+        "hermaroid",
+        "nix-users",
+        "tgw-access",
+        "tgw-agent-exchange",
+        "tgw-coders"
+      ],
+      "home": "/home/hermaroid",
+      "shell": "/bin/bash",
+      "ssh_config_hosts": [],
+      "ssh_keys": [],
+      "sudo": [
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        }
+      ],
+      "systemd_units": [],
+      "uid": 1002
+    },
+    "hermes": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 1009,
+      "groups": [
+        "hermes",
+        "nix-users",
+        "tgw-access",
+        "tgw-coders",
+        "tgw-recovery"
+      ],
+      "home": "/home/hermes",
+      "shell": "/bin/bash",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/home/hermes/.ssh'"
+      },
+      "sudo": [
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "ALL",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-coding-bootstrap",
+          "nopasswd": true,
+          "runas": "root"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        }
+      ],
+      "systemd_units": [],
+      "uid": 1009
+    },
+    "messagebus": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 991,
+      "groups": [
+        "messagebus"
+      ],
+      "home": "/nonexistent",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/nonexistent/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [
+        "dbus.service"
+      ],
+      "uid": 991
+    },
+    "nixbld1": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 980,
+      "groups": [
+        "nixbld"
+      ],
+      "home": "/var/empty",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/var/empty/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 995
+    },
+    "nixbld10": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 980,
+      "groups": [
+        "nixbld"
+      ],
+      "home": "/var/empty",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/var/empty/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 982
+    },
+    "nixbld2": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 980,
+      "groups": [
+        "nixbld"
+      ],
+      "home": "/var/empty",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/var/empty/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 994
+    },
+    "nixbld3": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 980,
+      "groups": [
+        "nixbld"
+      ],
+      "home": "/var/empty",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/var/empty/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 993
+    },
+    "nixbld4": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 980,
+      "groups": [
+        "nixbld"
+      ],
+      "home": "/var/empty",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/var/empty/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 992
+    },
+    "nixbld5": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 980,
+      "groups": [
+        "nixbld"
+      ],
+      "home": "/var/empty",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/var/empty/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 990
+    },
+    "nixbld6": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 980,
+      "groups": [
+        "nixbld"
+      ],
+      "home": "/var/empty",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/var/empty/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 988
+    },
+    "nixbld7": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 980,
+      "groups": [
+        "nixbld"
+      ],
+      "home": "/var/empty",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/var/empty/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 986
+    },
+    "nixbld8": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 980,
+      "groups": [
+        "nixbld"
+      ],
+      "home": "/var/empty",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/var/empty/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 985
+    },
+    "nixbld9": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 980,
+      "groups": [
+        "nixbld"
+      ],
+      "home": "/var/empty",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/var/empty/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 983
+    },
+    "opencode": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 1007,
+      "groups": [
+        "nix-users",
+        "opencode",
+        "tgw-coders"
+      ],
+      "home": "/home/opencode",
+      "shell": "/bin/bash",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/home/opencode/.ssh'"
+      },
+      "sudo": [
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        }
+      ],
+      "systemd_units": [],
+      "uid": 1007
+    },
+    "polkitd": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 989,
+      "groups": [
+        "polkitd"
+      ],
+      "home": "/",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [
+        "polkit.service"
+      ],
+      "uid": 989
+    },
+    "prime": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 1010,
+      "groups": [
+        "nix-users",
+        "prime",
+        "tgw-coders"
+      ],
+      "home": "/home/prime",
+      "shell": "/bin/bash",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/home/prime/.ssh'"
+      },
+      "sudo": [
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        }
+      ],
+      "systemd_units": [],
+      "uid": 1010
+    },
+    "root": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 0,
+      "groups": [
+        "root"
+      ],
+      "home": "/root",
+      "shell": "/bin/bash",
+      "ssh_config_hosts": [],
+      "ssh_keys": [
+        {
+          "bits": "256",
+          "comment": "|1|qbVTvH+gQlmUgqqXSClNH/DI92U=|OIWrfQH4OtLy25U8zfOAaGlHeOQ=",
+          "fingerprint": "SHA256:rlpJVoxojT0/p+JV94w5JZ4uuY/5Wnp9DRQQKdZemhE",
+          "path": "~/.ssh/known_hosts.old",
+          "type": "ED25519"
+        }
+      ],
+      "sudo": [
+        {
+          "command": "ALL",
+          "nopasswd": false,
+          "runas": "ALL : ALL"
+        }
+      ],
+      "systemd_units": [
+        "ModemManager.service",
+        "NetworkManager-wait-online.service",
+        "NetworkManager.service",
+        "accounts-daemon.service",
+        "acpi-fakekey.service",
+        "acpid.path",
+        "acpid.service",
+        "alsa-restore.service",
+        "alsa-state.service",
+        "anacron.service",
+        "anacron.timer",
+        "apparmor.service",
+        "apt-daily-upgrade.service",
+        "apt-daily-upgrade.timer",
+        "apt-daily.service",
+        "apt-daily.timer",
+        "auditd.service",
+        "auth-rpcgss-module.service",
+        "avahi-daemon.service",
+        "blk-availability.service",
+        "blueman-mechanism.service",
+        "bluetooth.service",
+        "bolt.service",
+        "chrony-wait.service",
+        "chrony.service",
+        "chronyd-restricted.service",
+        "cloud-init-local.service",
+        "connman.service",
+        "console-screen.service",
+        "console-setup.service",
+        "cron.service",
+        "cups-browsed.service",
+        "cups.path",
+        "cups.service",
+        "dm-event.service",
+        "docker.service",
+        "dpkg-db-backup.service",
+        "dpkg-db-backup.timer",
+        "dracut-shutdown.service",
+        "e2scrub_all.service",
+        "e2scrub_all.timer",
+        "e2scrub_reap.service",
+        "elogind.service",
+        "emergency.service",
+        "etckeeper.service",
+        "etckeeper.timer",
+        "fcoe.service",
+        "fsidd.service",
+        "fstrim.service",
+        "fstrim.timer",
+        "getty-static.service",
+        "getty@tty1.service",
+        "grub-common.service",
+        "gssproxy.service",
+        "hardinfo2.service",
+        "hwclock-mx.service",
+        "ifupdown-pre.service",
+        "ifupdown-wait-online.service",
+        "initrd-cleanup.service",
+        "initrd-parse-etc.service",
+        "initrd-switch-root.service",
+        "initrd-udevadm-cleanup-db.service",
+        "iscsi-shutdown.service",
+        "iscsi.service",
+        "iscsid.service",
+        "kbd.service",
+        "keyboard-setup.service",
+        "kmod-static-nodes.service",
+        "ldconfig.service",
+        "lightdm.service",
+        "live-broadcomstartup.service",
+        "live-clock12or24.service",
+        "live-setup.service",
+        "live-static-shutdown.service",
+        "live-swap.service",
+        "live-usb-save.service",
+        "lm-sensors.service",
+        "logrotate.service",
+        "logrotate.timer",
+        "lvm2-lvmpolld.service",
+        "lvm2-monitor.service",
+        "man-db.timer",
+        "mbpfan.service",
+        "mkinitcpio-generate-shutdown-ramfs.service",
+        "modprobe@configfs.service",
+        "modprobe@drm.service",
+        "modprobe@efi_pstore.service",
+        "modprobe@fuse.service",
+        "modprobe@nvme_fabrics.service",
+        "network-manager.service",
+        "networking.service",
+        "nfs-blkmap.service",
+        "nfs-idmapd.service",
+        "nfs-mountd.service",
+        "nfs-server.service",
+        "nfs-utils.service",
+        "nfsdcld.service",
+        "nftables.service",
+        "nix-daemon.service",
+        "nmbd.service",
+        "nslcd.service",
+        "ntpsec-rotate-stats.service",
+        "ntpsec-rotate-stats.timer",
+        "ntpsec-systemd-netif.path",
+        "ntpsec-systemd-netif.service",
+        "ntpsec-wait.service",
+        "ntpsec.service",
+        "nvmefc-boot-connections.service",
+        "nvmf-autoconnect.service",
+        "open-vm-tools.service",
+        "openvpn.service",
+        "persist-autosave.service",
+        "plocate-updatedb.service",
+        "plocate-updatedb.timer",
+        "plymouth-halt.service",
+        "plymouth-kexec.service",
+        "plymouth-poweroff.service",
+        "plymouth-quit-wait.service",
+        "plymouth-quit.service",
+        "plymouth-read-write.service",
+        "plymouth-reboot.service",
+        "plymouth-start.service",
+        "plymouth-switch-root-initramfs.service",
+        "plymouth-switch-root.service",
+        "postgresql.service",
+        "postgresql@17-main.service",
+        "powertop.service",
+        "rbdmap.service",
+        "rc-local.service",
+        "rescue.service",
+        "rpc-gssd.service",
+        "rpc-statd-notify.service",
+        "rpc-statd.service",
+        "rpc-svcgssd.service",
+        "rpcbind.service",
+        "rsync.service",
+        "rsyslog.service",
+        "smartmontools.service",
+        "smbd.service",
+        "ssh.service",
+        "sshd-keygen.service",
+        "sshd@sshd-keygen.service",
+        "systemd-ask-password-console.path",
+        "systemd-ask-password-console.service",
+        "systemd-ask-password-plymouth.path",
+        "systemd-ask-password-plymouth.service",
+        "systemd-ask-password-wall.path",
+        "systemd-ask-password-wall.service",
+        "systemd-battery-check.service",
+        "systemd-binfmt.service",
+        "systemd-bsod.service",
+        "systemd-confext.service",
+        "systemd-firstboot.service",
+        "systemd-fsck-root.service",
+        "systemd-fsck@dev-disk-by\\x2duuid-67bc30ab\\x2dc31e\\x2d4f64\\x2db511\\x2d0b991d2ef173.service",
+        "systemd-halt.service",
+        "systemd-hibernate-clear.service",
+        "systemd-hibernate-resume.service",
+        "systemd-hibernate.service",
+        "systemd-hostnamed.service",
+        "systemd-hwdb-update.service",
+        "systemd-hybrid-sleep.service",
+        "systemd-initctl.service",
+        "systemd-journal-catalog-update.service",
+        "systemd-journal-flush.service",
+        "systemd-journald.service",
+        "systemd-kexec.service",
+        "systemd-logind.service",
+        "systemd-machine-id-commit.service",
+        "systemd-modules-load.service",
+        "systemd-network-generator.service",
+        "systemd-oomd.service",
+        "systemd-pcrlock-file-system.service",
+        "systemd-pcrlock-firmware-code.service",
+        "systemd-pcrlock-firmware-config.service",
+        "systemd-pcrlock-machine-id.service",
+        "systemd-pcrlock-make-policy.service",
+        "systemd-pcrlock-secureboot-authority.service",
+        "systemd-pcrlock-secureboot-policy.service",
+        "systemd-pcrmachine.service",
+        "systemd-pcrphase-initrd.service",
+        "systemd-pcrphase-sysinit.service",
+        "systemd-pcrphase.service",
+        "systemd-poweroff.service",
+        "systemd-pstore.service",
+        "systemd-quotacheck-root.service",
+        "systemd-quotacheck.service",
+        "systemd-random-seed.service",
+        "systemd-reboot.service",
+        "systemd-remount-fs.service",
+        "systemd-resolved.service",
+        "systemd-soft-reboot.service",
+        "systemd-suspend-then-hibernate.service",
+        "systemd-suspend.service",
+        "systemd-sysctl.service",
+        "systemd-sysext.service",
+        "systemd-sysusers.service",
+        "systemd-timesyncd.service",
+        "systemd-tmpfiles-clean.service",
+        "systemd-tmpfiles-clean.timer",
+        "systemd-tmpfiles-setup-dev-early.service",
+        "systemd-tmpfiles-setup-dev.service",
+        "systemd-tmpfiles-setup.service",
+        "systemd-tpm2-setup-early.service",
+        "systemd-tpm2-setup.service",
+        "systemd-udev-load-credentials.service",
+        "systemd-udev-settle.service",
+        "systemd-udev-trigger.service",
+        "systemd-udevd.service",
+        "systemd-update-done.service",
+        "systemd-user-sessions.service",
+        "systemd-vconsole-setup.service",
+        "tailscaled.service",
+        "tgw-context-publish.path",
+        "tgw-context-publish.service",
+        "tgw-context-snapshot-promote.path",
+        "tgw-context-snapshot-promote.service",
+        "tgw-doctor-auto-repair.timer",
+        "tgw-tmp-inode-alarm.service",
+        "tgw-tmp-inode-alarm.timer",
+        "thermald.service",
+        "tlp.service",
+        "udev.service",
+        "udisks2.service",
+        "ufw.service",
+        "unattended-upgrades.service",
+        "upower.service",
+        "user-runtime-dir@0.service",
+        "user-runtime-dir@1000.service",
+        "user-runtime-dir@1001.service",
+        "user-runtime-dir@1006.service",
+        "vgauth.service",
+        "virtualbox-guest-utils.service",
+        "winbind.service",
+        "wpa_supplicant.service",
+        "xfs_scrub_all.service",
+        "xfs_scrub_all.timer",
+        "zramswap.service"
+      ],
+      "uid": 0
+    },
+    "sshd": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 65534,
+      "groups": [
+        "nogroup"
+      ],
+      "home": "/run/sshd",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/run/sshd/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 987
+    },
+    "systemd-network": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 998,
+      "groups": [
+        "systemd-network"
+      ],
+      "home": "/",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [
+        "systemd-networkd-persistent-storage.service",
+        "systemd-networkd.service"
+      ],
+      "uid": 998
+    },
+    "tgw": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 1003,
+      "groups": [
+        "tgw"
+      ],
+      "home": "/home/tgw",
+      "shell": "/bin/bash",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/home/tgw/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [],
+      "uid": 1003
+    },
+    "tgw-coder": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 977,
+      "groups": [
+        "tgw-coder",
+        "tgw-coders"
+      ],
+      "home": "/home/tgw-coder",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/home/tgw-coder/.ssh'"
+      },
+      "sudo": [
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        }
+      ],
+      "systemd_units": [],
+      "uid": 980
+    },
+    "tgw-git": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 982,
+      "groups": [
+        "tgw-coders",
+        "tgw-git"
+      ],
+      "home": "/nonexistent",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/nonexistent/.ssh'"
+      },
+      "sudo": [
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        }
+      ],
+      "systemd_units": [],
+      "uid": 996
+    },
+    "tgw-harness": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 978,
+      "groups": [
+        "tgw-coders",
+        "tgw-harness"
+      ],
+      "home": "/home/tgw-harness",
+      "shell": "/bin/bash",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/home/tgw-harness/.ssh'"
+      },
+      "sudo": [
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/opt/TGW/.venvs/controller/bin/python3 -m tgw.development.harness_session *",
+          "nopasswd": true,
+          "runas": "tgw-coder"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        }
+      ],
+      "systemd_units": [],
+      "uid": 981
+    },
+    "tgw-release": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 985,
+      "groups": [
+        "tgw-coders",
+        "tgw-release"
+      ],
+      "home": "/var/lib/tgw-release",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [
+        {
+          "host": "github-tgw-source",
+          "hostname": "github.com",
+          "identityfile": "/var/lib/tgw-release/.ssh/trader-grims-warehouse_deploy_ed25519",
+          "user": "git"
+        }
+      ],
+      "ssh_keys": [
+        {
+          "bits": "256",
+          "comment": "github.com",
+          "fingerprint": "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU",
+          "path": "~/.ssh/known_hosts.old",
+          "type": "ED25519"
+        },
+        {
+          "bits": "256",
+          "comment": "tgw-lib:tgw-release:trader-grims-warehouse:2026-07-28",
+          "fingerprint": "SHA256:sQVAyzhrHt57a0dVSCKtraX5Nt81mnM4QgoDB1DzGMU",
+          "path": "~/.ssh/trader-grims-warehouse_deploy_ed25519",
+          "type": "ED25519"
+        }
+      ],
+      "sudo": [
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        }
+      ],
+      "systemd_units": [
+        "tgw-github-agent.service"
+      ],
+      "uid": 997
+    },
+    "tigwadev": {
+      "credential_files": {
+        "claude_login": true,
+        "codex_auth": true,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": true
+      },
+      "gid": 1001,
+      "groups": [
+        "db",
+        "nix-users",
+        "tgw-access",
+        "tgw-agent-exchange",
+        "tgw-coders",
+        "tgw-release",
+        "tigwadev"
+      ],
+      "home": "/home/tigwadev",
+      "shell": "/bin/bash",
+      "ssh_config_hosts": [],
+      "ssh_keys": [
+        {
+          "bits": "256",
+          "comment": "tigwadev@tgw-lib",
+          "fingerprint": "SHA256:iFXXL+pGBzfg/FK9m8/FYCQbEFn8mhN4hsKJwb524ws",
+          "path": "~/.ssh/authorized_keys.before-context-parity-20260821",
+          "type": "ED25519"
+        }
+      ],
+      "sudo": [
+        {
+          "command": "/usr/local/bin/tgw-flake-git status",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git fetch",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git dry-run-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/bin/tgw-flake-git publish-candidate",
+          "nopasswd": true,
+          "runas": "db"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-git-push",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git status",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git fetch",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git dry-run",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/bin/tgw-source-git publish",
+          "nopasswd": true,
+          "runas": "tgw-release"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-trace-session-start",
+          "nopasswd": true,
+          "runas": "tgw"
+        },
+        {
+          "command": "/usr/local/sbin/tgw-trace-session-end",
+          "nopasswd": true,
+          "runas": "root"
+        }
+      ],
+      "systemd_units": [],
+      "uid": 1001
+    },
+    "vaultwarden": {
+      "credential_files": {
+        "claude_login": false,
+        "codex_auth": false,
+        "gh_hosts": false,
+        "git_credentials": false,
+        "netrc": false
+      },
+      "gid": 984,
+      "groups": [
+        "vaultwarden"
+      ],
+      "home": "/var/lib/vaultwarden",
+      "shell": "/usr/sbin/nologin",
+      "ssh_config_hosts": [],
+      "ssh_keys": {
+        "unreadable": "[Errno 2] No such file or directory: '/var/lib/vaultwarden/.ssh'"
+      },
+      "sudo": [],
+      "systemd_units": [
+        "vaultwarden.service"
+      ],
+      "uid": 984
+    }
+  }
+}
