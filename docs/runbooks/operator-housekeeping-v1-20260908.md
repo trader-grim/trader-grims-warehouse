@@ -26,8 +26,8 @@ page is the answer.
 | command | means | you run it when |
 |---|---|---|
 | `sudo tgw-coding-bootstrap --commit <HEAD>` | hash-verified `tgw doctor check`, as root | you want the full health picture (the plain `tgw doctor check` skips root-only checks) |
-| `... --commit <HEAD> --repair context` | rebuild the Context snapshot from `main` | a session is getting **stale/wrong** Plan orientation AND the timer hasn't fixed it in ~15 min |
-| `... --repair context-launcher` | re-point the Context MCP process at the new snapshot | `context.launcher` FAILs right after a `--repair context` |
+| `... --commit <HEAD> --repair context` | rebuild the Context snapshot from `main` | **currently broken** — see note below; leave `context.*` FAILs alone |
+| `... --repair context-launcher` | re-point the Context MCP process at the new snapshot | as above |
 | `... --repair database` | apply the coding-DB roles/grants SQL | `check_database` FAILs (an agent added a table/role) |
 | `... --repair harness` | (re)create `tgw-harness` / `tgw-coder`, sudoers, run the canary | standing up a fresh host, or onboarding a new executor |
 | `... --repair unix-git-access` | re-lease every worktree (slow, ~9 min) | **only** the quiescence deadlock — `access.unix-group` FAIL that won't clear. This one can make things worse; ask an agent first. |
@@ -53,7 +53,12 @@ changes in the repo:
 ## NOT an emergency — do nothing
 
 - `TGW Context: SOURCE_AHEAD …` at session start — sessions read live source.
-- `context.snapshot: stale relative to canonical source` — the timer's job.
+- `context.snapshot` / `context.launcher` FAIL — **the repair path is itself
+  broken** as of 2026-09-08 (Todo 2011): `--repair context --commit <HEAD>`
+  demands a materialized release tree that LEAF-11-1.DELETE-APPARATUS removed
+  ("runtime selector lock is not initialized" — a misnamed FileNotFoundError),
+  and the auto-repair timer runs stale code pinned at an old commit. **This does
+  not block anything** — sessions read live source. Leave it for an agent.
 - `context.clients: RESTART_REQUIRED` — just start a fresh session.
 - GitHub mirror behind — `source.github-publish` WARN. The timer catches up.
 - A `WARN` of any kind — informational. Only `FAIL` with an `operator_action`

@@ -6838,8 +6838,10 @@ def check_main_ref_guard(paths: DoctorPaths) -> dict[str, Any]:
         detail,
         evidence=status,
         repair=(
-            "python3 -m tgw.main_ref_guard install --repo "
-            f"{paths.repository}"
+            "/opt/TGW/.venvs/controller/bin/python3 -m tgw.main_ref_guard "
+            f"install --repo {paths.repository}  "
+            "(then chmod 775 .git/hooks/reference-transaction; re-drifts on every "
+            "bootstrap — a persistent WARN here is benign)"
         ),
     )
 
