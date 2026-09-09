@@ -68,7 +68,13 @@ class Runners:
 
 def _rev(repository: Path, spec: str) -> str:
     result = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "--verify", spec],
+        # -c safe.directory: the coding repo is deliberately group-owned
+        # (tgw-coders, setgid) so several coder identities can drive it; a
+        # supervised run whose user is not the .git owner must still resolve
+        # refs. -c wins over the nulled GIT_CONFIG_GLOBAL/SYSTEM. Matches
+        # harness_git._git.
+        ["git", "-c", f"safe.directory={repository}",
+         "-C", str(repository), "rev-parse", "--verify", spec],
         check=False, text=True, capture_output=True, timeout=30,
         env={"GIT_OPTIONAL_LOCKS": "0", "PATH": "/usr/bin:/bin",
              "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
