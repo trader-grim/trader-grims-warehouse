@@ -51,7 +51,8 @@ _DONE_OUTCOMES = frozenset({"landed", "already_satisfied", "already_done"})
 
 class CatHerder:
     def __init__(self, config: dict[str, Any], *, poll_seconds: float | None = None,
-                 lease_seconds: int | None = None) -> None:
+                 lease_seconds: int | None = None, lock_key: str = _ADVISORY_LOCK_KEY) -> None:
+        self._lock_key = lock_key
         self._dsn: str = config["postgres_dsn"]
         coding = config.get("coding", {})
         self._repository = str(coding.get("repository_root", harness_cli._REPOSITORY))
@@ -75,7 +76,7 @@ class CatHerder:
         self._lock_conn = psycopg2.connect(self._dsn)
         self._lock_conn.autocommit = True
         with self._lock_conn.cursor() as cur:
-            cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (_ADVISORY_LOCK_KEY,))
+            cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (self._lock_key,))
             got = bool(cur.fetchone()[0])
         if not got:
             self._lock_conn.close()

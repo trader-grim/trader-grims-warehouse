@@ -61,11 +61,16 @@ def _new_id(got: list[int]) -> int:
     return tid
 
 
-def _herder() -> cat_herder.CatHerder:
+_LOCK_KEY = f"tgw-cat-herder-test-{uuid.uuid4()}"
+
+
+def _herder(lock_key: str = _LOCK_KEY) -> cat_herder.CatHerder:
+    # a per-run advisory-lock key so the tests never contend with a live
+    # tgw-cat-herder.service holding the real singleton lock.
     return cat_herder.CatHerder(
         {"postgres_dsn": DSN, "coding": {"repository_root": "/opt/TGW/tgw-lib/src/trader-grims-warehouse",
                                          "worktree_root": "/opt/TGW/var/worktrees"}},
-        poll_seconds=0.1, lease_seconds=60,
+        poll_seconds=0.1, lease_seconds=60, lock_key=lock_key,
     )
 
 

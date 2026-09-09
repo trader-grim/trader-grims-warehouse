@@ -325,7 +325,16 @@ def renew_cursor(
     *,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
 ) -> dict[str, Any]:
-    """Extend the caller's cursor lease. Raises LedgerLeaseError if not held."""
+    """Extend the caller's cursor lease.
+
+    The lease exists for mutual exclusion *between owners*, not as a
+    self-imposed deadline: as long as this owner+lease_id still matches the row
+    (i.e. no other session has ``acquire_cursor``-stolen a presumed-crashed
+    lease — a steal rewrites owner and lease_id), the renewal succeeds even if
+    the previous window lapsed. A single implement->test->review round can
+    legitimately outlast one window, and it must not lose its own cursor to the
+    clock. Raises LedgerLeaseError only once another owner holds it.
+    """
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
     _ensure_schema()
@@ -337,7 +346,6 @@ def renew_cursor(
                    SET lease_expires_at = now() + make_interval(secs => %s),
                        updated_at = now()
                  WHERE task_id = %s AND owner = %s AND lease_id = %s::uuid
-                   AND lease_expires_at > now()
                 RETURNING {_TASK_SELECT}
                 """,
                 (lease_seconds, task_id, owner, lease_id),
@@ -345,7 +353,8 @@ def renew_cursor(
             row = cur.fetchone()
             if row is None:
                 raise LedgerLeaseError(
-                    f"{owner} does not hold a live cursor lease on {task_id}"
+                    f"{owner} does not hold the cursor on {task_id} "
+                    f"(another owner acquired it)"
                 )
             return _task_row(row)
 
@@ -376,11 +385,13 @@ def write_cursor(
     status: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Update cursor / status / context. Requires the caller's live lease.
+    """Update cursor / status / context. Requires the caller still owns the cursor.
 
     Each write bumps `generation`. A caller whose lease was stolen (because it
-    was presumed crashed) cannot clobber the new owner's state — the UPDATE
-    simply matches no row and raises LedgerLeaseError.
+    was presumed crashed, and another session ran `acquire_cursor`) cannot
+    clobber the new owner's state — the steal rewrote owner/lease_id, so the
+    UPDATE matches no row and raises LedgerLeaseError. A merely-lapsed window
+    with no steal is still this owner's to write (see `renew_cursor`).
     """
     if status is not None and status not in TASK_STATUSES:
         raise ValueError(f"status must be one of {sorted(TASK_STATUSES)}")
@@ -398,7 +409,6 @@ def write_cursor(
                        generation = generation + 1,
                        updated_at = now()
                  WHERE task_id = %s AND owner = %s AND lease_id = %s::uuid
-                   AND lease_expires_at > now()
                 RETURNING {_TASK_SELECT}
                 """,
                 (

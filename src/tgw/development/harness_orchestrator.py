@@ -28,7 +28,12 @@ from typing import Any, Callable
 from tgw.development import harness_git, harness_ledger
 
 DEFAULT_MAX_ROUNDS = 3
-DEFAULT_LEASE_SECONDS = 900
+# The cursor lease is cross-owner mutual exclusion, not a deadline: renew_cursor
+# tolerates a lapsed window for the same owner (only a real acquire_cursor steal
+# ends ownership). This value is therefore just "how long a presumed-crashed run
+# stays un-stealable"; one implement->test->review round can run ~15-30 min, so
+# 900s was mistaking slow rounds for crashes.
+DEFAULT_LEASE_SECONDS = 1800
 
 
 class OrchestratorError(RuntimeError):

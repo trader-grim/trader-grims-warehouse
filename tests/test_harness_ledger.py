@@ -249,6 +249,40 @@ def test_stolen_lease_holder_cannot_clobber_new_owner(task_ids):
     assert harness_ledger.read_task(task_id)["cursor"] == {"progress": "full"}
 
 
+def test_lapsed_window_without_a_steal_stays_the_owners_to_renew_and_write(task_ids):
+    # a single implement->test->review round can outlast one lease window; as
+    # long as no other owner stole the cursor it is still ours.
+    task_id = _new_task(task_ids)
+    acquired = harness_ledger.acquire_cursor(task_id, "harness", lease_seconds=60)
+    lease = acquired["lease_id"]
+    with psycopg2.connect(DSN) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE harness_ledger_task SET lease_expires_at = now() - interval '5 minutes' "
+                "WHERE task_id = %s",
+                (task_id,),
+            )
+    # nobody stole it -> renew and write both still succeed
+    renewed = harness_ledger.renew_cursor(task_id, "harness", lease, lease_seconds=60)
+    assert renewed["task_id"] == task_id
+    harness_ledger.write_cursor(task_id, "harness", lease, cursor={"round": 3})
+    assert harness_ledger.read_task(task_id)["cursor"] == {"round": 3}
+
+    # but once another owner acquires the lapsed lease, the old owner is out
+    with psycopg2.connect(DSN) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE harness_ledger_task SET lease_expires_at = now() - interval '1 second' "
+                "WHERE task_id = %s",
+                (task_id,),
+            )
+    harness_ledger.acquire_cursor(task_id, "other", lease_seconds=60)
+    with pytest.raises(harness_ledger.LedgerLeaseError):
+        harness_ledger.renew_cursor(task_id, "harness", lease, lease_seconds=60)
+    with pytest.raises(harness_ledger.LedgerLeaseError):
+        harness_ledger.write_cursor(task_id, "harness", lease, cursor={"round": 99})
+
+
 def test_rejects_bad_kind_and_status(task_ids):
     task_id = _new_task(task_ids)
     row = harness_ledger.acquire_cursor(task_id, "s", lease_seconds=60)
