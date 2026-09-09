@@ -91,3 +91,48 @@ evidence; do not label this implementation candidate as an executed restore dril
 
 Luet may package the CLI, units, and configuration after review. It is not the backup,
 Plan, operator, effect authority, generation receipt, or recovery proof.
+
+## Operator directive — the config bundle (2026-09-08)
+
+The DR config bundle previously carried by `trader-grim/tgw-site-config` (private,
+2026-06-19; `config/` + `systemd/` on the TGW-SECRETS USB kit) **stays part of
+this backup**, as-is or refreshed — it is not folded away. It is the config half
+of the "restore from bare metal" contract, alongside the source/plan bundles,
+the PostgreSQL dump, and the operator-held secrets tier.
+
+`tgw-site-config` itself lapsed (no push since the Nix-migration work wound down;
+its content partly migrated into the source repo's `config/environment/` +
+`config/tgw-coding-*.json` + `systemd/`). Retire the standalone repo or refresh
+it — operator's call — but the *captured surface* must include the deployed live
+copies that are not git-tracked: `/opt/TGW/config/`, `/opt/TGW/tgw-lib/config/`,
+`/etc/sudoers.d/tgw-*`, `/etc/systemd/system/tgw-*`, `pg_ident.conf`/`pg_hba.conf`
+as installed, and the numeric identity/ownership export.
+
+**Increment it in parallel with development — do not defer to a catch-up push.**
+A config change (a sudoers edit, a new unit, a role SQL change, a pg_ident map
+entry) must feed the bundle on the same cadence it lands, the way a `main` commit
+should imply a GitHub publish (see `plan-vault-shared-access-v1-20260908.md` and
+the manual-push gap). Concretely: a small recurring capture of the surface above
+→ content-addressed manifest → into the backup generation (local fast tier +
+encrypted off-host) → optionally a git-committed projection (the `tgw-site-config`
+successor). This is the concept registry's library-substrate pattern
+(`concepts/CATIO-LIBRARY-SUBSTRATE.md`): deployed config is the authority, the
+bundle is its versioned projection, the backup tiers are its replicas.
+
+Placement in the concept layering: the platform's own config + DR is `catio`; the
+business config (api-config, category-groups, item-data adjacency) is a `tgw`
+specialisation. Bind as an incrementable sub-thread of Todo 1918 rather than
+gating on the full generation protocol.
+
+**The surface is moving — design for it.** The current shape (`systemd/` units,
+`sudoers.d`, `pg_ident`/`pg_hba`, JSON config) is being replaced as TGW
+containerises: `PLAN-nixos-migration.md` turned toward a compose runtime, and
+LEAF-11's direction is workers and agents in containers, with `keeper`
+(LEAF-11.4) materialising containers / stacks / CatioOS from declared specs. The
+config-bundle sub-thread must be structured to absorb Containerfiles / compose
+definitions / image digests / Luet materialisation specs / CatioOS image config
+as they land — not hardcode `/etc/systemd/system/tgw-*`. Those specs are `keeper`
+*input* (the recipe, not the built image): they belong in the versioned library
+projection. The built images are bound by `generation_microchip` (LEAF-11.5) and
+are regenerable-from-recipe, so the backup captures recipe + digest, and an image
+on the fast tier only as an optimisation. LEAF-11.4 / 11.5 intersection.
