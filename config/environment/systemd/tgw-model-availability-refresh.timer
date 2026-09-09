@@ -1,0 +1,10 @@
+[Unit]
+Description=TGW: daily refresh of config/model-availability.json from the live model catalogue
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target

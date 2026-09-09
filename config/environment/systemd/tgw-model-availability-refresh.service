@@ -1,0 +1,25 @@
+[Unit]
+Description=TGW: refresh config/model-availability.json from the live model catalogue (LEAF-11-8 / Todo 1956)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tgw-harness
+Group=tgw-harness
+WorkingDirectory=/opt/TGW/tgw-lib/src/trader-grims-warehouse
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/TGW/.venvs/controller/bin/python3 -m tgw.model_availability_refresh
+Nice=10
+TimeoutStartSec=120
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/TGW/tgw-lib/config /opt/TGW/var/log
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes

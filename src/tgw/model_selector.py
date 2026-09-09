@@ -5,7 +5,9 @@ given a role and a map of which executors are currently usable, pick the first
 one an ordered per-role policy allows, and explain the choice. The availability
 map is operator-maintained JSON for now; when the live availability prober
 (Todo 1916) lands it writes the same file on a schedule and nothing here
-changes.
+changes. That prober is ``tgw.model_availability_refresh`` (LEAF-11-8 / Todo
+1956) — see ``docs/runbooks/model-availability-refresh-v1-20260909.md`` for
+the daily timer and the ``freshness: frozen`` opt-out.
 
 No silent fallback: if nothing in the policy is available the selection is
 ABSTAIN with a reason, and the caller decides what to do with that.

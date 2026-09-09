@@ -57,3 +57,43 @@ def reachable_free_models(*, timeout: float = 10.0) -> list[dict[str, Any]]:
 
 def free_route_reachable(*, timeout: float = 10.0) -> bool:
     return bool(reachable_free_models(timeout=timeout))
+
+
+def live_coding_models(*, timeout: float = 10.0) -> dict[str, Any]:
+    """Ranked, coding-appropriate models (free **and** paid) from a live source,
+    with the sourcing detail ``reachable_free_models`` deliberately hides.
+
+    Used by ``tgw.model_availability_refresh``, which needs to report *why* a
+    source went dark, not just that the combined list came back empty. Empty
+    ``models`` + ``offline: True`` means the same thing it means for
+    ``reachable_free_models``: no reachable live route right now.
+    """
+    try:
+        mc = _model_currency()
+        result = mc.collect(timeout=timeout)
+    except Exception as exc:
+        return {"models": [], "offline": True, "sources_live": [], "sources_failed": [f"model-currency: {exc}"]}
+    sources_failed = [f"{name}: {reason}" for name, reason in sorted(result.sources_failed.items())]
+    if result.offline or result.used_fallback:
+        return {"models": [], "offline": True, "sources_live": [], "sources_failed": sources_failed}
+    ranked = mc.coding_appropriate(mc.rank(result.models))
+    # A source served from the short-TTL cache still contributed live-derived
+    # data this run — count it as live, not dark. Only sources_failed is a real
+    # gap.
+    contributed = sorted(set(result.sources_ok) | set(getattr(result, "sources_cached", ()))
+                         | set(getattr(result, "sources_stale", ())))
+    return {
+        "models": [
+            {
+                "provider": m.provider,
+                "model_id": m.model_id,
+                "context": m.context,
+                "tool_use": m.tool_use,
+                "free": m.free,
+            }
+            for m in ranked
+        ],
+        "offline": False,
+        "sources_live": contributed,
+        "sources_failed": sources_failed,
+    }

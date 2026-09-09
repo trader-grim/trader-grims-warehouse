@@ -497,7 +497,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
         "suggest", "quiet-check", "perp-run", "whisper-suggest",
         "claude-help", "clip", "suggest-edit", "promo", "nix-bundle-usb",
         "mailbox", "trace", "flake",
-        "coding", "plan-authority",
+        "coding", "plan-authority", "model-availability",
     ]),
 ]
 
@@ -1076,6 +1076,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--nextloop", action="store_true", dest="nextloop",
                    help="loop --next continuously until tasks are exhausted or user quits (y=done/s=skip/q=quit)")
     p.add_argument("--agent", default=None, metavar="AGENT", dest="next_agent", help="agent name for --next / --nextloop (e.g. claude, gemini, admin, tigwa)")
+
+    p = sub.add_parser("model-availability", help="refresh config/model-availability.json from the live model catalogue (LEAF-11-8)")
+    p.add_argument("model_availability_op", choices=["refresh"], metavar="OP")
+    p.add_argument("--dry-run", action="store_true", help="compute the receipt/diff without writing")
 
     p = sub.add_parser("coding", help="control the local tgw-lib coding workflow")
     p.add_argument("coding_op",
@@ -5810,6 +5814,14 @@ def main() -> int:
             result = cmd_todo(cfg, args)
             # cmd_todo handles its own printing; skip the generic JSON dump
             return 0 if result.get("ok", True) else 1
+
+        elif args.op == "model-availability":
+            from tgw.model_availability_refresh import refresh as refresh_model_availability
+
+            if args.model_availability_op == "refresh":
+                result = refresh_model_availability(dry_run=args.dry_run)
+            else:
+                result = {"ok": False, "error": f"unknown model-availability op: {args.model_availability_op!r}"}
 
         elif args.op == "coding":
             from tgw.coding_cli import run as run_coding
