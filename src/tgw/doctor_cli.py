@@ -3987,8 +3987,8 @@ def check_unix_access(paths: DoctorPaths) -> dict[str, Any]:
         # coding-group principal.  Verify the ordinary operator and worker
         # accounts instead of treating root's non-membership as access drift.
         # `tgw-harness` is the service identity that runs plan-render and
-        # auto-repair (PP-ROLES-001 WU-3); `db` stays covered until it leaves
-        # tgw-coders in WU-4.
+        # auto-repair (PP-ROLES-001 WU-3); `db` stays covered until the WU-3
+        # db->tgw-harness sweep removes it from tgw-coders.
         for name in sorted({actor, "codex", "db", "tgw-harness"} - {"root"}):
             record = pwd.getpwnam(name)
             memberships = set(os.getgrouplist(name, record.pw_gid))
