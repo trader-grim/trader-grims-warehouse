@@ -549,10 +549,11 @@ def context_server_bundle(context_server: Any, task: str, limit: int) -> str:
         require(status == status_after, "status changed during retrieval")
         require(snapshot == snapshot_after, "snapshot changed during retrieval")
         require(status.get("actor") == actor, "status actor differs from Linux actor")
-        require(
-            status.get("generation_status", {}).get("state") == "CURRENT",
-            "status generation is not CURRENT",
-        )
+        # Source drift is informational (SOURCE_AHEAD), never fatal: the
+        # published snapshot may lag the live source commit/tree while the
+        # Plan-authority identity still matches.  Every binding composed
+        # below already reads from the live source commit/tree, so only the
+        # Plan-authority identity gates hard.
         status_plan = status.get("plan", {})
         status_source = status.get("source", {})
         status_code = status.get("code_graph", {})
@@ -561,10 +562,9 @@ def context_server_bundle(context_server: Any, task: str, limit: int) -> str:
             status_plan.get("approved_commit") == snapshot.get("plan_commit"),
             "Plan commit differs from atomic snapshot",
         )
-        require(
+        source_snapshot_synced = (
             status_source.get("commit") == snapshot.get("source_commit")
-            and status_source.get("tree") == snapshot.get("source_tree"),
-            "source identity differs from atomic snapshot",
+            and status_source.get("tree") == snapshot.get("source_tree")
         )
         for key in (
             "active_capability",
@@ -613,6 +613,20 @@ def context_server_bundle(context_server: Any, task: str, limit: int) -> str:
                 code_binding.get(key) == status_code.get(key),
                 f"CodeGraph {key} differs",
             )
+        # The live source identity reported by status must agree with the
+        # live CodeGraph binding: both read from the live source commit/tree.
+        # Without this, a status whose own source/code_graph disagree would
+        # slip past the check above and only surface later as a runbook
+        # identity mismatch with a misleading message.
+        for key in ("commit", "tree"):
+            require(
+                status_source.get(key) == status_code.get(key),
+                f"CodeGraph {key} differs",
+            )
+            require(
+                code_binding.get(key) == status_source.get(key),
+                f"CodeGraph {key} differs",
+            )
         expected_runbook_revisions = {
             "canonical-plan-runbook": (
                 status_plan.get("evidence_head"),
@@ -647,6 +661,8 @@ def context_server_bundle(context_server: Any, task: str, limit: int) -> str:
             "actor": actor,
             "receiver": actor,
             "status": status,
+            "generation_status": status.get("generation_status"),
+            "source_snapshot_synced": source_snapshot_synced,
             "plan_graph": plan_graph,
             "runbooks": runbooks,
             "code_graph": code_graph,

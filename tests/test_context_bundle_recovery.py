@@ -710,6 +710,62 @@ def _server(snapshot: dict[str, Any]) -> SimpleNamespace:
     )
 
 
+def _server_source_ahead(
+    snapshot: dict[str, Any], live_commit: str, live_tree: str
+) -> SimpleNamespace:
+    """Mirror a stale published snapshot behind live source HEAD (SOURCE_AHEAD).
+
+    The Plan-authority identity still matches; only the source commit/tree
+    have moved on.  Every live binding (status source, CodeGraph, runbooks)
+    reads from the live commit/tree while the atomic snapshot stays pinned.
+    """
+    server = _server(snapshot)
+    status = server.context_status()
+    status["generation_status"] = {
+        "state": "SOURCE_AHEAD",
+        "line": (
+            "TGW Context: SOURCE_AHEAD local=tgw-lib "
+            f"plan={snapshot['plan_commit'][:12]} "
+            f"source={live_commit[:12]} "
+            f"(snapshot at {snapshot['source_commit'][:12]}; "
+            "reads use live source; republish to clear)"
+        ),
+    }
+    status["source"] = {"commit": live_commit, "tree": live_tree}
+    status["code_graph"] = {
+        "commit": live_commit,
+        "tree": live_tree,
+        "freshness_hash": "sha256:" + "2" * 64,
+    }
+    plan = status["plan"]
+    server.code_graph = lambda operation, query, limit: {
+        "operation": operation,
+        "limit": limit,
+        "binding": {
+            "commit": live_commit,
+            "tree": live_tree,
+            "freshness_hash": "sha256:" + "2" * 64,
+        },
+    }
+    server.runbooks = lambda query, path, start, lines, limit, authority: {
+        "query": query,
+        "authority": authority,
+        "revisions": [
+            {
+                "authority": "canonical-plan-runbook",
+                "commit": plan["evidence_head"],
+                "tree": plan["evidence_tree"],
+            },
+            {
+                "authority": "committed-application-runbook",
+                "commit": live_commit,
+                "tree": live_tree,
+            },
+        ],
+    }
+    return server
+
+
 def _selected(tmp_path: Path) -> dict[str, Any]:
     release = tmp_path / "release"
     launcher = release / "scripts/tgw_context_debian_stdio.py"
@@ -1295,6 +1351,8 @@ def test_bundle_agrees_with_every_local_binding_and_refuses_malformed_input(
     assert value["task"] == "PP-WORKFLOW-001"
     assert value["plan_graph"]["receiver"] == "codex"
     assert value["current_context"]["snapshot_sha256"] == snapshot["snapshot_sha256"]
+    assert value["generation_status"] == {"state": "CURRENT"}
+    assert value["source_snapshot_synced"] is True
     assert all(effect is False for effect in value["dependencies"].values())
     with pytest.raises(server.ContextError, match="ordinary non-empty"):
         module.context_server_bundle(server, "", 7)
@@ -1302,7 +1360,45 @@ def test_bundle_agrees_with_every_local_binding_and_refuses_malformed_input(
         module.context_server_bundle(server, "current", 0)
 
 
-def test_bundle_fails_closed_on_a_mixed_source_generation(
+def test_bundle_succeeds_when_source_has_drifted_past_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _launcher_module(tmp_path, monkeypatch)
+    snapshot = _snapshot()
+    monkeypatch.setattr(module, "_harness_actor", lambda: "codex")
+    monkeypatch.setattr(module, "_current_context", lambda: dict(snapshot))
+    server = _server_source_ahead(snapshot, "d" * 40, "e" * 40)
+
+    value = json.loads(module.context_server_bundle(server, "current", 7))
+
+    assert value["ok"] is True
+    assert value["generation_status"]["state"] == "SOURCE_AHEAD"
+    assert "snapshot at" in value["generation_status"]["line"]
+    assert value["source_snapshot_synced"] is False
+    assert value["status"]["generation_status"]["state"] == "SOURCE_AHEAD"
+    assert value["status"]["source"]["commit"] == "d" * 40
+    assert value["status"]["source"]["tree"] == "e" * 40
+    assert value["current_context"]["source_commit"] == snapshot["source_commit"]
+    assert value["plan_graph"]["plan_commit"] == snapshot["plan_commit"]
+
+
+def test_bundle_still_fails_closed_when_plan_commit_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _launcher_module(tmp_path, monkeypatch)
+    snapshot = _snapshot()
+    monkeypatch.setattr(module, "_harness_actor", lambda: "codex")
+    monkeypatch.setattr(module, "_current_context", lambda: dict(snapshot))
+    server = _server_source_ahead(snapshot, "d" * 40, "e" * 40)
+    server.context_status()["plan"]["approved_commit"] = "f" * 40
+
+    with pytest.raises(
+        server.ContextError, match="Plan commit differs from atomic snapshot"
+    ):
+        module.context_server_bundle(server, "current", 7)
+
+
+def test_bundle_fails_closed_on_an_internally_inconsistent_source_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _launcher_module(tmp_path, monkeypatch)
@@ -1312,7 +1408,7 @@ def test_bundle_fails_closed_on_a_mixed_source_generation(
     server = _server(snapshot)
     server.context_status()["source"]["tree"] = "9" * 40
 
-    with pytest.raises(server.ContextError, match="source identity differs"):
+    with pytest.raises(server.ContextError, match="CodeGraph tree differs"):
         module.context_server_bundle(server, "current", 7)
 
 
