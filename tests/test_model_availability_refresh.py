@@ -371,3 +371,91 @@ def test_committed_default_prefers_flash_over_retired_v4_pro():
     assert "2026-09-14" in data["cost_policy"]
     assert "opencode_go" in data["roles"]["implementation"]["model"]
     assert "groq" in json.dumps(data["roles"]["implementation"]["model"]).lower()
+
+
+# --------------------------------------------------------------------------- #
+# Todo 2014: OpenCode Go tier survives the daily refresh
+# --------------------------------------------------------------------------- #
+
+_LIVE_WITHOUT_GO = [
+    {"provider": "opencode", "model_id": "opencode/muse-spark-1.3-contributor-free", "context": 262144, "tool_use": True, "free": True},
+]
+
+
+def _go_executor():
+    return {
+        "available": True,
+        "harness": "opencode CLI",
+        "models_free": ["opencode/muse-spark-1.3-contributor-free"],
+        "models_go": ["opencode-go/deepseek-v4.1-flash"],
+    }
+
+
+def test_go_tier_hint_on_models_go_slice_is_not_migrated(tmp_path, monkeypatch, durable_path):
+    """The live sources structurally cannot discover opencode-go/* ids, so the
+    refresher must treat a hint matching the committed models_go slice as live
+    — otherwise the daily job would migrate the Go tier away on every run."""
+    monkeypatch.setattr(mar.model_currency_adapter, "live_coding_models", _fake_live(_LIVE_WITHOUT_GO))
+    data = _base_data()
+    data["executors"]["opencode"] = _go_executor()
+    data["roles"]["implementation"]["model"] = {
+        "opencode": "opencode-go/deepseek-v4.1-flash",
+        "opencode_go": "opencode-go/deepseek-v4.1-flash",
+        "opencode_zen_free": "opencode/muse-spark-1.3-contributor-free",
+        "claude": "claude-sonnet-5",
+    }
+    path = _write(tmp_path / "model-availability.json", data)
+
+    receipt = mar.refresh(path=path, receipts_path=durable_path / "receipts.jsonl")
+
+    after = json.loads(path.read_text(encoding="utf-8"))
+    impl = after["roles"]["implementation"]["model"]
+    assert impl["opencode"] == "opencode-go/deepseek-v4.1-flash"
+    assert impl["opencode_go"] == "opencode-go/deepseek-v4.1-flash"
+    assert [c for c in receipt["changed"] if c.get("role") == "implementation"] == []
+
+
+def test_go_tier_hint_missing_from_models_go_slice_still_migrates(tmp_path, monkeypatch, durable_path):
+    """No freeze-forever: a Go-prefixed hint that is neither live nor on the
+    committed models_go slice still migrates to the best live opencode
+    candidate instead of pointing at a dead model."""
+    monkeypatch.setattr(mar.model_currency_adapter, "live_coding_models", _fake_live(_LIVE_MODELS))
+    data = _base_data()
+    data["executors"]["opencode"] = _go_executor()
+    data["roles"]["implementation"]["model"] = {
+        "opencode": "opencode-go/retired-go-model",
+        "claude": "claude-sonnet-5",
+    }
+    path = _write(tmp_path / "model-availability.json", data)
+
+    receipt = mar.refresh(path=path, receipts_path=durable_path / "receipts.jsonl")
+
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert after["roles"]["implementation"]["model"]["opencode"] == "opencode/muse-spark-1.3-contributor-free"
+    moved = [c for c in receipt["changed"] if c.get("role") == "implementation" and c.get("slot") == "opencode"]
+    assert moved and moved[0]["was"] == "opencode-go/retired-go-model"
+    assert moved[0]["reason"] == "not in live catalogue"
+
+
+def test_committed_default_go_hints_survive_a_go_blind_refresh(tmp_path, monkeypatch, durable_path):
+    """End-to-end pin on the real file: with a live catalogue that (like the
+    real sources) cannot see opencode-go/*, refreshing a copy of the committed
+    default must leave both implementation Go-tier hints exactly as written."""
+    from pathlib import Path
+
+    monkeypatch.setattr(mar.model_currency_adapter, "live_coding_models", _fake_live(_LIVE_WITHOUT_GO))
+    repo_default = Path(__file__).resolve().parent.parent / "config" / "model-availability.json"
+    path = tmp_path / "model-availability.json"
+    path.write_text(repo_default.read_text(encoding="utf-8"), encoding="utf-8")
+
+    receipt = mar.refresh(path=path, receipts_path=durable_path / "receipts.jsonl")
+
+    after = json.loads(path.read_text(encoding="utf-8"))
+    impl = after["roles"]["implementation"]["model"]
+    assert impl["opencode"] == "opencode-go/deepseek-v4.1-flash"
+    assert impl["opencode_go"] == "opencode-go/deepseek-v4.1-flash"
+    touched_go_slots = [
+        c for c in receipt["changed"]
+        if c.get("role") == "implementation" and c.get("slot") in ("opencode", "opencode_go")
+    ]
+    assert touched_go_slots == []

@@ -259,3 +259,89 @@ def test_committed_default_cost_policy_names_go_quota_and_nous_ceiling_gap():
     assert "2026-09-14" in policy
     assert "Antigravity" in policy
     assert "antigravity" not in {e.lower() for e in data["executors"]}
+
+
+# --------------------------------------------------------------------------- #
+# Todo 2014: OpenCode Go tier wired into the implementation role
+# --------------------------------------------------------------------------- #
+# Semantics, verified against model_selector + harness_session before wiring:
+# prefer lists name *executors* (validated against the coding-executor
+# catalogue — there is deliberately no separate "opencode-go" executor entry),
+# and _run_opencode passes the model id through verbatim to `opencode run -m`
+# (keeping OPENCODE_GO_API_KEY and the auth.json carrying the opencode-go
+# entry), so the tier is expressed purely as the model id on the "opencode"
+# executor. An opencode/*-prefixed id for the same model would bill through
+# zen instead — the opencode-go/* prefix is load-bearing.
+
+_GO_BASE = {
+    "updated": "2026-09-13",
+    "executors": {
+        "opencode": {
+            "available": True,
+            "models_free": ["opencode/muse-spark-1.3-contributor-free"],
+            "models_go": ["opencode-go/deepseek-v4.1-flash"],
+        },
+        "claude": {"available": True},
+        "manual": {"available": True},
+    },
+    "roles": {
+        "implementation": {
+            "prefer": ["opencode", "claude", "manual"],
+            "model": {
+                "opencode": "opencode-go/deepseek-v4.1-flash",
+                "opencode_go": "opencode-go/deepseek-v4.1-flash",
+                "opencode_zen_free": "opencode/muse-spark-1.3-contributor-free",
+                "claude": "claude-sonnet-5",
+            },
+        },
+        "review": {"prefer": ["claude", "opencode", "manual"]},
+    },
+}
+
+
+def test_implementation_selects_go_tier_over_free_zen_when_both_available():
+    """With the Go credential path present (opencode available, models_go
+    listed), an implementation-role dispatch resolves to the opencode executor
+    on the Go-tier id — ahead of the free zen default and ahead of claude."""
+    sel = ms.select_executor("implementation", availability=_GO_BASE)
+    assert sel.status == "SELECTED"
+    assert sel.executor == "opencode"  # the one executor carrying both tiers
+    hints = _GO_BASE["roles"]["implementation"]["model"]
+    assert hints["opencode"] == "opencode-go/deepseek-v4.1-flash"
+    assert hints["opencode_go"] == "opencode-go/deepseek-v4.1-flash"
+    # the free zen default is demoted to an explicit fallback slot, not the id
+    assert hints["opencode_zen_free"] == "opencode/muse-spark-1.3-contributor-free"
+    assert hints["opencode"] != hints["opencode_zen_free"]
+    # claude stays the next prefer entry — escalation, not first fallback
+    prefer = _GO_BASE["roles"]["implementation"]["prefer"]
+    assert prefer.index("opencode") < prefer.index("claude")
+
+
+def test_implementation_degrades_to_claude_when_opencode_tier_unavailable():
+    """If the opencode executor is down (no Go credential, zen exhausted), the
+    implementation role still falls through to claude — the escalation path is
+    preserved, just no longer the first fallback from a tiny free model."""
+    data = json.loads(json.dumps(_GO_BASE))
+    data["executors"]["opencode"] = {"available": False, "reason": "no Go credential and zen exhausted"}
+    sel = ms.select_executor("implementation", availability=data)
+    assert sel.status == "SELECTED"
+    assert sel.executor == "claude"
+
+
+def test_committed_default_implementation_prefers_go_id():
+    """Pin the real file: the implementation role's opencode dispatch id is the
+    live-verified Go-tier id, the free zen id is a named fallback, every
+    models_go id carries the billing-correct opencode-go/ prefix, and prefer
+    still names the single opencode executor (no separate executor entry)."""
+    data = ms.load_availability(ms._REPO_DEFAULT)
+    sel = ms.select_executor("implementation", availability=data)
+    assert sel.status == "SELECTED"
+    assert sel.executor == "opencode"
+    hints = data["roles"]["implementation"]["model"]
+    assert hints["opencode"] == "opencode-go/deepseek-v4.1-flash"
+    assert hints["opencode_go"] == "opencode-go/deepseek-v4.1-flash"
+    assert hints["opencode_zen_free"] == "opencode/muse-spark-1.3-contributor-free"
+    go = data["executors"]["opencode"]["models_go"]
+    assert go and all(str(m).startswith("opencode-go/") for m in go)
+    assert "opencode-go/deepseek-v4.1-flash" in go
+    assert data["roles"]["implementation"]["prefer"] == ["opencode", "claude", "manual"]

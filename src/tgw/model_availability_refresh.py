@@ -17,7 +17,12 @@ updates two things in the existing availability file:
   a slot names has dropped out of the live catalogue, in which case it is
   swapped for the best live candidate for *that slot's own* executor family
   ("minimal auto-migration" — never a catalogue-wide best pick, and never a
-  re-optimisation of a still-live hint). This is deliberate: the per-role
+  re-optimisation of a still-live hint). Exception (Todo 2014): an
+  opencode-family hint whose bare id is on the committed ``models_go`` slice
+  counts as live even though no live source reports ``opencode-go/*`` ids —
+  that tier is operator-verified outside model-currency (which structurally
+  cannot discover it), and without the exception the job would migrate the Go
+  tier away on every run. This is deliberate: the per-role
   model assignments come from the research role chart (best / least-expensive-
   acceptable per role) and are an operator/cost-policy decision — this job
   keeps them from pointing at a dead model, it does not second-guess which
@@ -127,6 +132,24 @@ def _is_live(
     # still-live model is not churned as "stale".
     if value in live_ids:
         return True
+    # Quota-priced OpenCode Go tier (Todo 2014): the live sources structurally
+    # cannot discover opencode-go/* ids — that slice is operator-verified
+    # (`opencode models` catalogue + a live `opencode run -m
+    # opencode-go/deepseek-v4.1-flash` call, 2026-09-13), not model-currency
+    # output. An opencode-family hint whose bare id is on the committed
+    # models_go slice therefore counts as live; without this the daily job
+    # would migrate the Go tier away on every run. A Go-prefixed hint NOT on
+    # that slice still falls through to normal migration below (no
+    # freeze-forever).
+    entry = executors.get(executor_name)
+    if isinstance(entry, dict):
+        declared_go = entry.get("models_go")
+        if (
+            isinstance(declared_go, list)
+            and value.split("/", 1)[0] in ("opencode", "opencode-go")
+            and _bare_id(value) in {_bare_id(str(i)) for i in declared_go}
+        ):
+            return True
     live_bare = {_bare_id(str(m.get("model_id", ""))) for m in live_models}
     return _bare_id(value) in live_bare
 

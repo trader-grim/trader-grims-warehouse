@@ -39,17 +39,48 @@ def durable_path():
     therefore the wrong fixture for those boundaries.  CI may select an exact
     durable test filesystem with ``TGW_TEST_DURABLE_ROOT``; ``/var/tmp`` is the
     portable fallback and every per-test directory is removed afterward.
+
+    Sandboxed runs without write access to the preferred base (e.g. a
+    remediation worktree as an unprivileged user) fall back to
+    ``$XDG_DATA_HOME/tgw-pytest`` and then to a repo-local
+    ``.tgw-pytest-durable`` directory.  Every candidate is absolute and
+    outside ``/tmp``, so the boundary under test is preserved; per-test
+    roots are always removed, and the repo-local parent is removed again
+    when left empty so no residue is ever staged.
     """
 
     base = Path(os.environ.get("TGW_TEST_DURABLE_ROOT", "/var/tmp/tgw-pytest"))
     if not base.is_absolute() or base == Path("/tmp") or Path("/tmp") in base.parents:
         raise RuntimeError("TGW_TEST_DURABLE_ROOT must be absolute and outside /tmp")
-    base.mkdir(parents=True, exist_ok=True)
-    root = Path(tempfile.mkdtemp(prefix="w18-", dir=base))
+    candidates = [base]
     try:
-        yield root
-    finally:
-        shutil.rmtree(root)
+        xdg = Path(os.environ.get(
+            "XDG_DATA_HOME", str(Path.home() / ".local" / "share"))) / "tgw-pytest"
+    except Exception:  # pragma: no cover - HOME unresolvable
+        xdg = None
+    if xdg is not None and xdg.is_absolute() and xdg != Path("/tmp") and Path("/tmp") not in xdg.parents:
+        candidates.append(xdg)
+    repo_fallback = Path(__file__).resolve().parent.parent / ".tgw-pytest-durable"
+    candidates.append(repo_fallback)
+    last_exc: OSError | None = None
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            root = Path(tempfile.mkdtemp(prefix="w18-", dir=candidate))
+        except OSError as exc:
+            last_exc = exc
+            continue
+        try:
+            yield root
+        finally:
+            shutil.rmtree(root)
+            if candidate == repo_fallback:
+                try:
+                    candidate.rmdir()
+                except OSError:
+                    pass
+        return
+    raise last_exc  # pragma: no cover - no candidate writable
 
 
 def make_fake_fence_write(itemdata_root):

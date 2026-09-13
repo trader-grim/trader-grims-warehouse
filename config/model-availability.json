@@ -1,7 +1,7 @@
 {
   "_comment": "Semi-automatic model/executor selection for the coding lifecycle. tgw-model-availability-refresh.timer runs tgw.model_availability_refresh (LEAF-11-8 / Todo 1956) daily to rewrite 'executors.<name>.available' and the 'model' hints on roles with consumed_by_selector:true from the live model catalogue — see docs/runbooks/model-availability-refresh-v1-20260909.md. Add \"freshness\": \"frozen\" to any executor or role object to pin it against that job. tgw.model_selector.select_executor() consumes only 'executors' and 'roles.<role>.prefer' (today: roles 'implementation' and 'review'). The per-role 'model' hints are carried for humans and the model-aware executor. Edit /opt/TGW/tgw-lib/config/model-availability.json to change it live; this repo copy is the committed default.",
   "schema": "tgw-model-availability/v1",
-  "updated": "2026-09-12",
+  "updated": "2026-09-13",
   "role_chart_source": "reference/research/source/catio-model-role-research-20260827.md (10-role best / least-expensive-acceptable / other table)",
   "cost_policy": "Preserve the operator Claude subscription (flat-rate, the valuable resource) for Claude-model judgement roles. The opencode executor reaches two distinct tiers on one CLI: opencode-go (OpenCode Go, $10/month subscription, quota-based dollar rate limits $12/5hr, $30/week, $60/month — NOT per-token metered — 24-model list incl. Grok 4.6, GLM-5.3, Kimi K3, Qwen3.8 Max/Flash, DeepSeek V4, MiniMax M3, https://opencode.ai/go, verified 2026-09-12) and opencode-zen (pay-per-token gateway; free tier = deepseek-v4-flash, muse-spark-*-contributor-free, gpt-5.3-codex-spark; everything else is metered on that key). Prefer quota-priced capacity (claude subscription, codex plan, opencode-go) ahead of pay-per-token zen usage for bulk work; use paid-via-zen only for a named 'best' pick when a job needs it. DeepSeek v4-Pro is retired 2026-09-14 — DeepSeek routes all deepseek-v4-pro requests to deepseek-v4.1-flash at Flash rates from that date (https://api-docs.deepseek.com/news/news260910/, verified 2026-09-12); v4.1-Flash now outperforms v4-Pro on most public benchmarks (DeepSWE v1.1: 74.2 vs 62.7; Terminal-Bench 2.1: 90.6%) at roughly a quarter the peak cache-miss input cost ($0.30/1M vs $1.32/1M) — so v4.1-Flash is the better AND cheaper choice everywhere the old chart ranked Pro above Flash. Groq (GROQ_API_KEY) is confirmed as a live groq/* alternate routed via the opencode gateway. Nous (NOUS_API_KEY) carries a funded $20 operator balance — TODO: tgw.model_observations (LEAF-11-8) tracks only availability/error cooldown holds and has no spend/budget concept, so that $20 ceiling is currently unenforceable; nothing here meters Nous usage, do not assume otherwise. Google Antigravity (free, Gemini 3.5 Flash — https://developers.googleblog.com/build-with-google-antigravity-our-new-agentic-development-platform/, verified 2026-09-12) is explicitly NOT wired: it ships as GUI/IDE extensions plus a desktop app with no confirmed headless/CLI/API path fitting harness_session's dispatch model, and it is a different product from the CLI-based @google/gemini-cli behind the disabled `gemini` executor entry — do not conflate them.",
   "executors": {
@@ -17,7 +17,7 @@
     },
     "opencode": {
       "available": true,
-      "reason": "wired 2026-09-09 (harness_session._run_opencode, multi-provider). Default coding model opencode/muse-spark-1.3-contributor-free — free tier on the opencode-zen key, verified working. deepseek-v4-flash on that key is exhausted; groq/* (GROQ_API_KEY) and openrouter/*:free reachable as live alternates. Quota-priced OpenCode Go tier ($10/mo, dollar-quota limits, https://opencode.ai/go, verified 2026-09-12) rides the same CLI via OPENCODE_GO_API_KEY — prefer it ahead of metered zen for bulk work. Model-per-role is a starting point; leaf 11.8's selector replaces the manual chart.",
+      "reason": "wired 2026-09-09 (harness_session._run_opencode, multi-provider). Default implementation model opencode-go/deepseek-v4.1-flash — quota-priced Go tier, verified live 2026-09-13; opencode/muse-spark-1.3-contributor-free remains the free-tier fallback on the opencode-zen key, verified working. deepseek-v4-flash on that key is exhausted; groq/* (GROQ_API_KEY) and openrouter/*:free reachable as live alternates. Quota-priced OpenCode Go tier ($10/mo, dollar-quota limits, https://opencode.ai/go, verified 2026-09-12) rides the same CLI via OPENCODE_GO_API_KEY — prefer it ahead of metered zen for bulk work. Model-per-role is a starting point; leaf 11.8's selector replaces the manual chart.",
       "harness": "opencode CLI (/home/opencode/.local/bin/opencode); single opencode-zen key = unified gateway to Anthropic, OpenAI, Google, xAI, DeepSeek, GLM, Kimi, muse-spark; same binary carries the separate paid OpenCode Go subscription via OPENCODE_GO_API_KEY (quota-based, not per-token)",
       "models_free": [
         "opencode/deepseek-v4-flash",
@@ -26,13 +26,13 @@
         "opencode/gpt-5.3-codex-spark"
       ],
       "models_go": [
-        "opencode/grok-4.6",
-        "opencode/glm-5.3",
-        "opencode/kimi-k3",
-        "opencode/qwen3.8-max",
-        "opencode/qwen3.8-flash",
-        "opencode/deepseek-v4.1-flash",
-        "opencode/minimax-m3"
+        "opencode-go/grok-4.6",
+        "opencode-go/glm-5.3",
+        "opencode-go/kimi-k3",
+        "opencode-go/qwen3.8-max",
+        "opencode-go/qwen3.8-flash",
+        "opencode-go/deepseek-v4.1-flash",
+        "opencode-go/minimax-m3"
       ],
       "models_paid_via_zen": [
         "opencode/gpt-5.6-sol",
@@ -46,7 +46,7 @@
         "opencode/glm-5.2",
         "opencode/kimi-k2.6"
       ],
-      "note": "muse-spark 1.2/1.3 flagged by operator as a strong new coding model (contributor-free tier) — benchmark standing operator-reported, not independently verified here. models_go is the quota-priced OpenCode Go catalogue slice (representative ids from the 24-model list, https://opencode.ai/go, verified 2026-09-12) — prefer it over models_paid_via_zen for bulk work. opencode/deepseek-v4-pro removed 2026-09-12: retired 2026-09-14, DeepSeek routes those requests to deepseek-v4.1-flash at Flash rates (https://api-docs.deepseek.com/news/news260910/) and v4.1-Flash now benchmarks above v4-Pro at ~1/4 the peak input cost — do not re-add."
+      "note": "muse-spark 1.2/1.3 flagged by operator as a strong new coding model (contributor-free tier) — benchmark standing operator-reported, not independently verified here. models_go is the quota-priced OpenCode Go catalogue slice (representative opencode-go/* ids from the ~29-model list, https://opencode.ai/go; opencode-go/deepseek-v4.1-flash verified live 2026-09-13 via `opencode run -m opencode-go/deepseek-v4.1-flash` with real cost tracked) — prefer it over models_paid_via_zen for bulk work. Reaching any opencode-go/* id requires the operator's one-time interactive `opencode auth login -p opencode-go` (a distinct entry in ~/.local/share/opencode/auth.json); an API key alone still routes through the zen endpoint regardless of which env var holds it. opencode/deepseek-v4-pro removed 2026-09-12: retired 2026-09-14, DeepSeek routes those requests to deepseek-v4.1-flash at Flash rates (https://api-docs.deepseek.com/news/news260910/) and v4.1-Flash now benchmarks above v4-Pro at ~1/4 the peak input cost — do not re-add."
     },
     "codex": {
       "available": false,
@@ -69,15 +69,16 @@
         "manual"
       ],
       "model": {
-        "opencode": "opencode/muse-spark-1.3-contributor-free",
+        "opencode": "opencode-go/deepseek-v4.1-flash",
+        "opencode_go": "opencode-go/deepseek-v4.1-flash",
+        "opencode_zen_free": "opencode/muse-spark-1.3-contributor-free",
         "opencode_alt": "opencode/deepseek-v4-flash",
-        "opencode_go": "opencode/deepseek-v4.1-flash",
         "opencode_groq_alt": "groq/kimi-k3",
         "claude": "claude-sonnet-5"
       },
       "consumed_by_selector": true,
       "research": "role 4 (implementation actor): best Sol xhigh / least DeepSeek V4.1 Flash / other Sonnet 5, DeepSeek V4.1 Flash for low-risk edits (corrected 2026-09-12: v4.1-Flash now outperforms v4-Pro — DeepSWE v1.1 74.2 vs 62.7, Terminal-Bench 2.1 90.6% — at ~1/4 the peak input cost, and v4-Pro is retired 2026-09-14 with requests routed to v4.1-Flash at Flash rates, https://api-docs.deepseek.com/news/news260910/; the pre-2026-09-12 chart ranking Pro above Flash had the ordering backwards)",
-      "note": "opencode-first is intentional cost control; falls through to claude while opencode is unavailable. Prefer muse-spark (free coding-tuned) for bulk work, else the quota-priced opencode_go tier (e.g. opencode/deepseek-v4.1-flash) ahead of metered zen; groq/* via the same gateway (opencode_groq_alt) is a confirmed live alternate. Escalate to claude-sonnet-5, or opencode/gpt-5.6-sol paid-via-zen, for complex work once risk-tiering exists."
+      "note": "opencode-first is intentional cost control; falls through to claude while opencode is unavailable. Prefer the quota-priced OpenCode Go tier first (opencode/opencode_go slots, opencode-go/deepseek-v4.1-flash — live-verified 2026-09-13, substantially stronger than the free tier with real 5hr-rolling usage capacity; requires the operator's one-time interactive `opencode auth login -p opencode-go`, an API key alone still routes through zen), then the free zen default (opencode_zen_free, muse-spark, free coding-tuned) and the groq/* alternate (opencode_groq_alt, confirmed live) ahead of metered zen; reserve the claude escalation for after the Go tier fails, not as the first fallback from a tiny free model. Escalate to claude-sonnet-5, or opencode/gpt-5.6-sol paid-via-zen, for complex work once risk-tiering exists. No separate opencode-go executor entry exists by design: model_selector prefer lists name executors (opencode/claude/manual) and harness_session._run_opencode passes the model id through verbatim to `opencode run -m`, so the opencode-go/* id alone routes the dispatch to Go-tier billing."
     },
     "review": {
       "prefer": [
@@ -127,7 +128,7 @@
       ],
       "model": {
         "opencode": "opencode/deepseek-v4-flash",
-        "opencode_go": "opencode/deepseek-v4.1-flash",
+        "opencode_go": "opencode-go/deepseek-v4.1-flash",
         "opencode_groq_alt": "groq/kimi-k3",
         "claude": "claude-haiku-4-5"
       },

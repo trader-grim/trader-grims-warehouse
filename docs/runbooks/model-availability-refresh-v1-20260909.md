@@ -136,3 +136,42 @@ Adding real source modules for those providers so future changes get caught
 automatically is follow-on work. `cost_policy` / `research` / `note` prose —
 including the new quota-vs-metered cost dimension — is never touched by a run;
 only `available`, `model` hints, and `updated` move.
+
+## The live OpenCode Go tier (Todo 2014, 2026-09-13 note)
+
+OpenCode Go is now a second, live credential, not just a catalogue entry. The
+operator completed `opencode auth login -p opencode-go` interactively, which
+registered a distinct `opencode-go` entry in `~/.local/share/opencode/auth.json`
+(separate from the pre-existing, still-exhausted OpenCode Zen entry), and
+`opencode run --format json -m opencode-go/deepseek-v4.1-flash` returned a
+correct response with real cost tracked — genuinely usable, with what the
+operator describes as a decent amount of usage on a 5-hour rolling basis
+(quota-priced: $12/5hr, $30/week, $60/month limits, not per-token).
+
+Three consequences, all wired by Todo 2014:
+
+- **Registration is interactive and operator-side only.** Dropping an API key
+  into an env var is NOT enough — confirmed this session: the key alone routes
+  through the exhausted zen endpoint regardless of which env var holds it.
+  Only the registered `opencode-go` auth entry (copied by
+  `harness_session._run_opencode` into each session's fresh HOME alongside the
+  `OPENCODE_GO_API_KEY` slot) reaches Go-tier billing. Never attempt to
+  auto-register `opencode auth login` from code.
+- **The model id picks the billing, not the executor.** There is deliberately
+  no separate `opencode-go` executor entry: `model_selector` prefer lists name
+  executors (`opencode`/`claude`/`manual`, validated against the
+  coding-executor catalogue), and `_run_opencode` passes the model id through
+  verbatim to `opencode run -m`. The implementation role's `model.opencode` /
+  `model.opencode_go` hints therefore carry the `opencode-go/...` id
+  (`opencode-go/deepseek-v4.1-flash`, ahead of the free zen fallback
+  `opencode_zen_free` and ahead of the `claude` escalation) — an
+  `opencode/...`-prefixed id for the same model would bill through zen
+  instead, so the prefix is load-bearing.
+- **The daily job must not migrate the Go tier away.** The live sources still
+  cannot discover `opencode-go/*` ids, so `_is_live` in
+  `tgw.model_availability_refresh` counts an opencode-family hint as live when
+  its bare id is on the committed `executors.opencode.models_go` slice
+  (operator-verified, not source-verified). A Go-prefixed hint that is NEITHER
+  live NOR on that slice still migrates to the best live opencode candidate —
+  no freeze-forever. `prefer` order and `available` flags are untouched, as
+  before.
