@@ -1,0 +1,64 @@
+{
+  "closure_hash": "sha256:575f1170e64a48f4491210a59f3a1385fb66ddf29f621ec14067e58ecbdbb382",
+  "complete": false,
+  "conformance_providers": [
+    {
+      "available": true,
+      "id": "tgw-native-exact@1",
+      "result": "selected"
+    },
+    {
+      "agreement": "not-claimed",
+      "available": true,
+      "closure_hash": "sha256:8140f05b583a54faf38826339ad8ad3489bb89db5167d3c7504e29b0ffa0ccb2",
+      "id": "luet-pinned-0.9.26@1",
+      "result": "disagreement"
+    }
+  ],
+  "conformance_verified": false,
+  "dispatchable": false,
+  "invalidated_receipts": [],
+  "phase_order": [],
+  "plan_commit": "c9d01b47212befee587bc421a46f47dcd9bbbc8c",
+  "rejected_alternatives": [],
+  "resolver": "tgw-native-exact@1",
+  "reusable_receipts": [],
+  "root": {
+    "id": "PLAN-RATTER-CAPABILITY-GRAPH",
+    "minimum_state": "tested",
+    "profile": "implementation"
+  },
+  "satisfied_installed": [],
+  "schema": "tgw-plan-solution/v1",
+  "selected_alternatives": [],
+  "selected_capabilities": [],
+  "selected_providers": [],
+  "solution_hash": "sha256:7f527f30e438b87dd005a4b0bb2c93e7d656d6b11b1b87b9578760636a05e5a4",
+  "unresolved": [
+    {
+      "capability": "generation.atomic-identity@1",
+      "code": "UNSATISFIED",
+      "reason": "MISSING_PROVIDER_DECLARATION",
+      "required_by": "PLAN-RATTER-CAPABILITY-GRAPH"
+    },
+    {
+      "capability": "plan.luet-canonical-resolution@1",
+      "code": "UNSATISFIED",
+      "reason": "MISSING_PROVIDER_DECLARATION",
+      "required_by": "PLAN-RATTER-CAPABILITY-GRAPH"
+    },
+    {
+      "capability": "workflow.per-job-change-handling@1",
+      "code": "UNSATISFIED",
+      "reason": "MISSING_PROVIDER_DECLARATION",
+      "required_by": "PLAN-RATTER-CAPABILITY-GRAPH"
+    },
+    {
+      "capability": "workflow.role-identity-model@1",
+      "code": "UNSATISFIED",
+      "reason": "MISSING_PROVIDER_DECLARATION",
+      "required_by": "PLAN-RATTER-CAPABILITY-GRAPH"
+    }
+  ],
+  "work_units": []
+}
