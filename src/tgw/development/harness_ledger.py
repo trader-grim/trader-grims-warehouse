@@ -63,7 +63,12 @@ ENTRY_KINDS = frozenset({
     # LEAF-11-6 buildable-now slice (Todo 1954 precursor): read-only
     # observation that the plan vault moved during a job. No classification;
     # workflow.per-job-change-handling@1 remains UNSATISFIED.
-    "plan_moved",
+    # todo-2016 precursor (PP-CATIO-RELEASE-001 Phase 0 restore point, PROPOSAL,
+    # not ratified): audit trail for the config backup/apply/rollback mechanism
+    # in tgw.development.config_agent. No PP/leaf/capability state changes.
+    "config_backup",
+    "config_apply",
+    "config_rollback",
 })
 
 
