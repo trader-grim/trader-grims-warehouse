@@ -498,9 +498,19 @@ _OPENCODE_DEFAULT_MODEL = "opencode/muse-spark-1.3-contributor-free"
 
 # model-provider key slots the opencode runner keeps in its otherwise-scrubbed
 # env (opencode is the gateway; it needs whichever the chosen model uses).
+#
+# PURGED 2026-09-13: OPENCODE_ZEN_API_KEY / OPENCODE_GO_API_KEY used to be
+# listed here. OpenCode documents no environment variable for its own Zen/Go
+# gateway tiers (checked directly against opencode.ai/docs/go and
+# /docs/providers) -- the only working path for either is the interactive
+# `opencode auth login -p <tier>` writing to ~/.local/share/opencode/auth.json
+# (one account backs both tiers; auth_file, not credential_env, is the real
+# check -- see _run_opencode below). This exact fact was already recorded in
+# memory (model-provider-landscape-20260912.md) but never synced back into
+# this list -- don't re-add either name without a real documented mechanism.
 _OPENCODE_PROVIDER_KEYS = (
-    "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY", "GROQ_API_KEY",
-    "OPENROUTER_API_KEY", "NOUS_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
+    "GROQ_API_KEY", "OPENROUTER_API_KEY", "NOUS_API_KEY", "ANTHROPIC_API_KEY",
+    "GOOGLE_API_KEY",
 )
 
 
@@ -555,7 +565,9 @@ def _run_opencode(
     file_auth = bool(auth_src and auth_src.is_file())
     if not cred and not file_auth:
         raise SessionUnavailable(
-            f"opencode: no OPENCODE_ZEN_API_KEY and no {auth_src or 'auth file'}"
+            f"opencode: no credential_env value set and no {auth_src or 'auth file'} "
+            "(OpenCode's own Zen/Go tiers have no env-var auth -- `opencode auth "
+            "login -p <tier>` must have been run to populate the auth file)"
         )
     model = (job or {}).get("model") or _OPENCODE_DEFAULT_MODEL
     # _session_credential sourced secrets_root/tgw.env; keep every model-provider
