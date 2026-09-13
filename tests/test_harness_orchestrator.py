@@ -204,6 +204,84 @@ def test_rerun_after_done_is_idempotent(env):
     assert again["commit"] == first["commit"]
 
 
+def _make_plan_vault(tmp_path, name="plan-vault"):
+    """A throwaway real-git plan-vault fixture (real commits, no git mocks)."""
+    vault = tmp_path / name
+    vault.mkdir()
+    _git(vault, "init", "-q", "-b", "main")
+    (vault / "plan.md").write_text("v1\n")
+    _git(vault, "add", "-A")
+    _git(vault, "commit", "-q", "-m", "plan v1")
+    return vault
+
+
+def test_plan_vault_move_is_logged_and_job_still_lands(env, tmp_path):
+    """LEAF-11-6 buildable-now slice: a plan-vault advance between rounds is
+    recorded as exactly one ``plan_moved`` entry; the job still lands."""
+    vault = _make_plan_vault(tmp_path)
+    before = _git(vault, "rev-parse", "HEAD")
+
+    calls = {"n": 0}
+
+    def run_tests(task_id, worktree):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # advance the vault between rounds: a real second commit.
+            (vault / "plan.md").write_text("v2\n")
+            _git(vault, "add", "-A")
+            _git(vault, "commit", "-q", "-m", "plan v2")
+            return {"passed": False, "detail": "round one fails"}
+        return {"passed": True, "detail": ""}
+
+    runners = Runners(
+        prepare_worktree=env["prepare_worktree"],
+        implement=_impl_writes("v = {round}\n"),
+        run_tests=run_tests,
+        review=lambda t, w: {"findings": []},
+    )
+    result = harness_orchestrator.run_task(
+        env["task_id"], repository=env["repo"], runners=runners,
+        commit_message=f"{env['task_id']}: done", plan_vault=vault,
+        lease_seconds=120,
+    )
+    assert result["outcome"] == "landed"
+    after = _git(vault, "rev-parse", "HEAD")
+    assert before != after
+
+    task = harness_ledger.read_task(env["task_id"])
+    assert task["cursor"].get("plan_evidence_at_start") == before
+
+    moved = [e for e in harness_ledger.history(env["task_id"]) if e["kind"] == "plan_moved"]
+    assert len(moved) == 1
+    assert moved[0]["body"]["plan_evidence_before"] == before
+    assert moved[0]["body"]["plan_evidence_after"] == after
+    assert moved[0]["body"]["round"] == 2
+
+
+def test_plan_vault_static_logs_no_plan_moved(env, tmp_path):
+    """A static plan vault leaves no ``plan_moved`` trace; start evidence is kept."""
+    vault = _make_plan_vault(tmp_path)
+    head = _git(vault, "rev-parse", "HEAD")
+
+    runners = Runners(
+        prepare_worktree=env["prepare_worktree"],
+        implement=_impl_writes("v = {round}\n"),
+        run_tests=lambda t, w: {"passed": True, "detail": ""},
+        review=lambda t, w: {"findings": []},
+    )
+    result = harness_orchestrator.run_task(
+        env["task_id"], repository=env["repo"], runners=runners,
+        commit_message=f"{env['task_id']}: done", plan_vault=vault,
+        lease_seconds=120,
+    )
+    assert result["outcome"] == "landed"
+
+    task = harness_ledger.read_task(env["task_id"])
+    assert task["cursor"].get("plan_evidence_at_start") == head
+    moved = [e for e in harness_ledger.history(env["task_id"]) if e["kind"] == "plan_moved"]
+    assert moved == []
+
+
 def test_build_runners_stack_lands_end_to_end(env, tmp_path):
     """The full production stack minus the LLM: build_runners wires
     git_worktree_prepare + pytest_gate + external_session, driven by fake

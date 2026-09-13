@@ -60,6 +60,10 @@ ENTRY_KINDS = frozenset({
     "operator_correction",
     "next_action",
     "note",
+    # LEAF-11-6 buildable-now slice (Todo 1954 precursor): read-only
+    # observation that the plan vault moved during a job. No classification;
+    # workflow.per-job-change-handling@1 remains UNSATISFIED.
+    "plan_moved",
 })
 
 

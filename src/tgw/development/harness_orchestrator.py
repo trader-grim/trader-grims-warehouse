@@ -35,6 +35,11 @@ DEFAULT_MAX_ROUNDS = 3
 # 900s was mistaking slow rounds for crashes.
 DEFAULT_LEASE_SECONDS = 1800
 
+# The plan vault is a separate git repository from the coding repo (mirrors
+# doctor_cli._PLAN_VAULT). Single constant for its location; the orchestrator
+# only ever reads its HEAD (rev-parse, no writes).
+PLAN_VAULT_REPOSITORY = Path("/opt/TGW/library/plans")
+
 
 class OrchestratorError(RuntimeError):
     """The orchestrator cannot run this task safely."""
@@ -89,6 +94,33 @@ def _rev(repository: Path, spec: str) -> str:
     return result.stdout.strip()
 
 
+def _plan_vault_head(plan_vault: Path) -> str | None:
+    """Read the plan vault's current HEAD commit, or None if unreadable.
+
+    Read-only observation (``git rev-parse HEAD`` equivalent). A missing vault,
+    a non-git directory, or any git failure is never an error here: the caller
+    simply skips the plan-moved observation for that point in the loop. This
+    must never block, abort, or rebind a job — LEAF-11-6 buildable-now slice,
+    a bounded precursor toward Todo 1954. It does not classify the movement
+    (continue/rebind/checkpoint-and-restart/supersede/reconcile) and does not
+    satisfy ``workflow.per-job-change-handling@1``.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-c", f"safe.directory={plan_vault}",
+             "-C", str(plan_vault), "rev-parse", "HEAD"],
+            check=False, text=True, capture_output=True, timeout=30,
+            env={"GIT_OPTIONAL_LOCKS": "0", "PATH": "/usr/bin:/bin",
+                 "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
+        )
+    except Exception:
+        return None
+    if result.returncode:
+        return None
+    head = result.stdout.strip()
+    return head or None
+
+
 def run_task(
     task_id: str,
     *,
@@ -103,6 +135,7 @@ def run_task(
     author_name: str = "Continual Harness",
     author_email: str = "harness@tgw-lib",
     trailer_lines: tuple[str, ...] = (),
+    plan_vault: Path | str | None = None,
 ) -> dict[str, Any]:
     """Drive one task to a mechanical completion, recording every step to the
     ledger. Returns one of:
@@ -115,6 +148,7 @@ def run_task(
     Raises OrchestratorBusy if another owner holds the cursor.
     """
     repository = Path(repository).resolve(strict=True)
+    plan_vault_path = Path(plan_vault) if plan_vault is not None else PLAN_VAULT_REPOSITORY
     harness_ledger.ensure_task(task_id)
     acquired = harness_ledger.acquire_cursor(task_id, owner, lease_seconds=lease_seconds)
     if acquired is None:
@@ -143,6 +177,14 @@ def run_task(
     def _cursor(**changes: Any) -> None:
         cursor.update(changes)
         harness_ledger.write_cursor(task_id, owner, lease, cursor=cursor)
+
+    # LEAF-11-6 buildable-now slice: record the plan vault's evidence HEAD at
+    # job start (kept across resume — only set when absent). Pure observation;
+    # never blocks the job.
+    if not cursor.get("plan_evidence_at_start"):
+        plan_start = _plan_vault_head(plan_vault_path)
+        if plan_start is not None:
+            _cursor(plan_evidence_at_start=plan_start)
 
     try:
         while completed < max_rounds:
@@ -194,6 +236,21 @@ def run_task(
 
             # mechanical gate: tests green, no blocking findings -> land.
             _cursor(stage="land")
+            # LEAF-11-6 buildable-now slice: mirror of the source-base recheck
+            # below — re-read the plan vault HEAD and compare it to what the
+            # job started from. On movement, record one ``plan_moved`` ledger
+            # entry and continue the round normally: a stale plan projection
+            # is never itself an error that stops work (no classifier exists
+            # yet to warrant a rebind). Static vault -> no entry (avoid noise).
+            plan_before = cursor.get("plan_evidence_at_start")
+            if plan_before:
+                plan_now = _plan_vault_head(plan_vault_path)
+                if plan_now is not None and plan_now != plan_before:
+                    harness_ledger.append(task_id, "plan_moved", {
+                        "round": round_no,
+                        "plan_evidence_before": plan_before,
+                        "plan_evidence_after": plan_now,
+                    })
             try:
                 landed = harness_git.land_accepted_task(
                     task_id, repository=repository, worktree=worktree,
@@ -212,9 +269,12 @@ def run_task(
                 return {"outcome": "rebind_required", "task_id": task_id, "rounds": round_no, "detail": str(exc)}
 
             harness_ledger.append(task_id, "next_action", {"landed_commit": landed["commit"], "rounds": round_no})
+            landed_cursor: dict[str, Any] = {"landed_commit": landed["commit"], "rounds": round_no}
+            if cursor.get("plan_evidence_at_start"):
+                landed_cursor["plan_evidence_at_start"] = cursor["plan_evidence_at_start"]
             harness_ledger.write_cursor(
                 task_id, owner, lease,
-                cursor={"landed_commit": landed["commit"], "rounds": round_no},
+                cursor=landed_cursor,
                 status="done",
             )
             return {"outcome": "landed", "task_id": task_id, "rounds": round_no, **landed}
