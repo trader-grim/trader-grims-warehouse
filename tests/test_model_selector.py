@@ -224,3 +224,38 @@ def test_an_unreadable_observations_store_means_no_hold(monkeypatch):
     monkeypatch.setattr(ms.model_observations, "recent_status", boom)
     sel = ms.select_executor("implementation", availability=_HOLD_BASE)
     assert sel.executor == "opencode"  # fail open: garbage never blocks a dispatch
+
+
+# --------------------------------------------------------------------------- #
+# Todo 2013: DeepSeek retirement + OpenCode Go tier (committed-default pins)
+# --------------------------------------------------------------------------- #
+
+def test_committed_default_routes_implementation_to_opencode_with_go_tier():
+    """Fixture proving the selector picks the now-correct setup, not the stale
+    one: opencode first for implementation, with a quota-priced models_go tier
+    distinct from metered zen — and no deepseek-v4-pro anywhere in zen."""
+    data = ms.load_availability(ms._REPO_DEFAULT)
+    sel = ms.select_executor("implementation", availability=data)
+    assert sel.status == "SELECTED"
+    assert sel.executor == "opencode"
+    go = data["executors"]["opencode"]["models_go"]
+    assert go and any("deepseek-v4" in str(m) for m in go)
+    paid = data["executors"]["opencode"]["models_paid_via_zen"]
+    assert not any("deepseek-v4-pro" in str(m) for m in paid)
+    hints = data["roles"]["implementation"]["model"]
+    assert "flash" in hints["opencode_go"].lower()
+    assert "pro" not in hints["opencode_go"].lower()
+
+
+def test_committed_default_cost_policy_names_go_quota_and_nous_ceiling_gap():
+    """The cost policy must carry the Go quota shape (preferred ahead of
+    metered zen), the Nous $20 balance with its unenforceable-ceiling TODO,
+    and the dated DeepSeek retirement — with Antigravity deferred, not wired."""
+    data = ms.load_availability(ms._REPO_DEFAULT)
+    policy = data["cost_policy"]
+    assert "quota" in policy.lower()
+    assert "$20" in policy
+    assert "TODO" in policy
+    assert "2026-09-14" in policy
+    assert "Antigravity" in policy
+    assert "antigravity" not in {e.lower() for e in data["executors"]}

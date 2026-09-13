@@ -6,8 +6,11 @@ coding-appropriate model list through ``tgw.model_currency_adapter`` and
 updates two things in the existing availability file:
 
 * ``executors.<name>.available`` — for executors that name a provider path
-  (a ``models`` / ``models_free`` / ``models_paid_via_zen`` list), true iff
-  the live catalogue reaches that family, else false with a dated reason.
+  (a ``models`` / ``models_free`` / ``models_paid_via_zen`` / ``models_go``
+  list), true iff the live catalogue reaches that family, else false with a
+  dated reason. ``models_go`` (added 2026-09-12) is the quota-priced OpenCode
+  Go tier, which rides the same opencode CLI as zen and is matched the same
+  open-list way (no closed allowlist -- see ``_closed_ids``).
   Executors with no such list (e.g. ``manual``, the human fallback) have
   nothing for a live catalogue to confirm and are left alone.
 * ``roles.<role>.model`` hints — left exactly as written UNLESS the model id
@@ -80,7 +83,12 @@ def _reachable_for(executor_name: str, model: dict[str, Any], closed_ids: set[st
 
 
 def _has_provider_path(entry: dict[str, Any]) -> bool:
-    return bool(entry.get("models") or entry.get("models_free") or entry.get("models_paid_via_zen"))
+    return bool(
+        entry.get("models")
+        or entry.get("models_free")
+        or entry.get("models_paid_via_zen")
+        or entry.get("models_go")
+    )
 
 
 def _best_candidate(

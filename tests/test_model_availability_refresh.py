@@ -320,3 +320,54 @@ def test_receipt_appended_to_durable_receipts_file(tmp_path, monkeypatch, durabl
     assert len(lines) == 1
     logged = json.loads(lines[0])
     assert logged["schema"] == mar.SCHEMA == receipt["schema"]
+
+
+def test_models_go_list_counts_as_a_provider_path(tmp_path, monkeypatch, durable_path):
+    """The quota-priced OpenCode Go tier (models_go, added 2026-09-12) rides the
+    same opencode CLI as zen, so it is a list on the existing entry — and the
+    refresh must treat it as a provider path like the other three lists."""
+    live = [
+        {"provider": "opencode", "model_id": "opencode/deepseek-v4.1-flash",
+         "context": 262144, "tool_use": True, "free": False},
+    ]
+    monkeypatch.setattr(mar.model_currency_adapter, "live_coding_models", _fake_live(live))
+    data = _base_data()
+    data["executors"]["opencode"] = {
+        "available": False,
+        "reason": "stale reason",
+        "harness": "opencode CLI",
+        "models_go": ["opencode/deepseek-v4.1-flash"],
+    }
+    path = _write(tmp_path / "model-availability.json", data)
+
+    receipt = mar.refresh(path=path, receipts_path=durable_path / "receipts.jsonl")
+
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert after["executors"]["opencode"]["available"] is True
+    assert "reason" not in after["executors"]["opencode"]
+    assert [c for c in receipt["changed"] if c.get("executor") == "opencode"]
+
+
+def test_committed_default_prefers_flash_over_retired_v4_pro():
+    """Todo 2013: DeepSeek v4-Pro is retired 2026-09-14 (requests route to
+    v4.1-Flash at Flash rates) and v4.1-Flash now benchmarks above it — the
+    committed default must rank Flash first, not Pro."""
+    from pathlib import Path
+
+    repo_default = Path(__file__).resolve().parent.parent / "config" / "model-availability.json"
+    data = json.loads(repo_default.read_text(encoding="utf-8"))
+
+    paid = data["executors"]["opencode"]["models_paid_via_zen"]
+    assert not any("deepseek-v4-pro" in str(m) for m in paid)
+    go = data["executors"]["opencode"]["models_go"]
+    assert go and any("deepseek-v4" in str(m) for m in go)
+    research_bits = [
+        data["roles"]["implementation"]["research"],
+        data["roles"]["evidence_worker"]["research"],
+    ]
+    assert "best DeepSeek V4 Pro" not in data["roles"]["evidence_worker"]["research"]
+    assert "least DeepSeek V4 Pro" not in data["roles"]["implementation"]["research"]
+    assert all("V4.1 Flash" in r for r in research_bits)
+    assert "2026-09-14" in data["cost_policy"]
+    assert "opencode_go" in data["roles"]["implementation"]["model"]
+    assert "groq" in json.dumps(data["roles"]["implementation"]["model"]).lower()

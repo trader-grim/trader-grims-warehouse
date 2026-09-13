@@ -15,7 +15,10 @@ tgw.model_availability_refresh`) rewrites the availability file **in place**:
   `"no live model as of <date>"` reason) when the live catalogue no longer
   reaches that executor's provider path, and back to `true` when it does.
   Only executors that actually name a provider path (`models` /
-  `models_free` / `models_paid_via_zen`) are checked this way — `manual`, the
+  `models_free` / `models_paid_via_zen` / `models_go` — the last added
+  2026-09-12 for the quota-priced OpenCode Go tier, which rides the same
+  `opencode` CLI/binary as zen and is therefore a model list on the existing
+  `opencode` entry, not a new executor) are checked this way — `manual`, the
   human fallback, has no model family to confirm against a live catalogue and
   is left alone.
 - `roles.<role>.model` hints for roles with `consumed_by_selector: true`
@@ -119,3 +122,17 @@ selector currently sees with:
 ```
 python3 -c "from tgw import model_observations as m; print(m.recent_status('opencode'))"
 ```
+
+## Manual catch-ups the daily job cannot do (2026-09-12 note)
+
+The live sources under `tools/model-currency/model_currency/sources/`
+(`groq.py`, `models_dev.py`, `openrouter.py`) structurally cannot discover
+Nous, OpenCode Go, or Antigravity — config changes for those providers are a
+manual/one-time catch-up (Todo 2013 did the 2026-09-12 round: DeepSeek
+v4-Pro retirement + v4.1-Flash reordering, the `models_go` list, the Nous $20
+ceiling TODO, the confirmed `groq/*` alternate, Antigravity explicitly
+deferred for lack of a headless/CLI path), not something this job maintains.
+Adding real source modules for those providers so future changes get caught
+automatically is follow-on work. `cost_policy` / `research` / `note` prose —
+including the new quota-vs-metered cost dimension — is never touched by a run;
+only `available`, `model` hints, and `updated` move.
